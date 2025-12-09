@@ -181,7 +181,7 @@ from datetime import datetime
 class WJReaderThread(QThread):
     new_data = pyqtSignal(float, float, float)   # time, kV, mA
 
-    def __init__(self, wj, poll_interval=0.2):
+    def __init__(self, wj, poll_interval=0.05):
         super().__init__()
         self.wj = wj
         self.poll_interval = poll_interval

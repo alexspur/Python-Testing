@@ -141,6 +141,18 @@ class ScopeDelayMainWindow(QMainWindow):
             last_port = self.conn.get(f"WJ{i+1}_COM", None)
             if last_port and last_port in ports:
                 row.port_combo.setCurrentText(last_port)
+
+        # Mirror ports into SF6 window duplicates
+        if hasattr(self, "sf6_window") and hasattr(self.sf6_window, "wj_port_combos"):
+            for i, combo in enumerate(self.sf6_window.wj_port_combos):
+                combo.blockSignals(True)
+                combo.clear()
+                combo.addItems(ports)
+
+                last_port = self.conn.get(f"WJ{i+1}_COM", None)
+                if last_port and last_port in ports:
+                    combo.setCurrentText(last_port)
+                combo.blockSignals(False)
     
 
     def start_wj_readers(self):
@@ -169,6 +181,18 @@ class ScopeDelayMainWindow(QMainWindow):
 
         # Normalize time to shared reference
         t = time.time() - self.wj_start_time
+
+        # Update live numeric readouts in SF6 window
+        if hasattr(self, "sf6_window"):
+            try:
+                if unit_index == 0:
+                    self.sf6_window.kv1_value.setText(f"{kv:.2f} kV")
+                    self.sf6_window.ma1_value.setText(f"{ma:.2f} mA")
+                elif unit_index == 1:
+                    self.sf6_window.kv2_value.setText(f"{kv:.2f} kV")
+                    self.sf6_window.ma2_value.setText(f"{ma:.2f} mA")
+            except Exception:
+                pass
 
         # Log WJ data (we don't have HV status here, so pass False for now)
         # The WJReaderThread only gets kV and mA, not HV status
@@ -221,35 +245,38 @@ class ScopeDelayMainWindow(QMainWindow):
         from PyQt6.QtGui import QGuiApplication
 
         screens = QGuiApplication.screens()
-
-        # Main window on primary screen
-        if len(screens) > 0:
-            primary_geo = screens[0].geometry()
-            self.move(primary_geo.x() + 50, primary_geo.y() + 50)
-
-        # Left monitor - SF6 window (now includes WJ plots)
-        if len(screens) > 1:
-            left_screen = screens[1]  # Adjust index based on your setup
-            left_geo = left_screen.geometry()
-            self.sf6_window.setScreen(left_screen)
-            self.sf6_window.move(left_geo.x(), left_geo.y())
+        if not screens:
+            # Fallback: just show windows normally
+            self.scope_window.showMaximized()
             self.sf6_window.showMaximized()
-        else:
-            # Fallback to primary screen
-            self.sf6_window.showMaximized()
+            return
 
-        # Right monitor - Scope window
-        if len(screens) > 2:
-            right_screen = screens[2]  # Adjust index based on your setup
-            self.scope_window.setScreen(right_screen)
-            self.scope_window.showMaximized()
-        elif len(screens) > 1:
-            # Fallback: use primary screen if only 2 monitors
-            self.scope_window.setScreen(screens[0])
-            self.scope_window.showMaximized()
+        # Sort screens left-to-right by x coordinate
+        screens_sorted = sorted(screens, key=lambda s: s.geometry().x())
+
+        # Assign based on physical layout: left (vertical) -> SF6, middle -> main window, right -> scope
+        if len(screens_sorted) >= 3:
+            left_screen, middle_screen, right_screen = screens_sorted[:3]
+        elif len(screens_sorted) == 2:
+            left_screen, right_screen = screens_sorted
+            middle_screen = left_screen  # fallback: place main on left if only two
         else:
-            # Single monitor: just maximize on primary
-            self.scope_window.showMaximized()
+            left_screen = middle_screen = right_screen = screens_sorted[0]
+
+        # Main window on middle screen
+        self.setScreen(middle_screen)
+        mid_geo = middle_screen.geometry()
+        self.move(mid_geo.x() + 50, mid_geo.y() + 50)
+
+        # SF6 window on left screen
+        self.sf6_window.setScreen(left_screen)
+        self.sf6_window.move(left_screen.geometry().topLeft())
+        self.sf6_window.showMaximized()
+
+        # Scope window on right screen
+        self.scope_window.setScreen(right_screen)
+        self.scope_window.move(right_screen.geometry().topLeft())
+        self.scope_window.showMaximized()
 
     def build_scope_controls(self, main_layout):
         layout = QHBoxLayout()
@@ -510,6 +537,24 @@ class ScopeDelayMainWindow(QMainWindow):
             physical_do = sf6_output_map[gui_i]
             sw.stateChanged.connect(lambda on, do=physical_do:
                         self.on_sf6_switch_changed(do, 1 if on else 0))
+
+        # Duplicate WJ controls under the plot
+        sw = self.sf6_window
+        sw.btn_apply_program.clicked.connect(
+            lambda: self.on_wj_set_voltage(sw.program_voltage.value(), sw.program_current.value())
+        )
+        sw.btn_hv_on.clicked.connect(self.on_wj_hv_on)
+        sw.btn_hv_off.clicked.connect(self.on_wj_hv_off)
+        sw.btn_reset.clicked.connect(self.on_wj_reset)
+        sw.btn_read.clicked.connect(self.on_wj_read)
+
+        for i in range(len(sw.wj_port_combos)):
+            sw.btn_wj_connect[i].clicked.connect(
+                lambda _, idx=i: self.on_wj_connect(idx, sw.wj_port_combos[idx].currentText())
+            )
+            sw.btn_wj_disconnect[i].clicked.connect(
+                lambda _, idx=i: self.on_wj_disconnect(idx)
+            )
 
         # If Arduino connected during auto-connect:
         if hasattr(self.arduino, "serial") and self.arduino.serial:
@@ -1109,6 +1154,10 @@ class ScopeDelayMainWindow(QMainWindow):
             self.error_popup("Arduino", "No COM ports found.")
             return
         try:
+            # ensure previous stream is stopped cleanly
+            if hasattr(self, "arduino_stream") and self.arduino_stream:
+                self.arduino_stream.stop()
+                self.arduino_stream = None
             self.set_status("yellow", f"Connecting Arduino on {port}...")
             self.arduino.connect(port)
             save_memory("Arduino_COM", port)
@@ -1185,9 +1234,13 @@ class ScopeDelayMainWindow(QMainWindow):
     #     except Exception as e:
     #         self.set_status("red", "WJ connection failed")
     #         self.error_popup("WJ HV Supply", str(e))
-    def on_wj_connect(self, index):
+    def on_wj_connect(self, index, port_override=None):
         row = self.wj_panel.rows[index]
-        port = row.port_combo.currentText()
+        port = port_override or row.port_combo.currentText()
+
+        # keep main panel combo in sync if override was used
+        if port_override:
+            row.port_combo.setCurrentText(port)
 
         if port == "No COM ports":
             self.log(f"[WJ{index+1}] No ports available")
@@ -1207,9 +1260,10 @@ class ScopeDelayMainWindow(QMainWindow):
 
     def on_arduino_disconnect(self):
         try:
-            self.arduino.close()
             if hasattr(self, "arduino_stream"):
                 self.arduino_stream.stop()
+                self.arduino_stream = None
+            self.arduino.close()
         except:
             pass
 
@@ -1283,9 +1337,11 @@ class ScopeDelayMainWindow(QMainWindow):
     #         self.set_status("green", "WJ Program Set")
     #     except Exception as e:
     #         self.error_popup("WJ Voltage Error", str(e))
-    def on_wj_set_voltage(self):
-        kv = self.wj_panel.voltage.value()
-        ma = self.wj_panel.current.value()
+    def on_wj_set_voltage(self, kv=None, ma=None):
+        if kv is None:
+            kv = self.wj_panel.voltage.value()
+        if ma is None:
+            ma = self.wj_panel.current.value()
 
         for i, wj in enumerate(self.wj_units):
             try:

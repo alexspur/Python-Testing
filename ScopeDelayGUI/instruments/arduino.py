@@ -41,14 +41,15 @@ class ArduinoController:
     def serial(self):
         return self.ser
 
-    def connect(self, port: str, baudrate: int = 9600):
+    def connect(self, port: str, baudrate: int = 115200):
         if self.ser and self.ser.is_open:
             self.ser.close()
 
         self.ser = serial.Serial(
             port=port,
             baudrate=baudrate,
-            timeout=0.1
+            timeout=0.1,
+            write_timeout=0.1
         )
         time.sleep(1.0)
         self.ser.reset_input_buffer()

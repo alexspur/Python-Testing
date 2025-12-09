@@ -303,9 +303,11 @@ class ScopePlotWindow(QWidget):
         # Style for all three plots
         for plot in [self.plot1, self.plot2, self.plot3]:
             # Apply font to axes
-            plot.getAxis('left').setStyle(tickFont=font)
-            plot.getAxis('bottom').setStyle(tickFont=font)
-            plot.getAxis('right').setStyle(tickFont=font)
+            for axis_name in ('left', 'bottom', 'right'):
+                axis = plot.getAxis(axis_name)
+                axis.setStyle(tickFont=font)
+                axis.setPen('k')
+                axis.setTextPen('k')
 
             # Apply font to axis labels
             plot.setLabel('left', 'CH1 (V)', **{'font-size': '12pt', 'font-family': 'Times New Roman', 'font-weight': 'bold'})

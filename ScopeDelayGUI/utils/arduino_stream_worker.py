@@ -10,6 +10,7 @@ class ArduinoStreamWorker(QThread):
         super().__init__()
         self.arduino = arduino
         self.running = True
+        self.poll_interval = 0.002  # seconds
 
     def run(self):
         try:
@@ -20,15 +21,22 @@ class ArduinoStreamWorker(QThread):
 
                 line = self.arduino.serial.readline().decode(errors="ignore").strip()
 
-                # Expect format: AI,<ch0>,<ch1>,<ch2>
+                # Expect format: AI,<count>,<ch0>,<ch1>,<ch2> (count optional)
                 if line.startswith("AI,"):
                     try:
-                        _, c0, c1, c2 = line.split(",")
+                        parts = line.split(",")
+                        if len(parts) == 4:
+                            _, c0, c1, c2 = parts
+                        elif len(parts) >= 5:
+                            _, _, c0, c1, c2 = parts[:5]
+                        else:
+                            continue
+
                         self.data_signal.emit(float(c0), float(c1), float(c2))
-                    except:
+                    except Exception:
                         pass
 
-                time.sleep(0.002)
+                time.sleep(self.poll_interval)
 
         except Exception as e:
             self.error_signal.emit(str(e))

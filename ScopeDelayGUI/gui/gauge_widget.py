@@ -17,7 +17,7 @@ class GaugeWidget(QWidget):
 
         self.text_label = QLabel(f"0 {label}")
         self.text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.text_label.setStyleSheet("font-size: 16px; font-weight: bold; color: white;")
+        self.text_label.setStyleSheet("font-size: 16px; font-weight: bold; color: black;")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
