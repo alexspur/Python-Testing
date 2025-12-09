@@ -169,6 +169,8 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton
 from PyQt6.QtCore import QThread, pyqtSignal
 import pyqtgraph as pg
 import time
+import csv
+from datetime import datetime
 
 
 
@@ -204,20 +206,20 @@ class WJReaderThread(QThread):
         self.wait()
 
 class WJPlotWindow(QWidget):
-    def __init__(self, wj_units):
+    def __init__(self, wj_units, data_logger=None):
         """
         wj_units = [WJ1, WJ2]
+        data_logger = DataLogger instance (optional)
         """
         super().__init__()
         self.setWindowTitle("WJ Live Voltage / Current Monitor (Both Units)")
         self.resize(900, 550)
 
         self.wj_units = wj_units   # list of WJPowerSupply objects
+        self.data_logger = data_logger  # Optional data logger
 
         layout = QVBoxLayout()
         self.setLayout(layout)
-        import csv
-        from datetime import datetime
 
         self.log_data = []   # List of tuples: (timestamp, wj_index, kv, ma)
         # Export button
@@ -272,6 +274,12 @@ class WJPlotWindow(QWidget):
         # Normalize time to shared reference
         t = time.time() - self.start_time
         self.log_data.append((t, unit_index, kv, ma))
+
+        # Log to main data logger if available
+        if self.data_logger:
+            # Note: we don't have HV status here, so we pass False
+            # The main window's on_wj_read will log full status
+            pass  # Already logged by main window's on_wj_read
 
         self.t_buf.append(t)
 

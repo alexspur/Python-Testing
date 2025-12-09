@@ -48,6 +48,8 @@ class ScopeDelayMainWindow(QMainWindow):
 
         # Initialize data logger
         self.data_logger = DataLogger()
+        print(f"[DATA LOGGER] Logging to: {self.data_logger.get_log_file_path()}")
+
         # --- instruments ---
         self.dg = DG535Controller()
         self.bnc = BNC575Controller()
@@ -112,10 +114,13 @@ class ScopeDelayMainWindow(QMainWindow):
 
         # Create plot windows
         self.scope_window = ScopePlotWindow(parent=self)
-        self.wj_plot_window = WJPlotWindow(self.wj_units)
+        self.wj_plot_window = WJPlotWindow(self.wj_units, data_logger=self.data_logger)
 
         # Position and show all windows on startup
         self.position_and_show_windows()
+
+        # Log the data file location
+        self.log(f"[DATA LOGGER] Saving to: {self.data_logger.get_log_file_path()}")
 
         
     def refresh_wj_ports(self):
@@ -866,14 +871,18 @@ class ScopeDelayMainWindow(QMainWindow):
         try:
             if self.rigol1_connected:
                 self.rigol1.inst.write(":STOP;:SINGLE")
+                self.data_logger.log_scope_arm(1)
             if self.rigol2_connected:
                 self.rigol2.inst.write(":STOP;:SINGLE")
+                self.data_logger.log_scope_arm(2)
             if self.rigol3_connected:
                 self.rigol3.inst.write(":STOP;:SINGLE")
+                self.data_logger.log_scope_arm(3)
 
             self.log("[CAPTURE] Rigols set to SINGLE")
         except Exception as e:
             self.error_popup("Rigol Error", f"Failed to arm scopes: {e}")
+            self.data_logger.log_error("SCOPE", str(e))
             return
 
         # Allow scopes to settle into WAIT mode
@@ -884,9 +893,11 @@ class ScopeDelayMainWindow(QMainWindow):
         # -------------------------------------------
         try:
             self.bnc.arm_external_trigger(level=3.0)
+            self.data_logger.log_bnc575_arm(3.0)
             self.log("[BNC575] Armed for external trigger")
         except Exception as e:
             self.error_popup("BNC575 Error", str(e))
+            self.data_logger.log_error("BNC575", str(e))
             return
 
         # -------------------------------------------
@@ -896,9 +907,11 @@ class ScopeDelayMainWindow(QMainWindow):
             delayA = self.dg_panel.delayA.value()
             widthA = self.dg_panel.widthA.value()
             self.dg.configure_pulse_A(delayA, widthA)
+            self.data_logger.log_dg535_config(delayA, widthA)
             self.dg.set_single_shot()
         except Exception as e:
             self.error_popup("DG535 Error", str(e))
+            self.data_logger.log_error("DG535", str(e))
             return
 
         # Small delay before firing
@@ -910,9 +923,11 @@ class ScopeDelayMainWindow(QMainWindow):
         self.log("[CAPTURE] Firing DG535...")
         try:
             self.dg.fire()
+            self.data_logger.log_dg535_pulse(delayA, widthA)
             self.log("[DG535] Trigger pulse fired.")
         except Exception as e:
             self.error_popup("DG535 Fire Error", str(e))
+            self.data_logger.log_error("DG535", str(e))
             return
 
         # Wait for scopes to acquire
@@ -923,41 +938,23 @@ class ScopeDelayMainWindow(QMainWindow):
         # -------------------------------------------
         self.set_status("yellow", "Capturing waveforms...")
 
-        # if self.rigol1_connected:
-        #     try:
-        #         (t1, v1), (t2, v2) = self.rigol1.wait_and_capture()
-        #         self.scope_window.plot1.plot(t1, v1, pen="r")
-        #         self.scope_window.plot1.plot(t2, v2, pen="b")
-        #     except Exception as e:
-        #         self.log(f"[Rigol1 ERROR] {e}")
-
-        # if self.rigol2_connected:
-        #     try:
-        #         (t1, v1), (t2, v2) = self.rigol2.wait_and_capture()
-        #         self.scope_window.plot2.plot(t1, v1, pen="r")
-        #         self.scope_window.plot2.plot(t2, v2, pen="b")
-        #     except Exception as e:
-        #         self.log(f"[Rigol2 ERROR] {e}")
-
-        # if self.rigol3_connected:
-        #     try:
-        #         (t1, v1), (t2, v2) = self.rigol3.wait_and_capture()
-        #         self.scope_window.plot3.plot(t1, v1, pen="r")
-        #         self.scope_window.plot3.plot(t2, v2, pen="b")
-        #     except Exception as e:
-        #         self.log(f"[Rigol3 ERROR] {e}")
         if self.rigol1_connected:
             (t1, v1), (t2, v2) = self.rigol1.wait_and_capture()
             self.scope_window.update_r1(t1, v1, t2, v2)
+            self.data_logger.log_scope_capture(1, len(t1), len(t2))
 
         if self.rigol2_connected:
             (t1, v1), (t2, v2) = self.rigol2.wait_and_capture()
             self.scope_window.update_r2(t1, v1, t2, v2)
+            self.data_logger.log_scope_capture(2, len(t1), len(t2))
 
         if self.rigol3_connected:
             (t1, v1), (t2, v2) = self.rigol3.wait_and_capture()
             self.scope_window.update_r3(t1, v1, t2, v2)
+            self.data_logger.log_scope_capture(3, len(t1), len(t2))
 
+        # Log master capture event
+        self.data_logger.log_scope_all_capture()
 
         self.set_status("green", "Capture complete")
         self.log("[CAPTURE] Done.")
@@ -1070,6 +1067,9 @@ class ScopeDelayMainWindow(QMainWindow):
         psi1 = mA_to_psi(ch1)
         psi2 = mA_to_psi(ch2)
 
+        # Log Arduino data
+        self.data_logger.log_arduino_psi(psi0, psi1, psi2)
+
         sf6_panel = self.sf6_window.sf6_panel
         sf6_panel.ai_ch0.update_value(psi0)
         sf6_panel.ai_ch1.update_value(psi1)
@@ -1077,8 +1077,6 @@ class ScopeDelayMainWindow(QMainWindow):
 
 
     def on_sf6_switch_changed(self, index: int, state: int):
-    # def on_sf6_switch_changed(self, index: int, state: int):
-    # print(f"[DEBUG] GUI switch triggered → index={index}, state={state}")
         """index = 0..7, mapping to channels 0..7 like your MATLAB app."""
         try:
             if state:  # checked
@@ -1086,9 +1084,11 @@ class ScopeDelayMainWindow(QMainWindow):
             else:
                 cmd = f"off {index}"
             self.arduino.send(cmd)
+            self.data_logger.log_arduino_switch(index, state)
             self.log(f"[Arduino] {cmd}")
         except Exception as e:
             self.log(f"[Arduino ERROR] {e}")
+            self.data_logger.log_error("Arduino", str(e))
             self.error_popup("Arduino Send Error", str(e))
 
 
@@ -1157,9 +1157,11 @@ class ScopeDelayMainWindow(QMainWindow):
         for i, wj in enumerate(self.wj_units):
             try:
                 resp = wj.hv_on_pulse()
+                self.data_logger.log_wj_command(i+1, "HV_ON")
                 self.log(f"[WJ{i+1}] HV ON → {resp}")
             except Exception as e:
                 self.log(f"[WJ{i+1} ERROR] {e}")
+                self.data_logger.log_error(f"WJ{i+1}", str(e))
 
     # def on_wj_hv_off(self):
     #     try:
@@ -1172,9 +1174,11 @@ class ScopeDelayMainWindow(QMainWindow):
         for i, wj in enumerate(self.wj_units):
             try:
                 resp = wj.hv_off_pulse()
+                self.data_logger.log_wj_command(i+1, "HV_OFF")
                 self.log(f"[WJ{i+1}] HV OFF → {resp}")
             except Exception as e:
                 self.log(f"[WJ{i+1} ERROR] {e}")
+                self.data_logger.log_error(f"WJ{i+1}", str(e))
 
 
 
@@ -1189,9 +1193,11 @@ class ScopeDelayMainWindow(QMainWindow):
         for i, wj in enumerate(self.wj_units):
             try:
                 wj.reset_pulse()
+                self.data_logger.log_wj_command(i+1, "RESET")
                 self.log(f"[WJ{i+1}] Reset OK")
             except Exception as e:
                 self.log(f"[WJ{i+1} ERROR] {e}")
+                self.data_logger.log_error(f"WJ{i+1}", str(e))
 
     # def on_wj_set_voltage(self):
     #     try:
@@ -1209,9 +1215,11 @@ class ScopeDelayMainWindow(QMainWindow):
         for i, wj in enumerate(self.wj_units):
             try:
                 resp = wj.set_program(kv, ma)
+                self.data_logger.log_wj_command(i+1, "SET_PROGRAM", f"{kv}kV_{ma}mA")
                 self.log(f"[WJ{i+1}] Set → {kv} kV, {ma} mA ({resp})")
             except Exception as e:
                 self.log(f"[WJ{i+1} ERROR] {e}")
+                self.data_logger.log_error(f"WJ{i+1}", str(e))
 
 
     # def on_wj_disconnect(self):
@@ -1273,6 +1281,9 @@ class ScopeDelayMainWindow(QMainWindow):
                 hv = data.get("hv_on", False)
                 fault = data.get("fault", False)
 
+                # Log WJ voltage/current data
+                self.data_logger.log_wj_voltage(i+1, kv, ma, hv, fault)
+
                 # Update label for this WJ
                 row.label_status.setText(
                     f"{kv:.2f} kV | {ma:.3f} mA | "
@@ -1282,6 +1293,7 @@ class ScopeDelayMainWindow(QMainWindow):
 
             except Exception as e:
                 self.log(f"[WJ{i+1} ERROR] {e}")
+                self.data_logger.log_error(f"WJ{i+1}", str(e))
                 row = self.wj_panel.rows[i]
                 row.label_status.setText("Read Error")
 
