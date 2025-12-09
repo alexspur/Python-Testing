@@ -2,7 +2,7 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QPushButton, QSizePolicy, QGridLayout,
 )
-from PyQt6.QtCore import QThread
+from PyQt6.QtCore import QThread, Qt
 
 
 
@@ -96,8 +96,8 @@ class ScopeDelayMainWindow(QMainWindow):
         self.build_scope_controls(main_layout)
         self.refresh_wj_ports()
 
-        # Create SF6 window as separate window (now includes WJ plots)
-        self.sf6_window = SF6Window(parent=self)
+        # Create SF6 window as separate top-level window (now includes WJ plots)
+        self.sf6_window = SF6Window()
 
 
         # Load remembered connection info
@@ -227,31 +227,29 @@ class ScopeDelayMainWindow(QMainWindow):
             primary_geo = screens[0].geometry()
             self.move(primary_geo.x() + 50, primary_geo.y() + 50)
 
-        # Left vertical monitor - SF6 window (now includes WJ plots)
+        # Left monitor - SF6 window (now includes WJ plots)
         if len(screens) > 1:
             left_screen = screens[1]  # Adjust index based on your setup
             left_geo = left_screen.geometry()
-
-            # Position SF6 window full screen on left monitor
+            self.sf6_window.setScreen(left_screen)
             self.sf6_window.move(left_geo.x(), left_geo.y())
-            self.sf6_window.resize(left_geo.width(), left_geo.height())
+            self.sf6_window.showMaximized()
+        else:
+            # Fallback to primary screen
+            self.sf6_window.showMaximized()
 
-        # Right monitor - Scope window (full screen)
+        # Right monitor - Scope window
         if len(screens) > 2:
             right_screen = screens[2]  # Adjust index based on your setup
-            right_geo = right_screen.geometry()
-            self.scope_window.move(right_geo.x(), right_geo.y())
-            self.scope_window.resize(right_geo.width(), right_geo.height())
+            self.scope_window.setScreen(right_screen)
+            self.scope_window.showMaximized()
         elif len(screens) > 1:
             # Fallback: use primary screen if only 2 monitors
-            right_screen = screens[0]
-            right_geo = right_screen.geometry()
-            self.scope_window.move(right_geo.x() + right_geo.width() - 900, right_geo.y() + 50)
-            self.scope_window.resize(900, 700)
-
-        # Show all windows
-        self.scope_window.show()
-        self.sf6_window.show()
+            self.scope_window.setScreen(screens[0])
+            self.scope_window.showMaximized()
+        else:
+            # Single monitor: just maximize on primary
+            self.scope_window.showMaximized()
 
     def build_scope_controls(self, main_layout):
         layout = QHBoxLayout()

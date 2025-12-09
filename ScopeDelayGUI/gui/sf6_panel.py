@@ -1,11 +1,10 @@
-# gui/sf6_panel.py
 from PyQt6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton,
     QGridLayout
 )
+from PyQt6.QtCore import Qt
 from utils.status_lamp import StatusLamp
-from utils.rotary_knob import RotaryKnobSwitch   # ⭐ ADD THIS
-from gui.analog_display import AnalogDisplay
+from utils.rotary_knob import RotaryKnobSwitch
 from gui.gauge_widget import GaugeWidget
 
 
@@ -14,61 +13,47 @@ class SF6Panel(QGroupBox):
         super().__init__("SF6 Marx Generator Control")
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.setLayout(layout)
         
-        # ⭐ Arduino connection status
+        # Arduino connection status
         self.lamp = StatusLamp(size=14)
         layout.addWidget(self.lamp)
 
-        # Arduino Connect
+        # Arduino connect row (compact single row)
         row = QHBoxLayout()
+        row.setSpacing(6)
         self.label = QLabel("COM Port:")
         self.port_list = QComboBox()
-        self.btn_connect = QPushButton("Connect Arduino")
-        self.btn_disconnect = QPushButton("Disconnect Arduino")
-        layout.addWidget(self.btn_disconnect)
-        layout.addWidget(self.btn_connect)
+        self.btn_connect = QPushButton("Connect")
+        self.btn_disconnect = QPushButton("Disconnect")
         row.addWidget(self.label)
         row.addWidget(self.port_list)
         row.addWidget(self.btn_connect)
+        row.addWidget(self.btn_disconnect)
         layout.addLayout(row)
+
+        # Analog live readout
+        self.label_ai = QLabel("Live Analog Inputs (4-20 mA):")
+        layout.addWidget(self.label_ai)
+
+        # Gauges side by side to minimize height
+        gauges = QHBoxLayout()
+        gauges.setSpacing(12)
+        self.ai_ch0 = GaugeWidget(label="PSI", size=120)
+        self.ai_ch1 = GaugeWidget(label="PSI", size=120)
+        self.ai_ch2 = GaugeWidget(label="PSI", size=120)
+        gauges.addWidget(self.ai_ch0)
+        gauges.addWidget(self.ai_ch1)
+        gauges.addWidget(self.ai_ch2)
+        layout.addLayout(gauges)
 
         # Marx switches
         grid = QGridLayout()
-        # -------------------------
-        # ANALOG LIVE READOUT
-        # -------------------------
-        self.label_ai = QLabel("Live Analog Inputs (4–20 mA):")
-        layout.addWidget(self.label_ai)
-
-        # self.ai_ch0 = AnalogDisplay("Channel 0")
-        # self.ai_ch1 = AnalogDisplay("Channel 1")
-        # self.ai_ch2 = AnalogDisplay("Channel 2")
-
-        # layout.addWidget(self.ai_ch0)
-        # layout.addWidget(self.ai_ch1)
-        # layout.addWidget(self.ai_ch2)
-        self.ai_ch0 = GaugeWidget(label="PSI", size=180)
-        self.ai_ch1 = GaugeWidget(label="PSI", size=180)
-        self.ai_ch2 = GaugeWidget(label="PSI", size=180)
-
-
-        layout.addWidget(self.ai_ch0)
-        layout.addWidget(self.ai_ch1)
-        layout.addWidget(self.ai_ch2)
-        # self.switches = []
-
-        # names = [
-        #     "Marx1 Supply", "Marx1 Return",
-        #     "Marx2 Supply", "Marx2 Return",
-        #     "Marx3 Supply", "Marx3 Return",
-        #     "Marx4 Supply", "Marx4 Return"
-        # ]
-
-        # for i, name in enumerate(names):
-        #     sw = QCheckBox(name)
-        #     self.switches.append(sw)
-        #     grid.addWidget(sw, i // 2, i % 2)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
         self.switches = []
         names = [
             "Marx1 Supply", "Marx1 Return",
@@ -78,9 +63,9 @@ class SF6Panel(QGroupBox):
         ]
 
         for i, name in enumerate(names):
-            knob = RotaryKnobSwitch(label=name, size=40)
+            knob = RotaryKnobSwitch(label=name, size=36)
             self.switches.append(knob)
             grid.addWidget(knob, i // 2, i % 2)
 
-
         layout.addLayout(grid)
+        layout.addStretch(1)
