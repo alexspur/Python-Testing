@@ -48,7 +48,6 @@ class ScopeDelayMainWindow(QMainWindow):
 
         # Initialize data logger
         self.data_logger = DataLogger()
-        print(f"[DATA LOGGER] Logging to: {self.data_logger.get_log_file_path()}")
 
         # --- instruments ---
         self.dg = DG535Controller()
@@ -97,12 +96,12 @@ class ScopeDelayMainWindow(QMainWindow):
         self.build_scope_controls(main_layout)
         self.refresh_wj_ports()
 
-        # Create SF6 window as separate window
+        # Create SF6 window as separate window (now includes WJ plots)
         self.sf6_window = SF6Window(parent=self)
 
 
         # Load remembered connection info
-        
+
 
         # Attempt auto-connect
         self.auto_connect_all()
@@ -112,15 +111,20 @@ class ScopeDelayMainWindow(QMainWindow):
         # Connect SF6 window controls
         self.connect_sf6_window()
 
-        # Create plot windows
+        # Create scope plot window
         self.scope_window = ScopePlotWindow(parent=self)
-        self.wj_plot_window = WJPlotWindow(self.wj_units, data_logger=self.data_logger)
+
+        # Start WJ reader threads and connect to SF6 window plot
+        self.start_wj_readers()
 
         # Position and show all windows on startup
         self.position_and_show_windows()
 
         # Log the data file location
         self.log(f"[DATA LOGGER] Saving to: {self.data_logger.get_log_file_path()}")
+
+        # Write a test log entry to verify logging is working
+        self.data_logger.log_info("SYSTEM", "GUI started successfully")
 
         
     def refresh_wj_ports(self):
@@ -139,6 +143,79 @@ class ScopeDelayMainWindow(QMainWindow):
                 row.port_combo.setCurrentText(last_port)
     
 
+    def start_wj_readers(self):
+        """Start WJ reader threads and connect to SF6 window plot"""
+        from gui.wj_plot_window import WJReaderThread
+        import time
+
+        self.wj_workers = []
+        self.wj_start_time = time.time()
+        self.wj_t_buf = []
+        self.wj_kv1_buf = []
+        self.wj_ma1_buf = []
+        self.wj_kv2_buf = []
+        self.wj_ma2_buf = []
+        self.wj_max_points = 500
+
+        for idx, wj in enumerate(self.wj_units):
+            worker = WJReaderThread(wj)
+            worker.new_data.connect(lambda t, kv, ma, i=idx: self.handle_wj_plot_data(i, t, kv, ma))
+            worker.start()
+            self.wj_workers.append(worker)
+
+    def handle_wj_plot_data(self, unit_index, t, kv, ma):
+        """Handle incoming WJ data for plotting in SF6 window"""
+        import time
+
+        # Normalize time to shared reference
+        t = time.time() - self.wj_start_time
+
+        # Log WJ data (we don't have HV status here, so pass False for now)
+        # The WJReaderThread only gets kV and mA, not HV status
+        try:
+            self.data_logger.log_wj_voltage(unit_index + 1, kv, ma, hv_on=False, fault=False)
+        except Exception as e:
+            self.log(f"[DataLogger ERROR] Failed to log WJ{unit_index+1} plot data: {e}")
+
+        # Store data with separate time arrays for each unit
+        # Unit 1
+        if unit_index == 0:
+            # Ensure we have matching arrays by using separate time buffer for unit 1
+            if not hasattr(self, 'wj_t1_buf'):
+                self.wj_t1_buf = []
+            self.wj_t1_buf.append(t)
+            self.wj_kv1_buf.append(kv)
+            self.wj_ma1_buf.append(ma)
+
+            # Rolling window for unit 1
+            if len(self.wj_t1_buf) > self.wj_max_points:
+                self.wj_t1_buf = self.wj_t1_buf[-self.wj_max_points:]
+                self.wj_kv1_buf = self.wj_kv1_buf[-self.wj_max_points:]
+                self.wj_ma1_buf = self.wj_ma1_buf[-self.wj_max_points:]
+
+            # Update curves for unit 1
+            self.sf6_window.kv1_curve.setData(self.wj_t1_buf, self.wj_kv1_buf)
+            self.sf6_window.ma1_curve.setData(self.wj_t1_buf, self.wj_ma1_buf)
+
+        # Unit 2
+        elif unit_index == 1:
+            # Ensure we have matching arrays by using separate time buffer for unit 2
+            if not hasattr(self, 'wj_t2_buf'):
+                self.wj_t2_buf = []
+            self.wj_t2_buf.append(t)
+            self.wj_kv2_buf.append(kv)
+            self.wj_ma2_buf.append(ma)
+
+            # Rolling window for unit 2
+            if len(self.wj_t2_buf) > self.wj_max_points:
+                self.wj_t2_buf = self.wj_t2_buf[-self.wj_max_points:]
+                self.wj_kv2_buf = self.wj_kv2_buf[-self.wj_max_points:]
+                self.wj_ma2_buf = self.wj_ma2_buf[-self.wj_max_points:]
+
+            # Update curves for unit 2
+            self.sf6_window.kv2_curve.setData(self.wj_t2_buf, self.wj_kv2_buf)
+            self.sf6_window.ma2_curve.setData(self.wj_t2_buf, self.wj_ma2_buf)
+
     def position_and_show_windows(self):
         """Position windows on appropriate monitors and show them"""
         from PyQt6.QtGui import QGuiApplication
@@ -150,46 +227,34 @@ class ScopeDelayMainWindow(QMainWindow):
             primary_geo = screens[0].geometry()
             self.move(primary_geo.x() + 50, primary_geo.y() + 50)
 
-        # Left vertical monitor (assume it's screen index 1 or leftmost)
-        # Position scope and WJ plot windows here
+        # Left vertical monitor - SF6 window (now includes WJ plots)
         if len(screens) > 1:
             left_screen = screens[1]  # Adjust index based on your setup
             left_geo = left_screen.geometry()
 
-            # Position scope window on left monitor
-            self.scope_window.move(left_geo.x(), left_geo.y())
-            self.scope_window.resize(left_geo.width(), left_geo.height() // 2)
+            # Position SF6 window full screen on left monitor
+            self.sf6_window.move(left_geo.x(), left_geo.y())
+            self.sf6_window.resize(left_geo.width(), left_geo.height())
 
-            # Position WJ plot window below scope window
-            self.wj_plot_window.move(left_geo.x(), left_geo.y() + left_geo.height() // 2)
-            self.wj_plot_window.resize(left_geo.width(), left_geo.height() // 2)
-
-        # Right monitor for SF6 window (assume it's screen index 2 or rightmost)
+        # Right monitor - Scope window (full screen)
         if len(screens) > 2:
             right_screen = screens[2]  # Adjust index based on your setup
             right_geo = right_screen.geometry()
-            self.sf6_window.move(right_geo.x() + 50, right_geo.y() + 50)
+            self.scope_window.move(right_geo.x(), right_geo.y())
+            self.scope_window.resize(right_geo.width(), right_geo.height())
         elif len(screens) > 1:
             # Fallback: use primary screen if only 2 monitors
             right_screen = screens[0]
             right_geo = right_screen.geometry()
-            self.sf6_window.move(right_geo.x() + right_geo.width() - 650, right_geo.y() + 50)
+            self.scope_window.move(right_geo.x() + right_geo.width() - 900, right_geo.y() + 50)
+            self.scope_window.resize(900, 700)
 
         # Show all windows
         self.scope_window.show()
-        self.wj_plot_window.show()
         self.sf6_window.show()
-
-    def on_wj_open_plot(self):
-        self.wj_plot_window.show()
-        self.wj_plot_window.raise_()
-        self.wj_plot_window.activateWindow()
-
-
 
     def build_scope_controls(self, main_layout):
         layout = QHBoxLayout()
-        self.wj_panel.btn_open_plot.clicked.connect(self.on_wj_open_plot)
 
         # --------------------------------
         # Create instrument panels
@@ -330,6 +395,14 @@ class ScopeDelayMainWindow(QMainWindow):
             save_memory("Arduino_COM", port)
             self.log(f"[Arduino] Connected on {port}")
             self.sf6_window.sf6_panel.lamp.set_status("green", "Connected")
+
+            # Start Arduino stream worker for continuous data reading
+            self.arduino_stream = ArduinoStreamWorker(self.arduino)
+            self.arduino_stream.data_signal.connect(self.on_analog_data)
+            self.arduino_stream.error_signal.connect(lambda msg: self.log(f"[Arduino Stream ERROR] {msg}"))
+            self.arduino_stream.start()
+            self.log("[Arduino] Stream worker started")
+
         except Exception as e:
             self.log(f"[Arduino] NOT CONNECTED: {e}")
             self.sf6_window.sf6_panel.lamp.set_status("red", "Not Connected")
@@ -352,9 +425,10 @@ class ScopeDelayMainWindow(QMainWindow):
         # ------------------------------
         # WJ HIGH VOLTAGE SUPPLIES
         # ------------------------------
+        default_wj_ports = ["COM6", "COM10"]  # Default ports for WJ1 and WJ2
         for i, wj in enumerate(self.wj_units):
             try:
-                port = self.conn.get(f"WJ{i+1}_COM", f"COM{6+i}")
+                port = self.conn.get(f"WJ{i+1}_COM", default_wj_ports[i])
                 wj.connect(port)
                 self.wj_panel.rows[i].lamp.set_status("green", "Connected")
                 self.log(f"[WJ{i+1}] Connected on {port}")
@@ -1068,7 +1142,10 @@ class ScopeDelayMainWindow(QMainWindow):
         psi2 = mA_to_psi(ch2)
 
         # Log Arduino data
-        self.data_logger.log_arduino_psi(psi0, psi1, psi2)
+        try:
+            self.data_logger.log_arduino_psi(psi0, psi1, psi2)
+        except Exception as e:
+            self.log(f"[DataLogger ERROR] Failed to log Arduino data: {e}")
 
         sf6_panel = self.sf6_window.sf6_panel
         sf6_panel.ai_ch0.update_value(psi0)
@@ -1282,7 +1359,10 @@ class ScopeDelayMainWindow(QMainWindow):
                 fault = data.get("fault", False)
 
                 # Log WJ voltage/current data
-                self.data_logger.log_wj_voltage(i+1, kv, ma, hv, fault)
+                try:
+                    self.data_logger.log_wj_voltage(i+1, kv, ma, hv, fault)
+                except Exception as e:
+                    self.log(f"[DataLogger ERROR] Failed to log WJ{i+1} data: {e}")
 
                 # Update label for this WJ
                 row.label_status.setText(
@@ -1304,5 +1384,27 @@ class ScopeDelayMainWindow(QMainWindow):
         self.scope_window.show()
         self.scope_window.raise_()
         self.scope_window.activateWindow()
+
+    def closeEvent(self, event):
+        """Handle main window close event - close all child windows"""
+        # Stop WJ worker threads
+        if hasattr(self, 'wj_workers'):
+            for worker in self.wj_workers:
+                if worker.isRunning():
+                    worker.stop()
+
+        # Close all child windows
+        if hasattr(self, 'scope_window') and self.scope_window:
+            self.scope_window.close()
+
+        if hasattr(self, 'sf6_window') and self.sf6_window:
+            self.sf6_window.close()
+
+        # Close data logger
+        if hasattr(self, 'data_logger') and self.data_logger:
+            self.data_logger.close()
+
+        # Accept the close event
+        event.accept()
 
 

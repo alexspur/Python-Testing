@@ -167,6 +167,7 @@
 #             self.worker.stop()
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton
 from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtGui import QFont
 import pyqtgraph as pg
 import time
 import csv
@@ -231,6 +232,7 @@ class WJPlotWindow(QWidget):
         # ─────────────────────────────────────────────
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground('w')   # ← WHITE BACKGROUND
+        self.plot_widget.getPlotItem().setContentsMargins(10, 10, 10, 10)
         layout.addWidget(self.plot_widget)
         self.plot_widget.showGrid(x=True, y=True)
         self.plot_widget.addLegend()
@@ -241,6 +243,9 @@ class WJPlotWindow(QWidget):
         self.ma1_curve = self.plot_widget.plot(pen=pg.mkPen('c', width=2), name="WJ1 mA")
         self.kv2_curve = self.plot_widget.plot(pen=pg.mkPen('r', width=2), name="WJ2 kV")
         self.ma2_curve = self.plot_widget.plot(pen=pg.mkPen('m', width=2), name="WJ2 mA")
+
+        # Apply Times New Roman bold font
+        self._apply_font_styling()
 
         # Buffers for rolling window
         self.max_points = 500
@@ -265,6 +270,19 @@ class WJPlotWindow(QWidget):
 
         # Stop threads on close
         self.destroyed.connect(self.on_close)
+
+    def _apply_font_styling(self):
+        """Apply Times New Roman bold font to plot axes and labels"""
+        font = QFont("Times New Roman", 12)
+        font.setBold(True)
+
+        # Apply font to axes
+        self.plot_widget.getAxis('left').setStyle(tickFont=font)
+        self.plot_widget.getAxis('bottom').setStyle(tickFont=font)
+
+        # Apply font to axis labels
+        self.plot_widget.setLabel('left', 'Voltage (kV) / Current (mA)', **{'font-size': '12pt', 'font-family': 'Times New Roman', 'font-weight': 'bold'})
+        self.plot_widget.setLabel('bottom', 'Time (s)', **{'font-size': '12pt', 'font-family': 'Times New Roman', 'font-weight': 'bold'})
 
     # ---------------------------------------------------------
     # Incoming data handler for each unit

@@ -115,6 +115,7 @@
 
 # gui/scope_plot_window.py
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton, QHBoxLayout
+from PyQt6.QtGui import QFont
 import pyqtgraph as pg
 from pyqtgraph import ViewBox, PlotCurveItem
 
@@ -155,18 +156,24 @@ class ScopePlotWindow(QWidget):
         # self.r3_ch2 = self.plot3_ch2
         # PLOT 1 (Rigol #1)
         self.plot1 = pg.PlotWidget(background='w')
+        self.plot1.getPlotItem().setContentsMargins(10, 10, 20, 10)
         layout.addWidget(self.plot1)
         self.r1_ch1, self.r1_ch2 = self._setup_dual_axis(self.plot1)
 
         # PLOT 2 (Rigol #2)
         self.plot2 = pg.PlotWidget(background='w')
+        self.plot2.getPlotItem().setContentsMargins(10, 10, 20, 10)
         layout.addWidget(self.plot2)
         self.r2_ch1, self.r2_ch2 = self._setup_dual_axis(self.plot2)
 
         # PLOT 3 (Rigol #3)
         self.plot3 = pg.PlotWidget(background='w')
+        self.plot3.getPlotItem().setContentsMargins(10, 10, 20, 10)
         layout.addWidget(self.plot3)
         self.r3_ch1, self.r3_ch2 = self._setup_dual_axis(self.plot3)
+
+        # Apply Times New Roman bold font to all plots
+        self._apply_font_styling()
 
 
         # --------------------------------------------------------
@@ -288,6 +295,22 @@ class ScopePlotWindow(QWidget):
 
         return ch1, ch2
 
+    def _apply_font_styling(self):
+        """Apply Times New Roman bold font to all plot axes and labels"""
+        font = QFont("Times New Roman", 12)
+        font.setBold(True)
+
+        # Style for all three plots
+        for plot in [self.plot1, self.plot2, self.plot3]:
+            # Apply font to axes
+            plot.getAxis('left').setStyle(tickFont=font)
+            plot.getAxis('bottom').setStyle(tickFont=font)
+            plot.getAxis('right').setStyle(tickFont=font)
+
+            # Apply font to axis labels
+            plot.setLabel('left', 'CH1 (V)', **{'font-size': '12pt', 'font-family': 'Times New Roman', 'font-weight': 'bold'})
+            plot.setLabel('bottom', 'Time (s)', **{'font-size': '12pt', 'font-family': 'Times New Roman', 'font-weight': 'bold'})
+            plot.setLabel('right', 'CH2 (V)', **{'font-size': '12pt', 'font-family': 'Times New Roman', 'font-weight': 'bold'})
 
     # ------------------------------------------------------------
     # Plot update functions (called by main_window)

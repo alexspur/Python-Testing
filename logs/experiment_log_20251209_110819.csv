@@ -1,0 +1,2 @@
+timestamp_sec,datetime,event_type,source,param1,param2,param3,param4,notes
+4.368787,2025-12-09 11:08:24.203,INFO,SYSTEM,,,,,GUI started successfully
