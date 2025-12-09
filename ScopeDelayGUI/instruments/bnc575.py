@@ -1,366 +1,353 @@
-# import serial
-# import time
-
-# class BNC575Controller:
-#     def __init__(self):
-#         self.ser: serial.Serial | None = None
-
-#     def connect(self, port: str, baudrate: int = 115200):
-#         if self.ser and self.ser.is_open:
-#             self.ser.close()
-
-#         self.ser = serial.Serial(
-#             port=port,
-#             baudrate=baudrate,
-#             timeout=2
-#         )
-#         time.sleep(1.0)
-
-#         self.ser.reset_input_buffer()
-#         self.write(":ABOR")
-#         time.sleep(0.1)
-#         self.write("*RST")
-#         time.sleep(1.0)
-
-#         # Ensure master timing engine is in a sane state
-#         self.write(":PULSE0:MODE SING")
-#         self.write(":PULSE0:TRIG:MODE DIS")
-
-#     def write(self, cmd: str):
-#         if not self.ser or not self.ser.is_open:
-#             raise RuntimeError("BNC575 serial not open")
-#         self.ser.write((cmd + "\n").encode("ascii"))
-
-#     def query(self, cmd: str) -> str:
-#         self.write(cmd)
-#         return self.ser.readline().decode("ascii", errors="ignore").strip()
-
-#     def identify(self):
-#         return self.query("*IDN?")
-
-#     # -------------------------------------------------------------
-#     #  APPLY settings for CH A–D (PULSE1–PULSE4)
-#     # -------------------------------------------------------------
-#     def apply_settings(self, wA, dA, wB, dB, wC, dC, wD, dD):
-
-#         # --- Required: force all channels into PULSE mode ---
-#         self.write(":PULSE1:MODE PULSE")
-#         self.write(":PULSE2:MODE PULSE")
-#         self.write(":PULSE3:MODE PULSE")
-#         self.write(":PULSE4:MODE PULSE")
-#         time.sleep(0.05)
-
-#         # --- Required: master timing engine FIRST ---
-#         self.write(":PULSE0:MODE SING")
-#         self.write(":PULSE0:TRIG:MODE DIS")
-#         time.sleep(0.05)
-
-#         # ---------- CHANNEL A (PULSE1) ----------
-#         self.write(":PULSE1:STATE ON")
-#         self.write(":PULSE1:POL NORM")
-#         self.write(f":PULSE1:WIDT {wA:.6E}")
-#         self.write(f":PULSE1:DEL  {dA:.6E}")
-#         time.sleep(0.02)
-
-#         # ---------- CHANNEL B (PULSE2) ----------
-#         self.write(":PULSE2:STATE ON")
-#         self.write(":PULSE2:POL NORM")
-#         self.write(f":PULSE2:WIDT {wB:.6E}")
-#         self.write(f":PULSE2:DEL  {dB:.6E}")
-#         time.sleep(0.02)
-
-#         # ---------- CHANNEL C (PULSE3) ----------
-#         self.write(":PULSE3:STATE ON")
-#         self.write(":PULSE3:POL NORM")
-#         self.write(f":PULSE3:WIDT {wC:.6E}")
-#         self.write(f":PULSE3:DEL  {dC:.6E}")
-#         time.sleep(0.02)
-
-#         # ---------- CHANNEL D (PULSE4) ----------
-#         self.write(":PULSE4:STATE ON")
-#         self.write(":PULSE4:POL NORM")
-#         self.write(f":PULSE4:WIDT {wD:.6E}")
-#         self.write(f":PULSE4:DEL  {dD:.6E}")
-#         time.sleep(0.02)
-
-#     # -------------------------------------------------------------
-#     #  READBACK settings for CH A–D
-#     # -------------------------------------------------------------
-#     def read_settings(self):
-
-#         def f(x):
-#             try:
-#                 return float(x)
-#             except:
-#                 return float("nan")
-
-#         # Stop timing engine (required before reading)
-#         self.write(":ABOR")
-#         time.sleep(0.05)
-
-#         # Ensure channels are in PULSE mode (manual requirement)
-#         self.write(":PULSE1:MODE PULSE")
-#         self.write(":PULSE2:MODE PULSE")
-#         self.write(":PULSE3:MODE PULSE")
-#         self.write(":PULSE4:MODE PULSE")
-#         time.sleep(0.05)
-
-#         # Ensure outputs are ON (otherwise queries return blanks)
-#         self.write(":PULSE1:STATE ON")
-#         self.write(":PULSE2:STATE ON")
-#         self.write(":PULSE3:STATE ON")
-#         self.write(":PULSE4:STATE ON")
-#         time.sleep(0.05)
-
-#         # Now safe to query
-#         wA = f(self.query(":PULSE1:WIDT?"))
-#         dA = f(self.query(":PULSE1:DEL?"))
-#         wB = f(self.query(":PULSE2:WIDT?"))
-#         dB = f(self.query(":PULSE2:DEL?"))
-#         wC = f(self.query(":PULSE3:WIDT?"))
-#         dC = f(self.query(":PULSE3:DEL?"))
-#         wD = f(self.query(":PULSE4:WIDT?"))
-#         dD = f(self.query(":PULSE4:DEL?"))
-
-#         # Guarantee 8 outputs
-#         return (
-#             wA if wA is not None else float("nan"),
-#             dA if dA is not None else float("nan"),
-#             wB if wB is not None else float("nan"),
-#             dB if dB is not None else float("nan"),
-#             wC if wC is not None else float("nan"),
-#             dC if dC is not None else float("nan"),
-#             wD if wD is not None else float("nan"),
-#             dD if dD is not None else float("nan")
-#         )
-
-
-#     # External trigger arm
-#     def arm_external_trigger(self, level: float = 1.0):
-#         self.write(":PULSE0:TRIG:MODE EXT")
-#         self.write(":PULSE0:TRIG:SLOP POS")
-#         self.write(f":PULSE0:TRIG:LEV {level:.3f}")
-#         self.write(":PULSE0:MODE SING")
-#         self.write(":RUN")
-
-#     def fire_internal(self):
-#         self.write(":PULSE0:STAT ON")
-#         time.sleep(0.2)
-#         self.write(":PULSE0:STAT OFF")
-
-#     def close(self):
-#         if self.ser and self.ser.is_open:
-#             self.ser.close()
-#             self.ser = None
-import serial
 import time
+from dataclasses import dataclass, field
+from typing import Dict, Tuple
+
+import serial
+
+# Static capability map (no device queries)
+capabilities: Dict[str, Dict[str, bool]] = {
+    "CHA": {"delay": True, "width": True, "polarity": True},
+    "CHB": {"delay": True, "width": True, "polarity": True},
+    "CHC": {"delay": True, "width": True, "polarity": True},
+    "CHD": {"delay": True, "width": True, "polarity": True},
+    "T0": {"trigger": True, "source_select": True},
+}
+
+
+@dataclass
+class ChannelState:
+    delay: float = 0.0
+    width: float = 1e-6
+    polarity: str = "POS"  # POS or NEG
+    enabled: bool = True
+
+
+@dataclass
+class TriggerState:
+    source: str = "EXT"  # EXT, INT (cached only)
+    enabled: bool = False
+    level: float = 3.0
+    slope: str = "POS"  # POS / NEG
+    mode: str = "TRIG"  # TRIG, DUAL, DIS
+
+
+@dataclass
+class BNC575Model:
+    channels: Dict[str, ChannelState] = field(default_factory=dict)
+    trigger: TriggerState = field(default_factory=TriggerState)
+
+    def __post_init__(self) -> None:
+        for name in ["CHA", "CHB", "CHC", "CHD"]:
+            self.channels.setdefault(name, ChannelState())
+
+    # Channel setters
+    def set_delay(self, channel: str, value: float) -> None:
+        self.channels[channel].delay = value
+
+    def set_width(self, channel: str, value: float) -> None:
+        self.channels[channel].width = value
+
+    def set_polarity(self, channel: str, value: str) -> None:
+        self.channels[channel].polarity = value.upper()
+
+    def set_enabled(self, channel: str, enabled: bool) -> None:
+        self.channels[channel].enabled = enabled
+
+    # Trigger setters
+    def set_trigger_source(self, source: str) -> None:
+        self.trigger.source = source.upper()
+
+    def set_trigger_output(self, enabled: bool) -> None:
+        self.trigger.enabled = enabled
+
+    def set_trigger_level(self, level: float) -> None:
+        self.trigger.level = level
+
+    def set_trigger_slope(self, slope: str) -> None:
+        self.trigger.slope = slope.upper()
+
+    def set_trigger_mode(self, mode: str) -> None:
+        self.trigger.mode = mode.upper()
+
+    def snapshot(self) -> Dict[str, Dict]:
+        return {
+            "channels": {
+                k: {
+                    "delay": v.delay,
+                    "width": v.width,
+                    "polarity": v.polarity,
+                    "enabled": v.enabled,
+                }
+                for k, v in self.channels.items()
+            },
+            "trigger": {
+                "source": self.trigger.source,
+                "enabled": self.trigger.enabled,
+                "level": self.trigger.level,
+                "slope": self.trigger.slope,
+            },
+        }
+
 
 class BNC575Controller:
-    def __init__(self):
-        self.ser: serial.Serial | None = None
+    """
+    Write-only controller for the BNC575.
+    - No reads/queries are performed (device is unreliable).
+    - Public API remains compatible with existing GUI calls.
+    - All getters return cached model values.
+    """
 
-    # -------------------------------------------------------------------------
-    # CONNECT
-    # -------------------------------------------------------------------------
-    def connect(self, port: str, baudrate: int = 115200):
+    def __init__(self) -> None:
+        self.ser: serial.Serial | None = None
+        self.model = BNC575Model()
+
+    # ------------------------------------------------------------------
+    # Connection / teardown
+    # ------------------------------------------------------------------
+    def connect(self, port: str, baudrate: int = 115200) -> None:
+        """Open the serial port and apply a safe default configuration."""
         if self.ser and self.ser.is_open:
             self.ser.close()
 
         self.ser = serial.Serial(
             port=port,
             baudrate=baudrate,
-            timeout=2
+            timeout=0.2,
+            write_timeout=0.2,
         )
-        time.sleep(1.0)
+        time.sleep(0.2)
 
-        self.ser.reset_input_buffer()
+        if self.ser:
+            self.ser.reset_input_buffer()
+            self.ser.reset_output_buffer()
 
-        # Full reset on connect
-        self.write("*RST")
-        time.sleep(0.5)
+        # Default model values (matches GUI defaults)
+        self.model.channels["CHA"].width = 1e-6
+        self.model.channels["CHA"].delay = 0.0
+        self.model.channels["CHB"].width = 1e-6
+        self.model.channels["CHB"].delay = 0.0
+        self.model.channels["CHC"].width = 40e-6
+        self.model.channels["CHC"].delay = 0.0
+        self.model.channels["CHD"].width = 40e-6
+        self.model.channels["CHD"].delay = 0.0
+        self.model.trigger.source = "EXT"
+        self.model.trigger.enabled = False
+        self.model.trigger.level = 3.0
+        self.model.trigger.slope = "POS"
 
-        # Disable trigger during setup
-        self.write(":PULSE0:TRIG:MODE DIS")
-        self.write(":ABOR")   # abort timing engine
-        time.sleep(0.1)
+        # Apply a clean reset and commit defaults
+        self._write_scpi("*RST")
+        self._write_scpi(":ABOR")
+        self._initialize_engine()
+        self.commit_all_channels()
+        self._arm_trigger_state()
 
-        # Apply your desired default configuration
-        self.configure_default_pulses()
-
-    # -------------------------------------------------------------------------
-    # LOW-LEVEL SEND ROUTINES
-    # -------------------------------------------------------------------------
-    def write(self, cmd: str):
-        if not self.ser or not self.ser.is_open:
-            raise RuntimeError("BNC575 serial not open")
-        self.ser.write((cmd + "\n").encode("ascii"))
-
-    def query(self, cmd: str) -> str:
-        self.write(cmd)
-        return self.ser.readline().decode("ascii", errors="ignore").strip()
-
-    # -------------------------------------------------------------------------
-    # IDENTIFY
-    # -------------------------------------------------------------------------
-    def identify(self):
-        return self.query("*IDN?")
-
-    # -------------------------------------------------------------------------
-    # DEFAULT PULSE CONFIGURATION
-    # -------------------------------------------------------------------------
-    def configure_default_pulses(self):
-        """
-        Configures:
-          Channel A: 1us width, 0 delay
-          Channel B: 1us width, 0 delay
-          Channel C: 40us width, 0 delay
-          Channel D: 40us width, 0 delay
-
-          Trigger: external, rising-edge, 3.0V threshold
-        """
-
-        # ---------------------------------------------------------------------
-        # Stop timing engine
-        # ---------------------------------------------------------------------
-        self.write(":ABOR")
-        time.sleep(0.1)
-
-        # ---------------------------------------------------------------------
-        # Set channels A–D to NORMAL mode, ON, normal polarity, sync'd to T0
-        # ---------------------------------------------------------------------
-        for ch in (1, 2, 3, 4):
-            self.write(f":PULSE{ch}:MODE NORM")
-            self.write(f":PULSE{ch}:STATE ON")
-            self.write(f":PULSE{ch}:POL NORM")
-            self.write(f":PULSE{ch}:SYNC T0")
-
-        time.sleep(0.05)
-
-        # ---------------------------------------------------------------------
-        # Apply widths & delays
-        # ---------------------------------------------------------------------
-        # A = 1 µs
-        self.write(":PULSE1:WIDT 1E-6")
-        self.write(":PULSE1:DEL 0")
-
-        # B = 1 µs
-        self.write(":PULSE2:WIDT 1E-6")
-        self.write(":PULSE2:DEL 0")
-
-        # C = 40 µs
-        self.write(":PULSE3:WIDT 40E-6")
-        self.write(":PULSE3:DEL 0")
-
-        # D = 40 µs
-        self.write(":PULSE4:WIDT 40E-6")
-        self.write(":PULSE4:DEL 0")
-
-        time.sleep(0.05)
-
-        # ---------------------------------------------------------------------
-        # Configure external trigger
-        # ---------------------------------------------------------------------
-        self.write(":PULSE0:TRIG:MODE TRIG")     # enable external trigger mode
-        self.write(":PULSE0:TRIG:EDGE RIS")      # rising edge
-        self.write(":PULSE0:TRIG:LEV 3.0")       # threshold = 3.0 V
-        self.write(":PULSE0:MODE SING")          # one pulse per trigger
-
-        time.sleep(0.05)
-
-        # ---------------------------------------------------------------------
-        # ARM system (wait for external trigger)
-        # ---------------------------------------------------------------------
-        self.write(":PULSE0:STATE ON")           # equivalent to RUN/STOP (ARM)
-        time.sleep(0.05)
-
-    # -------------------------------------------------------------------------
-    # APPLY MANUAL CUSTOM SETTINGS (if GUI passes values)
-    # -------------------------------------------------------------------------
-    def apply_settings(self, wA, dA, wB, dB, wC, dC, wD, dD):
-        """
-        GUI version of setting widths/delays manually.
-        """
-
-        self.write(":ABOR")
-        time.sleep(0.05)
-
-        # Put channels in NORMAL mode
-        for ch in (1, 2, 3, 4):
-            self.write(f":PULSE{ch}:MODE NORM")
-            self.write(f":PULSE{ch}:STATE ON")
-            self.write(f":PULSE{ch}:POL NORM")
-            self.write(f":PULSE{ch}:SYNC T0")
-
-        time.sleep(0.05)
-
-        # Channel A
-        self.write(f":PULSE1:WIDT {wA:.6E}")
-        self.write(f":PULSE1:DEL  {dA:.6E}")
-
-        # Channel B
-        self.write(f":PULSE2:WIDT {wB:.6E}")
-        self.write(f":PULSE2:DEL  {dB:.6E}")
-
-        # Channel C
-        self.write(f":PULSE3:WIDT {wC:.6E}")
-        self.write(f":PULSE3:DEL  {dC:.6E}")
-
-        # Channel D
-        self.write(f":PULSE4:WIDT {wD:.6E}")
-        self.write(f":PULSE4:DEL  {dD:.6E}")
-
-        time.sleep(0.05)
-
-    # -------------------------------------------------------------------------
-    # READBACK (not reliable on 575 firmware but included anyway)
-    # -------------------------------------------------------------------------
-    def read_settings(self):
-        def f(x):
-            try:
-                return float(x)
-            except:
-                return float("nan")
-
-        self.write(":ABOR")
-        time.sleep(0.05)
-
-        # Force channels ON before reading
-        for ch in (1, 2, 3, 4):
-            self.write(f":PULSE{ch}:STATE ON")
-
-        time.sleep(0.05)
-
-        wA = f(self.query(":PULSE1:WIDT?"))
-        dA = f(self.query(":PULSE1:DEL?"))
-        wB = f(self.query(":PULSE2:WIDT?"))
-        dB = f(self.query(":PULSE2:DEL?"))
-        wC = f(self.query(":PULSE3:WIDT?"))
-        dC = f(self.query(":PULSE3:DEL?"))
-        wD = f(self.query(":PULSE4:WIDT?"))
-        dD = f(self.query(":PULSE4:DEL?"))
-
-        return (wA, dA, wB, dB, wC, dC, wD, dD)
-
-    # -------------------------------------------------------------------------
-    # EXTERNAL TRIGGER ARM (alternative)
-    # -------------------------------------------------------------------------
-    def arm_external_trigger(self, level: float = 3.0):
-        self.write(":PULSE0:TRIG:MODE TRIG")
-        self.write(":PULSE0:TRIG:EDGE RIS")
-        self.write(f":PULSE0:TRIG:LEV {level:.3f}")
-        self.write(":PULSE0:MODE SING")
-        self.write(":PULSE0:STATE ON")  # arm
-
-    # -------------------------------------------------------------------------
-    # INTERNAL FIRE (software trigger)
-    # -------------------------------------------------------------------------
-    def fire_internal(self):
-        self.write("*TRG")
-
-    # -------------------------------------------------------------------------
-    # CLOSE PORT
-    # -------------------------------------------------------------------------
-    def close(self):
+    def close(self) -> None:
         if self.ser and self.ser.is_open:
             self.ser.close()
             self.ser = None
+
+    # ------------------------------------------------------------------
+    # Public API (compatibility)
+    # ------------------------------------------------------------------
+    def identify(self) -> str:
+        """Return a cached identifier (no device read)."""
+        return "BNC575 (write-only mode)"
+
+    def apply_settings(
+        self,
+        wA: float,
+        dA: float,
+        wB: float,
+        dB: float,
+        wC: float,
+        dC: float,
+        wD: float,
+        dD: float,
+    ) -> None:
+        """Apply widths/delays for channels A–D, updating model then committing."""
+        self.model.set_width("CHA", wA)
+        self.model.set_delay("CHA", dA)
+        self.model.set_width("CHB", wB)
+        self.model.set_delay("CHB", dB)
+        self.model.set_width("CHC", wC)
+        self.model.set_delay("CHC", dC)
+        self.model.set_width("CHD", wD)
+        self.model.set_delay("CHD", dD)
+
+        self.commit_all_channels()
+
+    def read_settings(self) -> Tuple[float, float, float, float, float, float, float, float]:
+        """Return cached model settings (no instrument read)."""
+        c = self.model.channels
+        return (
+            c["CHA"].width,
+            c["CHA"].delay,
+            c["CHB"].width,
+            c["CHB"].delay,
+            c["CHC"].width,
+            c["CHC"].delay,
+            c["CHD"].width,
+            c["CHD"].delay,
+        )
+
+    def arm_external_trigger(self, level: float = 3.0, slope: str = "RIS") -> bool:
+        """Configure and arm for external trigger (cached + write-only)."""
+        self.set_trigger_settings(source="EXT", slope=slope, level=level)
+        return self.arm_trigger()
+
+    def fire_internal(self) -> None:
+        """Software trigger (no readback)."""
+        # Use current trigger enable/mode; do not force a trigger if disabled
+        self._arm_trigger_state()
+        self._write_scpi("*TRG")
+
+    def arm_trigger(self) -> bool:
+        """Enable trigger using cached settings (no GUI read)."""
+        self.model.set_trigger_mode("TRIG")
+        self.model.set_trigger_output(True)
+        self._arm_trigger_state()
+        return True
+
+    def disarm_trigger(self) -> bool:
+        """Disable trigger (stops waiting)."""
+        self.model.set_trigger_output(False)
+        self._arm_trigger_state()
+        return True
+
+    def enable_trigger(self, enabled: bool = True) -> bool:
+        """Explicit enable/disable trigger without changing other settings."""
+        self.model.set_trigger_output(enabled)
+        if enabled and self.model.trigger.mode == "DIS":
+            self.model.set_trigger_mode("TRIG")
+        self._arm_trigger_state()
+        return True
+
+    # ------------------------------------------------------------------
+    # Trigger helpers
+    # ------------------------------------------------------------------
+    def set_trigger_output(self, channel: str, state: bool) -> None:
+        # Alias to enable_output for compatibility
+        self.enable_output(channel, state)
+
+    def set_trigger_source(self, source: str) -> None:
+        self.model.set_trigger_source(source)
+        self._arm_trigger_state()
+
+    def set_trigger_settings(self, source: str = "EXT", slope: str = "RIS", level: float = 2.50) -> bool:
+        """
+        Apply trigger edge/level and cache source.
+        Firmware often ignores explicit source selection; we still cache it.
+        """
+        source = source.upper()
+        slope = slope.upper()
+
+        if slope not in ("RIS", "FALL"):
+            raise ValueError("Slope must be RIS or FALL")
+        if source not in ("EXT", "INT"):
+            raise ValueError("Source must be EXT or INT")
+
+        self.model.set_trigger_source(source)
+        self.model.set_trigger_slope("POS" if slope == "RIS" else "NEG")
+        self.model.set_trigger_level(level)
+        self.model.set_trigger_mode("TRIG")
+
+        self._write_scpi(":ABOR")
+        self._write_scpi(f":PULSE0:TRIG:EDGE {slope}")
+        self._write_scpi(f":PULSE0:TRIG:LEV {level:.3f}")
+        # Mode selection handled in _arm_trigger_state
+        return True
+
+    # ------------------------------------------------------------------
+    # Channel helpers
+    # ------------------------------------------------------------------
+    def set_delay(self, channel: str, value: float) -> None:
+        self.model.set_delay(channel, value)
+        self.commit_settings(channel)
+
+    def set_width(self, channel: str, value: float) -> None:
+        self.model.set_width(channel, value)
+        self.commit_settings(channel)
+
+    def set_polarity(self, channel: str, polarity: str) -> None:
+        p = polarity.upper()
+        if p not in ("POS", "NEG"):
+            raise ValueError("Polarity must be POS or NEG")
+        self.model.set_polarity(channel, p)
+        self.commit_settings(channel)
+
+    def enable_output(self, channel: str, enabled: bool) -> None:
+        self.model.set_enabled(channel, enabled)
+        self.commit_settings(channel)
+
+    # ------------------------------------------------------------------
+    # Commit logic
+    # ------------------------------------------------------------------
+    def commit_settings(self, channel: str) -> None:
+        ch_id = self._channel_to_number(channel)
+        st = self.model.channels[channel.upper()]
+        self._write_scpi(f":PULSE{ch_id}:MODE NORM")
+        self._write_scpi(f":PULSE{ch_id}:STATE {'ON' if st.enabled else 'OFF'}")
+        self._write_scpi(f":PULSE{ch_id}:POL {'NORM' if st.polarity == 'POS' else 'INVT'}")
+        self._write_scpi(f":PULSE{ch_id}:WIDT {st.width:.6E}")
+        self._write_scpi(f":PULSE{ch_id}:DEL {st.delay:.6E}")
+        self._write_scpi(f":PULSE{ch_id}:SYNC T0")
+
+    def commit_all_channels(self) -> None:
+        for ch in ["CHA", "CHB", "CHC", "CHD"]:
+            self.commit_settings(ch)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _initialize_engine(self) -> None:
+        """Set up master timing engine in a known state."""
+        self._write_scpi(":PULSE0:TRIG:MODE DIS")
+        self._write_scpi(":PULSE0:MODE SING")
+
+    def _arm_trigger_state(self) -> None:
+        """Apply trigger settings from the model."""
+        trig = self.model.trigger
+        mode = trig.mode if trig.enabled else "DIS"
+        self._write_scpi(f":PULSE0:TRIG:MODE {mode}")
+        self._write_scpi(f":PULSE0:TRIG:LEV {trig.level:.3f}")
+        self._write_scpi(f":PULSE0:TRIG:EDGE {'RIS' if trig.slope == 'POS' else 'FALL'}")
+        self._write_scpi(f":PULSE0:MODE SING")
+        self._write_scpi(":PULSE0:STATE ON")
+
+    def _channel_to_number(self, channel: str) -> int:
+        mapping = {"CHA": 1, "CHB": 2, "CHC": 3, "CHD": 4}
+        key = channel.upper()
+        if key not in mapping:
+            raise ValueError(f"Unknown channel: {channel}")
+        return mapping[key]
+
+    def _write_scpi(self, cmd: str, retries: int = 3, delay_s: float = 0.015) -> None:
+        """
+        Robust, write-only SCPI sender.
+        - Flush buffers
+        - Write with newline
+        - Sleep briefly
+        - Retry on serial errors
+        """
+        if not self.ser or not self.ser.is_open:
+            raise RuntimeError("BNC575 serial not open")
+
+        for attempt in range(retries):
+            try:
+                self.ser.reset_input_buffer()
+                self.ser.reset_output_buffer()
+                self.ser.write((cmd + "\n").encode("ascii"))
+                self.ser.flush()
+                time.sleep(delay_s)
+                return
+            except serial.SerialException:
+                if attempt == retries - 1:
+                    raise
+                time.sleep(0.05)
+
+    # ------------------------------------------------------------------
+    # Disabled query (no reads)
+    # ------------------------------------------------------------------
+    def query(self, cmd: str) -> str:
+        return ""
