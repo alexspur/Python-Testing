@@ -3,6 +3,8 @@ from PyQt6.QtWidgets import (
     QFormLayout, QDoubleSpinBox
 )
 from utils.status_lamp import StatusLamp
+from PyQt6.QtWidgets import QComboBox, QLabel
+from PyQt6.QtWidgets import QPushButton
 
 class BNC575Panel(QGroupBox):
     def __init__(self):
@@ -69,6 +71,26 @@ class BNC575Panel(QGroupBox):
 
         layout.addLayout(form)
 
+        # --------------------------- Channel Enable Toggles ----------------
+        enable_row = QHBoxLayout()
+        self.btn_en_a = QPushButton("CHA Enabled"); self.btn_en_a.setCheckable(True); self.btn_en_a.setChecked(True)
+        self.btn_en_b = QPushButton("CHB Enabled"); self.btn_en_b.setCheckable(True); self.btn_en_b.setChecked(True)
+        self.btn_en_c = QPushButton("CHC Enabled"); self.btn_en_c.setCheckable(True); self.btn_en_c.setChecked(True)
+        self.btn_en_d = QPushButton("CHD Enabled"); self.btn_en_d.setCheckable(True); self.btn_en_d.setChecked(True)
+        enable_row.addWidget(self.btn_en_a)
+        enable_row.addWidget(self.btn_en_b)
+        enable_row.addWidget(self.btn_en_c)
+        enable_row.addWidget(self.btn_en_d)
+        layout.addLayout(enable_row)
+
+        # Trigger enable toggle
+        trig_row = QHBoxLayout()
+        self.btn_en_trig = QPushButton("Trigger Enabled")
+        self.btn_en_trig.setCheckable(True)
+        self.btn_en_trig.setChecked(True)
+        trig_row.addWidget(self.btn_en_trig)
+        layout.addLayout(trig_row)
+
         # --------------------------- Apply / Read / Arm ----------------
         row2 = QHBoxLayout()
         self.btn_apply = QPushButton("Apply Settings")
@@ -79,3 +101,23 @@ class BNC575Panel(QGroupBox):
         row2.addWidget(self.btn_arm)
 
         layout.addLayout(row2)
+        # --- Trigger Controls ---
+        form.addRow(QLabel("Trigger Source:"))
+        self.trig_source = QComboBox()
+        self.trig_source.addItems(["EXT", "INT"])
+        form.addRow(self.trig_source)
+
+        form.addRow(QLabel("Trigger Slope:"))
+        self.trig_slope = QComboBox()
+        self.trig_slope.addItems(["RIS", "FALL"])
+        form.addRow(self.trig_slope)
+
+        form.addRow(QLabel("Trigger Level (V):"))
+        self.trig_level = QDoubleSpinBox()
+        self.trig_level.setDecimals(3)
+        self.trig_level.setRange(0.0, 5.0)
+        self.trig_level.setValue(2.50)
+        form.addRow(self.trig_level)
+
+        self.btn_apply_trigger = QPushButton("Apply Trigger Settings")
+        layout.addWidget(self.btn_apply_trigger)

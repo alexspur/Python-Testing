@@ -52,6 +52,7 @@ class ScopeDelayMainWindow(QMainWindow):
         # --- instruments ---
         self.dg = DG535Controller()
         self.bnc = BNC575Controller()
+        self.bnc_trigger_armed = False
         # default VISA addresses (change to match your scopes)
         # self.rigol1 = RigolScope("USB0::0x1AB1::0x0514::DS7A233300256::0::INSTR")
         # self.rigol2 = RigolScope("USB0::0x1AB1::0x0514::DS7A232900210::0::INSTR")
@@ -338,6 +339,15 @@ class ScopeDelayMainWindow(QMainWindow):
         self.bnc_panel.btn_apply.clicked.connect(self.on_bnc_apply)
         self.bnc_panel.btn_read.clicked.connect(self.on_bnc_read)
         self.bnc_panel.btn_arm.clicked.connect(self.on_bnc_arm)
+        if hasattr(self.bnc_panel, "btn_en_a"):
+            self.bnc_panel.btn_en_a.toggled.connect(lambda s: self.on_bnc_enable_channel("CHA", s))
+            self.bnc_panel.btn_en_b.toggled.connect(lambda s: self.on_bnc_enable_channel("CHB", s))
+            self.bnc_panel.btn_en_c.toggled.connect(lambda s: self.on_bnc_enable_channel("CHC", s))
+            self.bnc_panel.btn_en_d.toggled.connect(lambda s: self.on_bnc_enable_channel("CHD", s))
+        if hasattr(self.bnc_panel, "btn_en_trig"):
+            self.bnc_panel.btn_en_trig.toggled.connect(self.on_bnc_enable_trigger)
+        if hasattr(self.bnc_panel, "btn_apply_trigger"):
+            self.bnc_panel.btn_apply_trigger.clicked.connect(self.on_bnc_apply_trigger)
 
         self.rigol_panel.btn_r1.clicked.connect(self.on_rigol1_connect)
         self.rigol_panel.btn_r2.clicked.connect(self.on_rigol2_connect)
@@ -748,12 +758,26 @@ class ScopeDelayMainWindow(QMainWindow):
 
     def on_bnc_arm(self):
         try:
-            self.set_status("yellow", "Arming BNC575 (EXT TRIG)...")
-            self.bnc.arm_external_trigger(level=3.0)
-            self.data_logger.log_bnc575_arm(3.0)
+            source = self.bnc_panel.trig_source.currentText()
+            slope = self.bnc_panel.trig_slope.currentText()
+            level = self.bnc_panel.trig_level.value()
 
-            self.set_status("green", "BNC575 armed (EXT)")
-            self.log("[BNC575] Armed for external trigger at 3.0V rising.")
+            if not self.bnc_trigger_armed:
+                # Apply trigger settings from GUI then arm
+                self.bnc.set_trigger_settings(source, slope, level)
+                self.bnc.arm_trigger()
+                self.bnc_trigger_armed = True
+                self.bnc_panel.btn_arm.setText("Disarm (EXT TRIG)")
+                self.data_logger.log_bnc575_arm(level)
+                self.set_status("green", "BNC575 armed (EXT)")
+                self.log(f"[BNC575] Armed for external trigger: {source}/{slope} @ {level:.2f} V")
+            else:
+                # Disarm
+                self.bnc.disarm_trigger()
+                self.bnc_trigger_armed = False
+                self.bnc_panel.btn_arm.setText("Arm (EXT TRIG)")
+                self.set_status("yellow", "BNC575 disarmed")
+                self.log("[BNC575] Disarmed external trigger")
         except Exception as e:
             self.set_status("red", "BNC575 arm failed")
             self.log(f"[BNC575 ERROR] {e}")
@@ -766,7 +790,6 @@ class ScopeDelayMainWindow(QMainWindow):
             self.set_status("yellow", "Firing BNC575 internal pulse...")
             self.bnc.fire_internal()
             self.data_logger.log_bnc575_pulse(mode='INTERNAL')
-
             self.set_status("green", "BNC575 internal fired")
             self.log("[BNC575] Internal pulse fired.")
         except Exception as e:
@@ -774,6 +797,36 @@ class ScopeDelayMainWindow(QMainWindow):
             self.log(f"[BNC575 ERROR] {e}")
             self.data_logger.log_error("BNC575", str(e))
             self.error_popup("BNC575 Fire Error", str(e))
+
+    def on_bnc_apply_trigger(self):
+        source = self.bnc_panel.trig_source.currentText()
+        slope = self.bnc_panel.trig_slope.currentText()
+        level = self.bnc_panel.trig_level.value()
+        try:
+            self.bnc.set_trigger_settings(source, slope, level)
+            self.log(f"[BNC575] Trigger settings applied: {source}, {slope}, {level:.2f} V")
+            self.set_status("green", "Trigger settings applied")
+        except Exception as e:
+            self.error_popup("BNC575 Trigger Error", str(e))
+            self.log(f"[BNC575 ERROR] {e}")
+
+    def on_bnc_enable_channel(self, channel: str, enabled: bool):
+        try:
+            self.bnc.enable_output(channel, enabled)
+            self.log(f"[BNC575] {channel} {'ENABLED' if enabled else 'DISABLED'}")
+        except Exception as e:
+            self.error_popup("BNC575 Channel Error", str(e))
+            self.log(f"[BNC575 ERROR] {e}")
+
+    def on_bnc_enable_trigger(self, enabled: bool):
+        try:
+            self.bnc.enable_trigger(enabled)
+            self.bnc_trigger_armed = enabled
+            self.bnc_panel.btn_arm.setText("Disarm (EXT TRIG)" if enabled else "Arm (EXT TRIG)")
+            self.log(f"[BNC575] Trigger {'ENABLED' if enabled else 'DISABLED'}")
+        except Exception as e:
+            self.error_popup("BNC575 Trigger Error", str(e))
+            self.log(f"[BNC575 ERROR] {e}")
 
 
     # ------------------------------------------------------------------
