@@ -1,0 +1,62 @@
+{
+    "set_state": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_width": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_delay": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_polarity": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_sync": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_mux": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_mode_norm": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_mode_sing": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_mode_burst": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_burst_count": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_trigger_mode": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_trigger_level": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_gate_mode": {
+        "supported": true,
+        "response": "ok"
+    },
+    "set_period": {
+        "supported": true,
+        "response": "ok"
+    },
+    "cls_command": {
+        "supported": false,
+        "response": "?3"
+    }
+}

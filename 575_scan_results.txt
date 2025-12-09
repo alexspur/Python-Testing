@@ -1,0 +1,64 @@
+===== COMMON =====
+*IDN? -> BNC,575-4,31707,2.4.2-2.0.11
+*RST -> ok
+*CLS -> ?3
+===== INSTRUMENT =====
+:INST:CAT? -> T0, CHA, CHB, CHC, CHD
+:INST:FULL? -> T0, 0, CHA, 1, CHB, 2, CHC, 3, CHD, 4
+:INST:COMM? -> SCPI Command Tree:    INSTrument          Subsystem        CATalog             Query        FULL                Query        COMMands            Query        NSELect             Integer        SELect              List        STATe               Boolean    PULSe               SubSystem#        MERRor              Boolean        STATe               Boolean        WIDTh               Triple        DELay               Triple        IWIDth              Triple        IDELay              Triple        SYNC                List        M
+:INST:NSEL 0 -> UX                 Integer        POLarity            List        CMODe               List        BCOunter            Double        PCOunter            Double        OCOunter            Double        WCOunter            Double        CGATe               List        CLOGic              List        CTRIg               List        OUTPut              Subsystem            MODe                List            AMPLitude           Single    SPULse              Subsystem        STATe               Boolean        PERiod              Triple        MODe                L
+:INST:NSEL 1 -> ist        IRESet              Boolean        BCOunter            Double        PCOunter            Double        OCOunter            Double        CYCLe               Integer        ICLock              List        OCLock              List        GATe                Subsystem            MODe                List            LOGic               List            EDGe                List            LEVel               Single        TRIGger             Subsystem            MODe                List            EDGe                List            LEVel               Single
+:INST:SEL T0 -> COUNter             Subsystem            STATe               Boolean            CLear               List            COUNt               List    DISPlay             Subsystem        ENABle              Boolean        MODe                Boolean        BRIGhtness          Integer        UPDate              Query        RUNFlash            Boolean    SYSTem              Subsystem        STATe               Query        BEEPer              Subsystem            STATe               Boolean            VOLume              Integer        COMMunicate         Subsystem
+:INST:SEL CHA -> GPIB                Subsystem                ADDRess             Integer            SERial              Subsystem                BAUD                List                USB                 List                ECHo                Boolean        AUTorun             Boolean        ELOCk               Boolean        CAPS                Boolean        VERSion             Query        SERNumber           Query        INFOrmation         Query        NSID                Query
+:INST:SEL CHB -> ok
+===== SYSTEM =====
+:PULSE0:STATE? -> ok
+:PULSE0:STATE ON -> ok
+:PULSE0:STATE OFF -> ok
+:PULSE0:PER? -> ok
+:PULSE0:PER 0.001 -> 0
+:PULSE0:MODE? -> ok
+:PULSE0:MODE NORM -> ok
+:PULSE0:MODE SING -> 0.000100000
+:PULSE0:MODE BURST -> ok
+:PULSE0:BCOUNTER 5 -> NORM
+:PULSE0:PCOUNTER 5 -> ok
+:PULSE0:OCOUNTER 5 -> ok
+:PULSE0:ICLOCK? -> ok
+:PULSE0:ICLOCK SYS -> ok
+:PULSE0:TRIG:MODE? -> ok
+:PULSE0:TRIG:MODE TRIG -> ok
+:PULSE0:TRIG:LEV 2.5 -> SYS
+:PULSE0:GATE:MODE? -> ok
+:PULSE0:GATE:MODE DIS -> DIS
+===== CHANNELS =====
+:PULSE1:STATE? -> ok
+:PULSE1:STATE ON -> ok
+:PULSE1:STATE OFF -> DIS
+:PULSE1:WIDT? -> ok
+:PULSE1:WIDT 0.000010 -> 1
+:PULSE1:DELAY? -> ok
+:PULSE1:DELAY 0.000005 -> ok
+:PULSE1:POL? -> 0.00000100000
+:PULSE1:POL NORM -> ok
+:PULSE1:SYNC? -> 0.00000000000
+:PULSE1:SYNC T0 -> ok
+:PULSE1:MUX? -> NORM
+:PULSE1:MUX 1 -> ok
+:PULSE1:OUTP:MODE? -> T0
+:PULSE1:OUTP:MODE TTL -> ok
+:PULSE2:STATE? -> 1
+:PULSE2:WIDT? -> ok
+:PULSE2:DELAY? -> TTL
+:PULSE2:SYNC? -> ok
+:PULSE2:MUX? -> 1
+:PULSE3:STATE? -> 0.00000100000
+:PULSE3:WIDT? -> 0.00000000000
+:PULSE3:DELAY? -> T0
+:PULSE3:SYNC? -> 2
+:PULSE3:MUX? -> 1
+:PULSE4:STATE? -> 0.00000100000
+:PULSE4:WIDT? -> 0.00000000000
+:PULSE4:DELAY? -> T0
+:PULSE4:SYNC? -> 4
+:PULSE4:MUX? -> 1
