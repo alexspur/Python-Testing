@@ -198,7 +198,7 @@ class BNC575Controller:
 
     def fire_internal(self) -> None:
         """Software trigger (no readback)."""
-        # Use current trigger enable/mode; do not force a trigger if disabled
+        # Ensure trigger engine is in a runnable state and ON
         self._arm_trigger_state()
         self._write_scpi("*TRG")
 
@@ -216,7 +216,10 @@ class BNC575Controller:
         return True
 
     def enable_trigger(self, enabled: bool = True) -> bool:
-        """Explicit enable/disable trigger without changing other settings."""
+        """
+        Explicit enable/disable trigger. Enabling arms with current settings;
+        disabling turns trigger off.
+        """
         self.model.set_trigger_output(enabled)
         if enabled and self.model.trigger.mode == "DIS":
             self.model.set_trigger_mode("TRIG")
