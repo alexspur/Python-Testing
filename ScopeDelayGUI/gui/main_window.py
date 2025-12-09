@@ -183,15 +183,15 @@ class ScopeDelayMainWindow(QMainWindow):
         # Normalize time to shared reference
         t = time.time() - self.wj_start_time
 
-        # Update live numeric readouts in SF6 window
+        # Update live gauge displays in SF6 window
         if hasattr(self, "sf6_window"):
             try:
                 if unit_index == 0:
-                    self.sf6_window.kv1_value.setText(f"{kv:.2f} kV")
-                    self.sf6_window.ma1_value.setText(f"{ma:.2f} mA")
+                    self.sf6_window.kv1_gauge.update_value(kv)
+                    self.sf6_window.ma1_gauge.update_value(ma)
                 elif unit_index == 1:
-                    self.sf6_window.kv2_value.setText(f"{kv:.2f} kV")
-                    self.sf6_window.ma2_value.setText(f"{ma:.2f} mA")
+                    self.sf6_window.kv2_gauge.update_value(kv)
+                    self.sf6_window.ma2_gauge.update_value(ma)
             except Exception:
                 pass
 
@@ -644,8 +644,9 @@ class ScopeDelayMainWindow(QMainWindow):
 
     def on_dg_fire(self):
         try:
-            delayA = self.dg_panel.delayA.value()
-            widthA = self.dg_panel.widthA.value()
+            # Get values in seconds using the unit selector buttons
+            delayA = self.dg_panel.get_delayA()
+            widthA = self.dg_panel.get_widthA()
 
             self.log(f"[DG535] Config pulse A: delay={delayA:.3e}, width={widthA:.3e}")
             self.set_status("yellow", "Configuring DG535...")
@@ -714,14 +715,15 @@ class ScopeDelayMainWindow(QMainWindow):
 
     def on_bnc_apply(self):
         try:
-            wA = self.bnc_panel.widthA.value()
-            dA = self.bnc_panel.delayA.value()
-            wB = self.bnc_panel.widthB.value()
-            dB = self.bnc_panel.delayB.value()
-            wC = self.bnc_panel.widthC.value()
-            dC = self.bnc_panel.delayC.value()
-            wD = self.bnc_panel.widthD.value()
-            dD = self.bnc_panel.delayD.value()
+            # Get values in seconds using the unit selector buttons
+            wA = self.bnc_panel.get_widthA()
+            dA = self.bnc_panel.get_delayA()
+            wB = self.bnc_panel.get_widthB()
+            dB = self.bnc_panel.get_delayB()
+            wC = self.bnc_panel.get_widthC()
+            dC = self.bnc_panel.get_delayC()
+            wD = self.bnc_panel.get_widthD()
+            dD = self.bnc_panel.get_delayD()
 
             self.bnc.apply_settings(wA, dA, wB, dB, wC, dC, wD, dD)
             self.data_logger.log_bnc575_config(wA, dA, wB, dB, wC, dC, wD, dD)
@@ -820,10 +822,10 @@ class ScopeDelayMainWindow(QMainWindow):
 
     def on_bnc_enable_trigger(self, enabled: bool):
         try:
+            # Just enable/disable the trigger output, don't automatically arm
             self.bnc.enable_trigger(enabled)
-            self.bnc_trigger_armed = enabled
-            self.bnc_panel.btn_arm.setText("Disarm (EXT TRIG)" if enabled else "Arm (EXT TRIG)")
-            self.log(f"[BNC575] Trigger {'ENABLED' if enabled else 'DISABLED'}")
+            # Don't change armed state - user must press "Arm" button separately
+            self.log(f"[BNC575] Trigger output {'ENABLED' if enabled else 'DISABLED'}")
         except Exception as e:
             self.error_popup("BNC575 Trigger Error", str(e))
             self.log(f"[BNC575 ERROR] {e}")
@@ -1074,8 +1076,9 @@ class ScopeDelayMainWindow(QMainWindow):
         # 3. CONFIGURE DG535 but DO NOT FIRE YET
         # -------------------------------------------
         try:
-            delayA = self.dg_panel.delayA.value()
-            widthA = self.dg_panel.widthA.value()
+            # Get values in seconds using the unit selector buttons
+            delayA = self.dg_panel.get_delayA()
+            widthA = self.dg_panel.get_widthA()
             self.dg.configure_pulse_A(delayA, widthA)
             self.data_logger.log_dg535_config(delayA, widthA)
             self.dg.set_single_shot()

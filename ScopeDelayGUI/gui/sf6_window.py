@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from gui.sf6_panel import SF6Panel
+from gui.gauge_widget import GaugeWidget
 import pyqtgraph as pg
 
 
@@ -28,12 +29,14 @@ class SF6Window(QMainWindow):
         main_layout.setSpacing(5)
 
         # -------------------------------------------
-        # Top row: SF6 panel (left) and WJ controls (right)
+        # VERTICAL SPLITTER: 3 equal sections
         # -------------------------------------------
-        top_splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_layout.addWidget(top_splitter)
+        vertical_splitter = QSplitter(Qt.Orientation.Vertical)
+        main_layout.addWidget(vertical_splitter)
 
-        # SF6 group
+        # -------------------------------------------
+        # SECTION 1: SF6 Marx Generator Control (TOP)
+        # -------------------------------------------
         sf6_group = QGroupBox("SF6 Marx Generator Control")
         sf6_group_font = QFont("Arial", 10)
         sf6_group_font.setBold(True)
@@ -45,9 +48,11 @@ class SF6Window(QMainWindow):
         self.sf6_panel = SF6Panel()
         sf6_layout.addWidget(self.sf6_panel)
 
-        top_splitter.addWidget(sf6_group)
+        vertical_splitter.addWidget(sf6_group)
 
-        # WJ controls group
+        # -------------------------------------------
+        # SECTION 2: WJ Controls (MIDDLE)
+        # -------------------------------------------
         wj_group = QGroupBox("WJ Controls")
         wj_group_font = QFont("Arial", 10)
         wj_group_font.setBold(True)
@@ -57,24 +62,27 @@ class SF6Window(QMainWindow):
         wj_layout.setSpacing(10)
         wj_group.setLayout(wj_layout)
 
-        # Live numeric readouts
-        values = QGridLayout()
-        values.setHorizontalSpacing(10)
-        values.setVerticalSpacing(6)
-        values.setContentsMargins(4, 0, 4, 0)
-        self.kv1_value = QLabel("0.00 kV")
-        self.ma1_value = QLabel("0.00 mA")
-        self.kv2_value = QLabel("0.00 kV")
-        self.ma2_value = QLabel("0.00 mA")
-        values.addWidget(QLabel("WJ1 kV:"), 0, 0)
-        values.addWidget(self.kv1_value, 0, 1)
-        values.addWidget(QLabel("WJ1 mA:"), 0, 2)
-        values.addWidget(self.ma1_value, 0, 3)
-        values.addWidget(QLabel("WJ2 kV:"), 1, 0)
-        values.addWidget(self.kv2_value, 1, 1)
-        values.addWidget(QLabel("WJ2 mA:"), 1, 2)
-        values.addWidget(self.ma2_value, 1, 3)
-        wj_layout.addLayout(values)
+        # Gauge displays instead of text labels
+        gauges_layout = QGridLayout()
+        gauges_layout.setHorizontalSpacing(10)
+        gauges_layout.setVerticalSpacing(6)
+        gauges_layout.setContentsMargins(4, 0, 4, 0)
+
+        # WJ1 gauges
+        self.kv1_gauge = GaugeWidget(min_value=0, max_value=100, label="kV", size=120)
+        self.ma1_gauge = GaugeWidget(min_value=0, max_value=6, label="mA", size=120)
+
+        # WJ2 gauges
+        self.kv2_gauge = GaugeWidget(min_value=0, max_value=100, label="kV", size=120)
+        self.ma2_gauge = GaugeWidget(min_value=0, max_value=6, label="mA", size=120)
+
+        gauges_layout.addWidget(QLabel("WJ1:"), 0, 0)
+        gauges_layout.addWidget(self.kv1_gauge, 0, 1)
+        gauges_layout.addWidget(self.ma1_gauge, 0, 2)
+        gauges_layout.addWidget(QLabel("WJ2:"), 1, 0)
+        gauges_layout.addWidget(self.kv2_gauge, 1, 1)
+        gauges_layout.addWidget(self.ma2_gauge, 1, 2)
+        wj_layout.addLayout(gauges_layout)
 
         # Program row
         program_row = QHBoxLayout()
@@ -135,10 +143,10 @@ class SF6Window(QMainWindow):
 
         wj_layout.addLayout(conn_grid)
 
-        top_splitter.addWidget(wj_group)
+        vertical_splitter.addWidget(wj_group)
 
         # -------------------------------------------
-        # Bottom plot spanning width
+        # SECTION 3: WJ Power Supply Monitor Plot (BOTTOM)
         # -------------------------------------------
         plot_group = QGroupBox("WJ Power Supply Monitor")
         plot_layout = QVBoxLayout()
@@ -156,20 +164,33 @@ class SF6Window(QMainWindow):
         self.wj_plot_widget.setMinimumHeight(280)
         plot_layout.addWidget(self.wj_plot_widget)
 
-        main_layout.addWidget(plot_group)
+        vertical_splitter.addWidget(plot_group)
+
+        # Set equal sizes for all 3 sections
+        vertical_splitter.setSizes([360, 360, 360])
 
         # Apply font styling to WJ plot
         self._apply_wj_font_styling()
 
-        # Curves for WJ data (will be populated by main window)
-        self.kv1_curve = self.wj_plot_widget.plot(pen=pg.mkPen('y', width=2), name="WJ1 kV")
-        self.ma1_curve = self.wj_plot_widget.plot(pen=pg.mkPen('c', width=2), name="WJ1 mA")
-        self.kv2_curve = self.wj_plot_widget.plot(pen=pg.mkPen('r', width=2), name="WJ2 kV")
-        self.ma2_curve = self.wj_plot_widget.plot(pen=pg.mkPen('m', width=2), name="WJ2 mA")
+        # Curves for WJ data with THICKER lines (width=5 instead of 2)
+        self.kv1_curve = self.wj_plot_widget.plot(pen=pg.mkPen('y', width=5), name="WJ1 kV")
+        self.ma1_curve = self.wj_plot_widget.plot(pen=pg.mkPen('c', width=5), name="WJ1 mA")
+        self.kv2_curve = self.wj_plot_widget.plot(pen=pg.mkPen('r', width=5), name="WJ2 kV")
+        self.ma2_curve = self.wj_plot_widget.plot(pen=pg.mkPen('m', width=5), name="WJ2 mA")
+
+        # Style legend with bold black font
+        legend = self.wj_plot_widget.plotItem.legend
+        legend.setLabelTextColor('k')
+        legend_font = QFont("Times New Roman", 14)
+        legend_font.setBold(True)
+        for item in legend.items:
+            for single_item in item:
+                if isinstance(single_item, pg.graphicsItems.LabelItem.LabelItem):
+                    single_item.setText(single_item.text, color='k', size='14pt', bold=True)
 
     def _apply_wj_font_styling(self):
-        """Apply Times New Roman bold font to WJ plot axes"""
-        font = QFont("Times New Roman", 12)
+        """Apply Times New Roman bold font to WJ plot axes with LARGER font sizes"""
+        font = QFont("Times New Roman", 16)  # Increased from 12 to 16
         font.setBold(True)
 
         left_axis = self.wj_plot_widget.getAxis('left')
@@ -180,7 +201,8 @@ class SF6Window(QMainWindow):
             axis.setPen('k')
             axis.setTextPen('k')
 
+        # Larger label font sizes (16pt instead of 12pt)
         self.wj_plot_widget.setLabel('left', 'Voltage (kV) / Current (mA)',
-                                      **{'font-size': '12pt', 'font-family': 'Times New Roman', 'font-weight': 'bold'})
+                                      **{'font-size': '16pt', 'font-family': 'Times New Roman', 'font-weight': 'bold'})
         self.wj_plot_widget.setLabel('bottom', 'Time (s)',
-                                      **{'font-size': '12pt', 'font-family': 'Times New Roman', 'font-weight': 'bold'})
+                                      **{'font-size': '16pt', 'font-family': 'Times New Roman', 'font-weight': 'bold'})

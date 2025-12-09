@@ -39,12 +39,12 @@ class SF6Panel(QGroupBox):
         self.label_ai = QLabel("Live Analog Inputs (4-20 mA):")
         layout.addWidget(self.label_ai)
 
-        # Gauges side by side to minimize height
+        # Gauges side by side to minimize height (0-200 PSI range for 4-20mA)
         gauges = QHBoxLayout()
         gauges.setSpacing(12)
-        self.ai_ch0 = GaugeWidget(label="PSI", size=120)
-        self.ai_ch1 = GaugeWidget(label="PSI", size=120)
-        self.ai_ch2 = GaugeWidget(label="PSI", size=120)
+        self.ai_ch0 = GaugeWidget(min_value=0, max_value=200, label="PSI", size=120)
+        self.ai_ch1 = GaugeWidget(min_value=0, max_value=200, label="PSI", size=120)
+        self.ai_ch2 = GaugeWidget(min_value=0, max_value=200, label="PSI", size=120)
         gauges.addWidget(self.ai_ch0)
         gauges.addWidget(self.ai_ch1)
         gauges.addWidget(self.ai_ch2)
