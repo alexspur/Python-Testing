@@ -1,0 +1,3 @@
+timestamp_sec,datetime,event_type,source,param1,param2,param3,param4,notes
+3.972632,2025-12-10 17:01:20.270,INFO,SYSTEM,,,,,GUI started successfully
+13.459763,2025-12-10 17:01:29.757,BNC575_PULSE,BNC575,INTERNAL,,,,INTERNAL

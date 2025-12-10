@@ -537,10 +537,10 @@ class MultiChannelPlotWidget(QWidget):
 class ScopePlotWindow(QWidget):
     """
     Window displaying waveforms from multiple Rigol oscilloscopes.
-    Supports configurable number of channels per scope (default 4).
+    Supports 2 channels per scope.
     """
-    
-    def __init__(self, parent=None, num_channels: int = 4, num_scopes: int = 3):
+
+    def __init__(self, parent=None, num_channels: int = 2, num_scopes: int = 3):
         super().__init__()
         self.parent = parent
         self.num_channels = min(4, max(1, num_channels))
