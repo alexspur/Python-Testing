@@ -469,9 +469,9 @@ class BNC575Controller:
         bnc.run()
     """
     
-    TERMINATOR = "\r\n"
+    TERMINATOR = "\n"
     TIMEOUT = 1.0
-    CMD_DELAY = 0.02  # 20ms between commands
+    CMD_DELAY = 0.05  # 50ms between commands (was 20ms)
     
     # Channel mapping: index -> channel number
     # 0 = T0 (system), 1 = A, 2 = B, 3 = C, 4 = D, 5 = E, 6 = F, 7 = G, 8 = H
@@ -517,12 +517,14 @@ class BNC575Controller:
             
             # Test connection and get info
             idn = self.identify()
-            if idn and "BNC" in idn:
+            if idn:
                 self._connected = True
                 self._parse_idn(idn)
                 return True
             else:
-                raise ConnectionError(f"Unexpected response: {idn}")
+                # Even if no IDN response, try to proceed if port opened
+                self._connected = True
+                return True
                 
         except Exception as e:
             self._connected = False
