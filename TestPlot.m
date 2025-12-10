@@ -21,9 +21,9 @@ opts.ExtraColumnsRule = "ignore";
 opts.EmptyLineRule = "read";
 
 % Import the data
-data = readtable("C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\rigol1_20251208_110512.csv", opts);
+% data = readtable("C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\rigol1_20251208_110512.csv", opts);
 
-
+data = readtable("C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\rigol2_20251210_173947.csv", opts);
 %% Clear temporary variables
 clear opts
 
