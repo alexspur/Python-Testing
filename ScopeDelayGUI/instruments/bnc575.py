@@ -357,95 +357,86 @@
 """
 BNC 575 Series Digital Delay/Pulse Generator Driver
 Based on BNC 575 Series Operating Manual Version 5.6
+Validated against actual hardware probe results
 
-This driver implements the complete SCPI command set for the BNC 575 series
-pulse generator, supporting RS232, USB, GPIB, and Ethernet interfaces.
+Firmware: 2.4.2-2.0.11 (as reported by *IDN?)
 
-Features:
-- 2, 4, or 8 independent output channels (model dependent)
-- 250 ps delay and width resolution
-- 0.0002 Hz to 20 MHz internal rate
-- Multiple trigger modes: Internal, External, Single Shot, Burst, Duty Cycle
-- Channel linking and multiplexing
-- Store/Recall for 12 user configurations
-- Counter function for trigger counting
+WORKING COMMANDS (from probe):
+- :PULSE<n>:DEL, :PULSE<n>:WIDT, :PULSE<n>:POL, :PULSE<n>:STATE
+- :PULSE0:TRIG:LEV, :PULSE0:TRIG:EDGE, :PULSE0:MODE
+- :PULSE0:PER (period)
+- *TRG, *IDN?, *RST, *SAV, *RCL
 
-Communication:
-- RS232: 4800-115200 baud (default 115200)
-- USB: Virtual COM port (default 38400 baud)
-- GPIB: Address 1-15 (optional)
-- Ethernet: TCP/IP via Digi module (optional)
-
-Author: Generated based on BNC 575 Manual
+NOT WORKING on this firmware:
+- :PULSE0:TRIG:SOUR (use :PULSE0:TRIG:MODE instead)
+- :SYST:ERR? (not implemented)
+- Channel name style (CHA:, CHB:)
 """
 
 import serial
 import time
-from enum import Enum, IntEnum
-from dataclasses import dataclass, field
-from typing import Optional, Union, List, Dict, Tuple
-
-
-class TriggerMode(Enum):
-    """System trigger modes"""
-    DISABLED = "DIS"
-    TRIGGERED = "TRIG"
-    DUAL = "DUAL"  # Requires DT15 option
+from typing import Optional, Tuple, List, Dict, Any
+from enum import Enum
 
 
 class SystemMode(Enum):
-    """System T0 modes"""
-    NORMAL = "NORM"       # Continuous
-    SINGLE = "SING"       # Single shot
-    BURST = "BURS"        # Burst mode
-    DCYCLE = "DCYC"       # Duty cycle
-    BURST_INC = "BINC"    # Burst increment (requires option)
-    DC_INC = "DINC"       # DC increment (requires option)
+    """System T0 modes - from manual page 8-38"""
+    CONTINUOUS = "NORM"    # Normal - continuous
+    SINGLE = "SING"        # Single shot
+    BURST = "BURS"         # Burst mode  
+    DUTY_CYCLE = "DCYC"    # Duty cycle
 
 
-class ChannelMode(Enum):
-    """Individual channel modes"""
-    NORMAL = "NORM"
-    SINGLE = "SING"
-    BURST = "BURS"
-    DCYCLE = "DCYC"
-
-
-class OutputMode(Enum):
-    """Output type modes"""
-    TTL = "TTL"
-    ADJUSTABLE = "ADJ"
-
-
-class Polarity(Enum):
-    """Output polarity"""
-    NORMAL = "NORM"       # Active high
-    COMPLEMENT = "COMP"   # Active low (inverted)
-    INVERTED = "INV"      # Alias for complement
-
-
-class GateMode(Enum):
-    """Gate input modes"""
-    DISABLED = "DIS"
-    PULSE_INHIBIT = "PULS"
-    OUTPUT_INHIBIT = "OUTP"
-    CHANNEL = "CHAN"      # Per-channel control
-
-
-class GateLogic(Enum):
-    """Gate logic level"""
-    LOW = "LOW"           # Active low
-    HIGH = "HIGH"         # Active high
+class TriggerMode(Enum):
+    """Trigger modes - from manual page 8-38"""
+    DISABLED = "DIS"       # Internal only
+    TRIGGERED = "TRIG"     # External trigger enabled
+    DUAL = "DUAL"          # Dual trigger (requires DT15 option)
 
 
 class TriggerEdge(Enum):
-    """Trigger edge selection"""
+    """Trigger edge - from manual page 8-38"""
     RISING = "RIS"
     FALLING = "FALL"
 
 
+class GateMode(Enum):
+    """Gate modes - from manual page 8-38"""
+    DISABLED = "DIS"
+    PULSE_INHIBIT = "PULS"
+    OUTPUT_INHIBIT = "OUTP"
+    CHANNEL = "CHAN"       # Per-channel control
+
+
+class GateLogic(Enum):
+    """Gate logic level"""
+    LOW = "LOW"
+    HIGH = "HIGH"
+
+
+class ChannelMode(Enum):
+    """Channel modes - from manual page 8-39"""
+    NORMAL = "NORM"
+    SINGLE = "SING"
+    BURST = "BURS"
+    DUTY_CYCLE = "DCYC"
+
+
+class Polarity(Enum):
+    """Output polarity - from manual page 8-39"""
+    NORMAL = "NORM"        # Active high
+    COMPLEMENT = "COMP"    # Active low
+    INVERTED = "INV"       # Alias for complement
+
+
+class OutputMode(Enum):
+    """Output type - from manual page 8-39"""
+    TTL = "TTL"
+    ADJUSTABLE = "ADJ"
+
+
 class ClockSource(Enum):
-    """Internal clock source"""
+    """Clock source - from manual page 8-38"""
     SYSTEM = "SYS"
     EXT_10MHZ = "EXT10"
     EXT_20MHZ = "EXT20"
@@ -456,163 +447,61 @@ class ClockSource(Enum):
     EXT_100MHZ = "EXT100"
 
 
-class RefOutput(Enum):
-    """Reference output frequencies"""
-    T0_PULSE = "T0"
-    MHZ_100 = "100"
-    MHZ_50 = "50"
-    MHZ_33 = "33"
-    MHZ_25 = "25"
-    MHZ_20 = "20"
-    MHZ_16 = "16"
-    MHZ_14 = "14"
-    MHZ_12 = "12"
-    MHZ_11 = "11"
-    MHZ_10 = "10"
-
-
-class Channel(IntEnum):
-    """Channel indices"""
-    T0 = 0
-    A = 1
-    B = 2
-    C = 3
-    D = 4
-    E = 5
-    F = 6
-    G = 7
-    H = 8
-
-
-@dataclass
-class ChannelConfig:
-    """Configuration for a single channel"""
-    enabled: bool = False
-    width: float = 10e-9          # Pulse width in seconds (10ns - 999.999s)
-    delay: float = 0.0            # Delay in seconds (0 - 999.999s)
-    sync_source: str = "T0"       # Sync source (T0, CHA, CHB, etc.)
-    mode: ChannelMode = ChannelMode.NORMAL
-    polarity: Polarity = Polarity.NORMAL
-    output_mode: OutputMode = OutputMode.TTL
-    amplitude: float = 4.0        # For adjustable mode (2-20V into 1k, 1-10V into 50Ω)
-    burst_count: int = 1          # Pulses in burst mode
-    on_count: int = 1             # On pulses in duty cycle mode
-    off_count: int = 1            # Off pulses in duty cycle mode
-    wait_count: int = 0           # T0 pulses to wait before enabling
-    mux: int = 0                  # Multiplexer bit field
-    gate_mode: GateMode = GateMode.DISABLED
-    gate_logic: GateLogic = GateLogic.HIGH
-
-
-@dataclass
-class TriggerConfig:
-    """Trigger configuration"""
-    mode: TriggerMode = TriggerMode.DISABLED
-    edge: TriggerEdge = TriggerEdge.RISING
-    level: float = 2.5            # 0.20V - 15V
-
-
-@dataclass
-class GateConfig:
-    """Gate configuration"""
-    mode: GateMode = GateMode.DISABLED
-    logic: GateLogic = GateLogic.HIGH
-    level: float = 2.5            # 0.20V - 15V
-
-
-@dataclass
-class SystemConfig:
-    """System-level configuration"""
-    mode: SystemMode = SystemMode.NORMAL
-    period: float = 0.001         # T0 period in seconds (50ns - 5000s)
-    burst_count: int = 1          # Pulses in burst mode
-    on_count: int = 1             # On pulses in duty cycle mode
-    off_count: int = 1            # Off pulses in duty cycle mode
-    clock_source: ClockSource = ClockSource.SYSTEM
-    ref_output: RefOutput = RefOutput.T0_PULSE
-
-
-@dataclass
-class BNC575State:
-    """Complete instrument state"""
-    running: bool = False
-    system: SystemConfig = field(default_factory=SystemConfig)
-    trigger: TriggerConfig = field(default_factory=TriggerConfig)
-    gate: GateConfig = field(default_factory=GateConfig)
-    channels: Dict[Channel, ChannelConfig] = field(default_factory=dict)
-    
-    def __post_init__(self):
-        if not self.channels:
-            # Initialize channels A-H (model may have 2, 4, or 8)
-            for ch in [Channel.A, Channel.B, Channel.C, Channel.D,
-                      Channel.E, Channel.F, Channel.G, Channel.H]:
-                self.channels[ch] = ChannelConfig()
-
-
 class BNC575Controller:
     """
     Controller for BNC 575 Series Digital Delay/Pulse Generator
     
-    Supports communication via:
-    - RS232 serial port
-    - USB (virtual COM port)
-    - GPIB (with Prologix adapter or native interface)
-    - Ethernet (optional COM module)
+    Based on manual SCPI command reference (pages 8-37 to 8-41)
+    and validated against actual hardware.
     
-    Example usage:
-        # RS232/USB connection
-        bnc = BNC575Controller(port='COM3', baudrate=115200)
-        bnc.connect()
+    Usage:
+        bnc = BNC575Controller()
+        bnc.connect("COM5")
         
-        # Configure channel A
-        bnc.set_channel_width(Channel.A, 1e-6)    # 1 µs pulse
-        bnc.set_channel_delay(Channel.A, 10e-6)  # 10 µs delay
-        bnc.set_channel_state(Channel.A, True)
+        # Configure channels
+        bnc.set_channel_delay(1, 10e-6)   # Channel A, 10 µs delay
+        bnc.set_channel_width(1, 1e-6)    # Channel A, 1 µs width
+        bnc.set_channel_state(1, True)    # Enable channel A
         
         # Set period and run
-        bnc.set_period(0.001)  # 1 ms period = 1 kHz
+        bnc.set_period(1e-3)              # 1 ms period (1 kHz)
+        bnc.set_system_mode(SystemMode.CONTINUOUS)
         bnc.run()
-        
-        bnc.disconnect()
     """
     
-    # Line termination
     TERMINATOR = "\r\n"
-    
-    # Response timeout
     TIMEOUT = 1.0
+    CMD_DELAY = 0.02  # 20ms between commands
     
-    # Command delay (some units need time between commands)
-    CMD_DELAY = 0.01
+    # Channel mapping: index -> channel number
+    # 0 = T0 (system), 1 = A, 2 = B, 3 = C, 4 = D, 5 = E, 6 = F, 7 = G, 8 = H
+    CHANNEL_MAP = {
+        'T0': 0, 'A': 1, 'B': 2, 'C': 3, 'D': 4,
+        'E': 5, 'F': 6, 'G': 7, 'H': 8,
+        'CHA': 1, 'CHB': 2, 'CHC': 3, 'CHD': 4,
+        'CHE': 5, 'CHF': 6, 'CHG': 7, 'CHH': 8,
+    }
     
-    def __init__(self, port: str = 'COM1', baudrate: int = 115200,
-                 gpib_address: Optional[int] = None,
-                 use_prologix: bool = False):
-        """
-        Initialize BNC575 controller
-        
-        Args:
-            port: Serial port name (e.g., 'COM3', '/dev/ttyUSB0')
-            baudrate: Baud rate (4800, 9600, 19200, 38400, 57600, 115200)
-            gpib_address: GPIB address if using GPIB interface
-            use_prologix: True if using Prologix GPIB-USB adapter
-        """
+    def __init__(self, port: str = None, baudrate: int = 115200):
         self.port = port
         self.baudrate = baudrate
-        self.gpib_address = gpib_address
-        self.use_prologix = use_prologix
         self.serial: Optional[serial.Serial] = None
-        self.state = BNC575State()
         self._connected = False
-        self._num_channels = 8  # Will be detected on connect
+        self._num_channels = 4  # Will detect on connect
+        self._firmware_version = ""
+    
+    # ==================== CONNECTION ====================
+    
+    def connect(self, port: str = None, baudrate: int = None) -> bool:
+        """Connect to BNC575"""
+        if port:
+            self.port = port
+        if baudrate:
+            self.baudrate = baudrate
         
-    def connect(self) -> bool:
-        """
-        Connect to the BNC575
+        if not self.port:
+            raise ValueError("No port specified")
         
-        Returns:
-            True if connection successful
-        """
         try:
             self.serial = serial.Serial(
                 port=self.port,
@@ -622,732 +511,586 @@ class BNC575Controller:
                 stopbits=serial.STOPBITS_ONE,
                 timeout=self.TIMEOUT
             )
-            time.sleep(0.5)  # Allow connection to stabilize
-            
-            # Configure Prologix if used
-            if self.use_prologix and self.gpib_address is not None:
-                self._setup_prologix()
-            
-            # Clear input buffer
+            time.sleep(0.5)
             self.serial.reset_input_buffer()
+            self.serial.reset_output_buffer()
             
-            # Test connection by querying ID
-            idn = self.get_identification()
-            if idn:
+            # Test connection and get info
+            idn = self.identify()
+            if idn and "BNC" in idn:
                 self._connected = True
-                # Detect number of channels
-                self._detect_channels()
+                self._parse_idn(idn)
                 return True
-            return False
-            
+            else:
+                raise ConnectionError(f"Unexpected response: {idn}")
+                
         except Exception as e:
-            print(f"Connection error: {e}")
-            return False
+            self._connected = False
+            if self.serial:
+                self.serial.close()
+            raise ConnectionError(f"Failed to connect: {e}")
     
-    def _setup_prologix(self):
-        """Configure Prologix GPIB-USB adapter"""
-        # Set to controller mode
-        self._write_raw("++mode 1")
-        time.sleep(0.05)
-        # Set GPIB address
-        self._write_raw(f"++addr {self.gpib_address}")
-        time.sleep(0.05)
-        # Auto-read after write
-        self._write_raw("++auto 1")
-        time.sleep(0.05)
-        # Set EOI assertion
-        self._write_raw("++eoi 1")
-        time.sleep(0.05)
-    
-    def _detect_channels(self):
-        """Detect number of available channels"""
+    def _parse_idn(self, idn: str):
+        """Parse IDN response: BNC,575-4,31707,2.4.2-2.0.11"""
         try:
-            catalog = self.query(":INST:CAT?")
-            if catalog:
-                channels = catalog.split(',')
-                # Count channels (excluding T0)
-                self._num_channels = len([c for c in channels if c.strip().startswith('CH')])
+            parts = idn.split(',')
+            if len(parts) >= 2:
+                model = parts[1]  # e.g., "575-4"
+                if '-' in model:
+                    num_ch = int(model.split('-')[1])
+                    self._num_channels = num_ch
+            if len(parts) >= 4:
+                self._firmware_version = parts[3]
         except:
-            self._num_channels = 8  # Default to 8
+            pass
     
-    def disconnect(self):
-        """Disconnect from the BNC575"""
+    def close(self):
+        """Disconnect"""
         if self.serial and self.serial.is_open:
-            self.serial.close()
+            try:
+                self.serial.close()
+            except:
+                pass
         self._connected = False
     
     def is_connected(self) -> bool:
-        """Check if connected"""
         return self._connected and self.serial and self.serial.is_open
     
+    # ==================== LOW-LEVEL COMMUNICATION ====================
+    
     def _write_raw(self, command: str):
-        """Write raw command without processing"""
-        if self.serial and self.serial.is_open:
-            self.serial.write((command + self.TERMINATOR).encode())
-            time.sleep(self.CMD_DELAY)
-    
-    def write(self, command: str) -> bool:
-        """
-        Send command to the BNC575
-        
-        Args:
-            command: SCPI command string
-            
-        Returns:
-            True if command acknowledged
-        """
+        """Write command without reading response"""
         if not self.is_connected():
-            return False
-        
-        try:
-            self._write_raw(command)
-            # Read response (BNC575 responds to every command)
-            response = self._read_response()
-            return response.lower().strip() == "ok"
-        except Exception as e:
-            print(f"Write error: {e}")
-            return False
-    
-    def query(self, command: str) -> Optional[str]:
-        """
-        Send query and return response
-        
-        Args:
-            command: SCPI query string (should end with ?)
-            
-        Returns:
-            Response string or None on error
-        """
-        if not self.is_connected():
-            return None
-        
-        try:
-            self._write_raw(command)
-            return self._read_response()
-        except Exception as e:
-            print(f"Query error: {e}")
-            return None
+            raise ConnectionError("Not connected")
+        self.serial.reset_input_buffer()
+        self.serial.write((command + self.TERMINATOR).encode('ascii'))
+        self.serial.flush()
+        time.sleep(self.CMD_DELAY)
     
     def _read_response(self) -> str:
-        """Read response from instrument"""
+        """Read response until terminator or timeout"""
         response = ""
-        while True:
-            char = self.serial.read(1)
-            if not char:
-                break
-            response += char.decode('ascii', errors='ignore')
-            if response.endswith('\r\n') or response.endswith('\n'):
-                break
+        start = time.time()
+        while (time.time() - start) < self.TIMEOUT:
+            if self.serial.in_waiting > 0:
+                chunk = self.serial.read(self.serial.in_waiting)
+                response += chunk.decode('ascii', errors='ignore')
+                if '\n' in response or '\r' in response:
+                    break
+            time.sleep(0.005)
         return response.strip()
     
-    # ========== Identification Commands ==========
+    def _command(self, cmd: str) -> bool:
+        """Send command, expect 'ok' response"""
+        self._write_raw(cmd)
+        resp = self._read_response()
+        if resp.lower() == "ok":
+            return True
+        elif resp.startswith("?"):
+            # Error code
+            return False
+        return True  # Some commands may not respond
     
-    def get_identification(self) -> Optional[str]:
-        """Query instrument identification (*IDN?)"""
-        return self.query("*IDN?")
+    def _query(self, cmd: str) -> str:
+        """Send query, return response"""
+        self._write_raw(cmd)
+        return self._read_response()
+    
+    # ==================== IDENTIFICATION ====================
+    
+    def identify(self) -> str:
+        """Get instrument ID (*IDN?)"""
+        try:
+            return self._query("*IDN?")
+        except:
+            return ""
     
     def reset(self) -> bool:
-        """Reset instrument to default state (*RST)"""
-        return self.write("*RST")
+        """Reset to defaults (*RST)"""
+        return self._command("*RST")
     
-    # ========== System Control ==========
+    def get_firmware_version(self) -> str:
+        """Get firmware version from last IDN"""
+        return self._firmware_version
+    
+    def get_num_channels(self) -> int:
+        """Get number of channels (2, 4, or 8)"""
+        return self._num_channels
+    
+    # ==================== SYSTEM CONTROL ====================
     
     def run(self) -> bool:
-        """Start pulse generation (equivalent to RUN/STOP button)"""
-        result = self.write(":PULSE0:STATE ON")
-        if result:
-            self.state.running = True
-        return result
+        """Start pulse generation (like pressing RUN)"""
+        return self._command(":PULSE0:STATE ON")
     
     def stop(self) -> bool:
         """Stop pulse generation"""
-        result = self.write(":PULSE0:STATE OFF")
-        if result:
-            self.state.running = False
-        return result
+        return self._command(":PULSE0:STATE OFF")
     
     def is_running(self) -> bool:
-        """Check if instrument is generating pulses"""
-        response = self.query(":SYST:STAT?")
-        if response:
-            return response.strip() == "1"
-        return False
+        """Check if running"""
+        resp = self._query(":PULSE0:STATE?")
+        return resp in ("1", "ON")
     
     def trigger(self) -> bool:
-        """Generate software trigger (*TRG)"""
-        return self.write("*TRG")
+        """Software trigger (*TRG)"""
+        return self._command("*TRG")
     
-    def arm(self) -> bool:
-        """Arm single shot/burst channels (*ARM)"""
-        return self.write("*ARM")
-    
-    # ========== System Mode Configuration ==========
+    # ==================== SYSTEM MODE (T0) ====================
     
     def set_system_mode(self, mode: SystemMode) -> bool:
-        """Set system T0 mode"""
-        result = self.write(f":PULSE0:MODE {mode.value}")
-        if result:
-            self.state.system.mode = mode
-        return result
+        """Set system mode: NORM, SING, BURS, DCYC"""
+        return self._command(f":PULSE0:MODE {mode.value}")
     
     def get_system_mode(self) -> Optional[SystemMode]:
         """Get current system mode"""
-        response = self.query(":PULSE0:MODE?")
-        if response:
-            for mode in SystemMode:
-                if response.strip().upper().startswith(mode.value):
-                    return mode
+        resp = self._query(":PULSE0:MODE?")
+        for m in SystemMode:
+            if resp.upper().startswith(m.value):
+                return m
         return None
     
     def set_period(self, period: float) -> bool:
-        """
-        Set T0 period (determines fundamental output frequency)
-        
-        Args:
-            period: Period in seconds (100ns to 5000s)
-        """
-        result = self.write(f":PULSE0:PER {period:.11f}")
-        if result:
-            self.state.system.period = period
-        return result
+        """Set T0 period in seconds (100ns to 5000s)"""
+        return self._command(f":PULSE0:PER {period:.11e}")
     
-    def get_period(self) -> Optional[float]:
+    def get_period(self) -> float:
         """Get T0 period in seconds"""
-        response = self.query(":PULSE0:PER?")
-        if response:
-            try:
-                return float(response.strip())
-            except ValueError:
-                pass
-        return None
+        resp = self._query(":PULSE0:PER?")
+        try:
+            return float(resp)
+        except:
+            return 0.001
     
-    def set_frequency(self, frequency: float) -> bool:
-        """
-        Set output frequency (convenience method)
-        
-        Args:
-            frequency: Frequency in Hz (0.0002 Hz to 20 MHz)
-        """
-        if frequency > 0:
-            return self.set_period(1.0 / frequency)
+    def set_frequency(self, freq: float) -> bool:
+        """Set frequency in Hz (convenience method)"""
+        if freq > 0:
+            return self.set_period(1.0 / freq)
         return False
     
-    def get_frequency(self) -> Optional[float]:
-        """Get output frequency in Hz"""
-        period = self.get_period()
-        if period and period > 0:
-            return 1.0 / period
-        return None
+    def get_frequency(self) -> float:
+        """Get frequency in Hz"""
+        p = self.get_period()
+        return 1.0 / p if p > 0 else 0
     
     def set_burst_count(self, count: int) -> bool:
-        """Set system burst count (1 to 9,999,999)"""
-        result = self.write(f":PULSE0:BCOU {count}")
-        if result:
-            self.state.system.burst_count = count
-        return result
+        """Set burst count (1 to 9,999,999)"""
+        return self._command(f":PULSE0:BCOU {count}")
     
-    def set_duty_cycle_counts(self, on_count: int, off_count: int) -> bool:
-        """Set system duty cycle on/off counts"""
-        result1 = self.write(f":PULSE0:PCOU {on_count}")
-        result2 = self.write(f":PULSE0:OCOU {off_count}")
-        if result1 and result2:
-            self.state.system.on_count = on_count
-            self.state.system.off_count = off_count
-        return result1 and result2
+    def get_burst_count(self) -> int:
+        """Get burst count"""
+        resp = self._query(":PULSE0:BCOU?")
+        try:
+            return int(resp)
+        except:
+            return 1
     
-    # ========== Clock/Rate Configuration ==========
+    def set_duty_cycle(self, on_count: int, off_count: int) -> bool:
+        """Set duty cycle on/off counts"""
+        r1 = self._command(f":PULSE0:PCOU {on_count}")
+        r2 = self._command(f":PULSE0:OCOU {off_count}")
+        return r1 and r2
+    
+    # ==================== CLOCK SOURCE ====================
     
     def set_clock_source(self, source: ClockSource) -> bool:
         """Set internal clock source"""
-        result = self.write(f":PULSE0:ICL {source.value}")
-        if result:
-            self.state.system.clock_source = source
-        return result
+        return self._command(f":PULSE0:ICL {source.value}")
     
-    def set_ref_output(self, ref: RefOutput) -> bool:
-        """Set reference output frequency"""
-        result = self.write(f":PULSE0:OCL {ref.value}")
-        if result:
-            self.state.system.ref_output = ref
-        return result
+    def set_clock_output(self, divider: int) -> bool:
+        """Set clock output (T0 or divided: 10, 11, 12, 14, 16, 20, 25, 33, 50, 100)"""
+        return self._command(f":PULSE0:OCL {divider}")
     
-    # ========== Trigger Configuration ==========
+    # ==================== TRIGGER ====================
     
     def set_trigger_mode(self, mode: TriggerMode) -> bool:
-        """Set trigger mode (Disabled, Triggered, or Dual)"""
-        result = self.write(f":PULSE0:TRIG:MODE {mode.value}")
-        if result:
-            self.state.trigger.mode = mode
-        return result
+        """Set trigger mode: DIS, TRIG, DUAL"""
+        return self._command(f":PULSE0:TRIG:MODE {mode.value}")
     
-    def set_trigger_edge(self, edge: TriggerEdge) -> bool:
-        """Set trigger edge (Rising or Falling)"""
-        result = self.write(f":PULSE0:TRIG:LOG {edge.value}")
-        if result:
-            self.state.trigger.edge = edge
-        return result
+    def get_trigger_mode(self) -> Optional[TriggerMode]:
+        """Get trigger mode"""
+        resp = self._query(":PULSE0:TRIG:MODE?")
+        for m in TriggerMode:
+            if resp.upper().startswith(m.value):
+                return m
+        return None
     
     def set_trigger_level(self, level: float) -> bool:
-        """Set trigger threshold level (0.20V to 15V)"""
+        """Set trigger level (0.20V to 15V)"""
         level = max(0.20, min(15.0, level))
-        result = self.write(f":PULSE0:TRIG:LEV {level:.3f}")
-        if result:
-            self.state.trigger.level = level
-        return result
+        return self._command(f":PULSE0:TRIG:LEV {level:.3f}")
     
-    def get_trigger_level(self) -> Optional[float]:
-        """Get trigger threshold level"""
-        response = self.query(":PULSE0:TRIG:LEV?")
-        if response:
-            try:
-                return float(response.strip())
-            except ValueError:
-                pass
+    def get_trigger_level(self) -> float:
+        """Get trigger level"""
+        resp = self._query(":PULSE0:TRIG:LEV?")
+        try:
+            return float(resp)
+        except:
+            return 2.5
+    
+    def set_trigger_edge(self, edge: TriggerEdge) -> bool:
+        """Set trigger edge: RIS or FALL"""
+        return self._command(f":PULSE0:TRIG:LOG {edge.value}")
+    
+    def get_trigger_edge(self) -> Optional[TriggerEdge]:
+        """Get trigger edge"""
+        resp = self._query(":PULSE0:TRIG:LOG?")
+        for e in TriggerEdge:
+            if resp.upper().startswith(e.value):
+                return e
         return None
     
-    # ========== Gate Configuration ==========
+    # ==================== GATE ====================
     
     def set_gate_mode(self, mode: GateMode) -> bool:
-        """Set global gate mode"""
-        result = self.write(f":PULSE0:GATE:MODE {mode.value}")
-        if result:
-            self.state.gate.mode = mode
-        return result
-    
-    def set_gate_logic(self, logic: GateLogic) -> bool:
-        """Set gate logic level"""
-        result = self.write(f":PULSE0:GATE:LOG {logic.value}")
-        if result:
-            self.state.gate.logic = logic
-        return result
+        """Set gate mode"""
+        return self._command(f":PULSE0:GATE:MODE {mode.value}")
     
     def set_gate_level(self, level: float) -> bool:
-        """Set gate threshold level (0.20V to 15V)"""
+        """Set gate level (0.20V to 15V)"""
         level = max(0.20, min(15.0, level))
-        result = self.write(f":PULSE0:GATE:LEV {level:.3f}")
-        if result:
-            self.state.gate.level = level
-        return result
+        return self._command(f":PULSE0:GATE:LEV {level:.3f}")
     
-    # ========== Channel Configuration ==========
+    def set_gate_logic(self, logic: GateLogic) -> bool:
+        """Set gate logic: LOW or HIGH"""
+        return self._command(f":PULSE0:GATE:LOG {logic.value}")
     
-    def set_channel_state(self, channel: Channel, enabled: bool) -> bool:
-        """Enable or disable a channel"""
+    # ==================== CHANNEL CONFIGURATION ====================
+    
+    def _resolve_channel(self, channel) -> int:
+        """Convert channel name/number to PULSE index"""
+        if isinstance(channel, int):
+            return channel
+        if isinstance(channel, str):
+            return self.CHANNEL_MAP.get(channel.upper(), 1)
+        return 1
+    
+    def set_channel_state(self, channel, enabled: bool) -> bool:
+        """Enable/disable channel"""
+        ch = self._resolve_channel(channel)
         state = "ON" if enabled else "OFF"
-        result = self.write(f":PULSE{channel.value}:STATE {state}")
-        if result and channel in self.state.channels:
-            self.state.channels[channel].enabled = enabled
-        return result
+        return self._command(f":PULSE{ch}:STATE {state}")
     
-    def get_channel_state(self, channel: Channel) -> Optional[bool]:
+    def get_channel_state(self, channel) -> bool:
         """Get channel enabled state"""
-        response = self.query(f":PULSE{channel.value}:STATE?")
-        if response:
-            return response.strip() == "1" or response.strip().upper() == "ON"
-        return None
+        ch = self._resolve_channel(channel)
+        resp = self._query(f":PULSE{ch}:STATE?")
+        return resp in ("1", "ON")
     
-    def set_channel_width(self, channel: Channel, width: float) -> bool:
-        """
-        Set channel pulse width
-        
-        Args:
-            channel: Channel (A-H)
-            width: Width in seconds (10ns to 999.999s)
-        """
-        result = self.write(f":PULSE{channel.value}:WIDT {width:.11f}")
-        if result and channel in self.state.channels:
-            self.state.channels[channel].width = width
-        return result
+    def set_channel_width(self, channel, width: float) -> bool:
+        """Set channel width in seconds (10ns to 999.999s)"""
+        ch = self._resolve_channel(channel)
+        return self._command(f":PULSE{ch}:WIDT {width:.11e}")
     
-    def get_channel_width(self, channel: Channel) -> Optional[float]:
-        """Get channel pulse width in seconds"""
-        response = self.query(f":PULSE{channel.value}:WIDT?")
-        if response:
-            try:
-                return float(response.strip())
-            except ValueError:
-                pass
-        return None
+    def get_channel_width(self, channel) -> float:
+        """Get channel width in seconds"""
+        ch = self._resolve_channel(channel)
+        resp = self._query(f":PULSE{ch}:WIDT?")
+        try:
+            return float(resp)
+        except:
+            return 1e-6
     
-    def set_channel_delay(self, channel: Channel, delay: float) -> bool:
-        """
-        Set channel delay
-        
-        Args:
-            channel: Channel (A-H)
-            delay: Delay in seconds (0 to 999.999s, can be negative for channel sync)
-        """
-        result = self.write(f":PULSE{channel.value}:DEL {delay:.11f}")
-        if result and channel in self.state.channels:
-            self.state.channels[channel].delay = delay
-        return result
+    def set_channel_delay(self, channel, delay: float) -> bool:
+        """Set channel delay in seconds (-999.999s to 999.999s)"""
+        ch = self._resolve_channel(channel)
+        return self._command(f":PULSE{ch}:DEL {delay:.11e}")
     
-    def get_channel_delay(self, channel: Channel) -> Optional[float]:
+    def get_channel_delay(self, channel) -> float:
         """Get channel delay in seconds"""
-        response = self.query(f":PULSE{channel.value}:DEL?")
-        if response:
-            try:
-                return float(response.strip())
-            except ValueError:
-                pass
+        ch = self._resolve_channel(channel)
+        resp = self._query(f":PULSE{ch}:DEL?")
+        try:
+            return float(resp)
+        except:
+            return 0.0
+    
+    def set_channel_polarity(self, channel, polarity: Polarity) -> bool:
+        """Set channel polarity"""
+        ch = self._resolve_channel(channel)
+        return self._command(f":PULSE{ch}:POL {polarity.value}")
+    
+    def get_channel_polarity(self, channel) -> Optional[Polarity]:
+        """Get channel polarity"""
+        ch = self._resolve_channel(channel)
+        resp = self._query(f":PULSE{ch}:POL?")
+        for p in Polarity:
+            if resp.upper().startswith(p.value):
+                return p
         return None
     
-    def set_channel_sync(self, channel: Channel, sync_source: str) -> bool:
-        """
-        Set channel sync source
-        
-        Args:
-            channel: Channel to configure
-            sync_source: Sync source ("T0", "CHA", "CHB", etc.)
-        """
-        result = self.write(f":PULSE{channel.value}:SYNC {sync_source}")
-        if result and channel in self.state.channels:
-            self.state.channels[channel].sync_source = sync_source
-        return result
+    def set_channel_sync(self, channel, sync_source: str) -> bool:
+        """Set channel sync source (T0, CHA, CHB, etc.)"""
+        ch = self._resolve_channel(channel)
+        return self._command(f":PULSE{ch}:SYNC {sync_source}")
     
-    def set_channel_polarity(self, channel: Channel, polarity: Polarity) -> bool:
-        """Set channel output polarity"""
-        result = self.write(f":PULSE{channel.value}:POL {polarity.value}")
-        if result and channel in self.state.channels:
-            self.state.channels[channel].polarity = polarity
-        return result
+    def get_channel_sync(self, channel) -> str:
+        """Get channel sync source"""
+        ch = self._resolve_channel(channel)
+        return self._query(f":PULSE{ch}:SYNC?")
     
-    def set_channel_output_mode(self, channel: Channel, mode: OutputMode) -> bool:
-        """Set channel output mode (TTL or Adjustable)"""
-        result = self.write(f":PULSE{channel.value}:OUTP:MODE {mode.value}")
-        if result and channel in self.state.channels:
-            self.state.channels[channel].output_mode = mode
-        return result
+    def set_channel_output_mode(self, channel, mode: OutputMode) -> bool:
+        """Set output mode (TTL or ADJ)"""
+        ch = self._resolve_channel(channel)
+        return self._command(f":PULSE{ch}:OUTP:MODE {mode.value}")
     
-    def set_channel_amplitude(self, channel: Channel, amplitude: float) -> bool:
-        """
-        Set channel output amplitude (for adjustable mode)
-        
-        Args:
-            channel: Channel
-            amplitude: Amplitude in volts (2-20V into 1kΩ, 1-10V into 50Ω)
-        """
-        amplitude = max(2.0, min(20.0, amplitude))
-        result = self.write(f":PULSE{channel.value}:OUTP:AMP {amplitude:.3f}")
-        if result and channel in self.state.channels:
-            self.state.channels[channel].amplitude = amplitude
-        return result
+    def set_channel_amplitude(self, channel, amplitude: float) -> bool:
+        """Set output amplitude in V (for adjustable mode)"""
+        ch = self._resolve_channel(channel)
+        return self._command(f":PULSE{ch}:OUTP:AMP {amplitude:.3f}")
     
-    def set_channel_mode(self, channel: Channel, mode: ChannelMode) -> bool:
-        """Set channel operating mode"""
-        result = self.write(f":PULSE{channel.value}:CMOD {mode.value}")
-        if result and channel in self.state.channels:
-            self.state.channels[channel].mode = mode
-        return result
+    def get_channel_amplitude(self, channel) -> float:
+        """Get output amplitude"""
+        ch = self._resolve_channel(channel)
+        resp = self._query(f":PULSE{ch}:OUTP:AMP?")
+        try:
+            return float(resp)
+        except:
+            return 4.0
     
-    def set_channel_burst_count(self, channel: Channel, count: int) -> bool:
+    def set_channel_mode(self, channel, mode: ChannelMode) -> bool:
+        """Set channel mode"""
+        ch = self._resolve_channel(channel)
+        return self._command(f":PULSE{ch}:CMOD {mode.value}")
+    
+    def set_channel_burst_count(self, channel, count: int) -> bool:
         """Set channel burst count"""
-        result = self.write(f":PULSE{channel.value}:BCOU {count}")
-        if result and channel in self.state.channels:
-            self.state.channels[channel].burst_count = count
-        return result
+        ch = self._resolve_channel(channel)
+        return self._command(f":PULSE{ch}:BCOU {count}")
     
-    def set_channel_duty_cycle(self, channel: Channel, on_count: int, off_count: int) -> bool:
-        """Set channel duty cycle on/off counts"""
-        result1 = self.write(f":PULSE{channel.value}:PCOU {on_count}")
-        result2 = self.write(f":PULSE{channel.value}:OCOU {off_count}")
-        if result1 and result2 and channel in self.state.channels:
-            self.state.channels[channel].on_count = on_count
-            self.state.channels[channel].off_count = off_count
-        return result1 and result2
+    def set_channel_duty_cycle(self, channel, on: int, off: int) -> bool:
+        """Set channel duty cycle counts"""
+        ch = self._resolve_channel(channel)
+        r1 = self._command(f":PULSE{ch}:PCOU {on}")
+        r2 = self._command(f":PULSE{ch}:OCOU {off}")
+        return r1 and r2
     
-    def set_channel_wait(self, channel: Channel, wait_count: int) -> bool:
-        """Set channel wait count (T0 pulses to wait before enabling)"""
-        result = self.write(f":PULSE{channel.value}:WCOU {wait_count}")
-        if result and channel in self.state.channels:
-            self.state.channels[channel].wait_count = wait_count
-        return result
+    def set_channel_wait(self, channel, count: int) -> bool:
+        """Set channel wait count (T0 pulses before enabling)"""
+        ch = self._resolve_channel(channel)
+        return self._command(f":PULSE{ch}:WCOU {count}")
     
-    def set_channel_mux(self, channel: Channel, mux_bits: int) -> bool:
-        """
-        Set channel multiplexer
-        
-        Args:
-            channel: Output channel
-            mux_bits: Bit field selecting which timers to combine
-                      (bit 0 = ChA, bit 1 = ChB, etc.)
-        """
-        result = self.write(f":PULSE{channel.value}:MUX {mux_bits}")
-        if result and channel in self.state.channels:
-            self.state.channels[channel].mux = mux_bits
-        return result
+    def set_channel_mux(self, channel, mux_bits: int) -> bool:
+        """Set channel multiplexer (bit field)"""
+        ch = self._resolve_channel(channel)
+        return self._command(f":PULSE{ch}:MUX {mux_bits}")
     
-    def set_channel_gate(self, channel: Channel, mode: GateMode, logic: GateLogic = GateLogic.HIGH) -> bool:
-        """Set channel-specific gate control (requires global gate mode = CHANNEL)"""
-        result1 = self.write(f":PULSE{channel.value}:CGAT {mode.value}")
-        result2 = self.write(f":PULSE{channel.value}:CLOG {logic.value}")
-        if result1 and result2 and channel in self.state.channels:
-            self.state.channels[channel].gate_mode = mode
-            self.state.channels[channel].gate_logic = logic
-        return result1 and result2
+    def set_channel_gate(self, channel, mode: GateMode) -> bool:
+        """Set channel-specific gate mode"""
+        ch = self._resolve_channel(channel)
+        return self._command(f":PULSE{ch}:CGAT {mode.value}")
     
-    # ========== Counter Function ==========
+    def set_channel_gate_logic(self, channel, logic: GateLogic) -> bool:
+        """Set channel gate logic"""
+        ch = self._resolve_channel(channel)
+        return self._command(f":PULSE{ch}:CLOG {logic.value}")
+    
+    # ==================== COUNTER ====================
     
     def set_counter_state(self, enabled: bool) -> bool:
-        """Enable or disable counter function"""
+        """Enable/disable counter"""
         state = "ON" if enabled else "OFF"
-        return self.write(f":PULSE0:COUN:STAT {state}")
+        return self._command(f":PULSE0:COUN:STAT {state}")
     
     def clear_counter(self, counter: str = "TCNTS") -> bool:
-        """Clear counter (TCNTS for trigger counter, GCNTS for gate counter)"""
-        return self.write(f":PULSE0:COUN:CLE {counter}")
+        """Clear counter (TCNTS or GCNTS)"""
+        return self._command(f":PULSE0:COUN:CLE {counter}")
     
-    def get_counter(self, counter: str = "TCNTS") -> Optional[int]:
+    def get_counter(self, counter: str = "TCNTS") -> int:
         """Get counter value"""
-        response = self.query(f":PULSE0:COUN:COUN? {counter}")
-        if response:
-            try:
-                return int(response.strip())
-            except ValueError:
-                pass
-        return None
+        resp = self._query(f":PULSE0:COUN:COUN? {counter}")
+        try:
+            return int(resp)
+        except:
+            return 0
     
-    # ========== Store/Recall ==========
+    # ==================== STORE/RECALL ====================
     
     def store_config(self, location: int, label: str = "") -> bool:
-        """
-        Store current configuration to memory
-        
-        Args:
-            location: Memory location (1-12, 0 is factory default)
-            label: Optional label (max 14 characters)
-        """
-        if location < 1 or location > 12:
+        """Store config to memory (1-12)"""
+        if not 1 <= location <= 12:
             return False
         if label:
-            self.write(f'*LBL "{label[:14]}"')
-        return self.write(f"*SAV {location}")
+            self._command(f'*LBL "{label[:14]}"')
+        return self._command(f"*SAV {location}")
     
     def recall_config(self, location: int) -> bool:
-        """
-        Recall configuration from memory
-        
-        Args:
-            location: Memory location (0-12, 0 is factory default)
-        """
-        if location < 0 or location > 12:
+        """Recall config from memory (0-12, 0=factory)"""
+        if not 0 <= location <= 12:
             return False
-        return self.write(f"*RCL {location}")
+        return self._command(f"*RCL {location}")
     
     def recall_defaults(self) -> bool:
-        """Recall factory default configuration"""
+        """Recall factory defaults"""
         return self.recall_config(0)
     
-    def get_config_label(self) -> Optional[str]:
-        """Get label of last saved/recalled configuration"""
-        return self.query("*LBL?")
-    
-    # ========== Display Control ==========
+    # ==================== DISPLAY ====================
     
     def set_display_mode(self, auto_update: bool) -> bool:
-        """Set display auto-update mode"""
+        """Set display auto-update"""
         state = "ON" if auto_update else "OFF"
-        return self.write(f":DISP:MODE {state}")
-    
-    def update_display(self) -> bool:
-        """Force display update"""
-        return self.write(":DISP:UPD")
+        return self._command(f":DISP:MODE {state}")
     
     def set_display_brightness(self, level: int) -> bool:
-        """Set display brightness (0-4, where 0 is off)"""
+        """Set display brightness (0-4)"""
         level = max(0, min(4, level))
-        return self.write(f":DISP:BRIG {level}")
+        return self._command(f":DISP:BRIG {level}")
     
     def set_display_enable(self, enabled: bool) -> bool:
-        """Enable or disable display and front panel"""
+        """Enable/disable display"""
         state = "ON" if enabled else "OFF"
-        return self.write(f":DISP:ENAB {state}")
+        return self._command(f":DISP:ENAB {state}")
     
-    # ========== System Configuration ==========
+    # ==================== SYSTEM ====================
     
     def set_keylock(self, locked: bool) -> bool:
-        """Lock or unlock front panel keypad"""
+        """Lock/unlock front panel"""
         state = "ON" if locked else "OFF"
-        return self.write(f":SYST:KLOC {state}")
+        return self._command(f":SYST:KLOC {state}")
     
     def set_beeper(self, enabled: bool) -> bool:
-        """Enable or disable beeper"""
+        """Enable/disable beeper"""
         state = "ON" if enabled else "OFF"
-        return self.write(f":SYST:BEEP:STAT {state}")
-    
-    def set_beeper_volume(self, volume: int) -> bool:
-        """Set beeper volume (0-100)"""
-        volume = max(0, min(100, volume))
-        return self.write(f":SYST:BEEP:VOL {volume}")
+        return self._command(f":SYST:BEEP:STAT {state}")
     
     def set_autorun(self, enabled: bool) -> bool:
         """Set auto-run on power-up"""
         state = "ON" if enabled else "OFF"
-        return self.write(f":SYST:AUT {state}")
+        return self._command(f":SYST:AUT {state}")
     
-    def get_serial_number(self) -> Optional[str]:
-        """Get instrument serial number"""
-        return self.query(":SYST:SERN?")
+    # ==================== INSTRUMENT SELECTION ====================
     
-    def get_version(self) -> Optional[str]:
-        """Get SCPI version"""
-        return self.query(":SYST:VERS?")
+    def select_channel(self, channel) -> bool:
+        """Select channel for subsequent commands"""
+        ch = self._resolve_channel(channel)
+        names = {0: "T0", 1: "CHA", 2: "CHB", 3: "CHC", 4: "CHD",
+                 5: "CHE", 6: "CHF", 7: "CHG", 8: "CHH"}
+        return self._command(f":INST:SEL {names.get(ch, 'CHA')}")
     
-    def get_info(self) -> Optional[str]:
-        """Get instrument information"""
-        return self.query(":SYST:INF?")
-    
-    # ========== Instrument Selection (for multi-channel queries) ==========
-    
-    def select_channel(self, channel: Channel) -> bool:
-        """Select channel for subsequent commands without suffix"""
-        return self.write(f":INST:SEL {channel.name if channel != Channel.T0 else 'T0'}")
-    
-    def select_channel_by_number(self, number: int) -> bool:
-        """Select channel by numeric value"""
-        return self.write(f":INST:NSEL {number}")
-    
-    def get_channel_catalog(self) -> Optional[str]:
+    def get_channel_catalog(self) -> str:
         """Get list of available channels"""
-        return self.query(":INST:CAT?")
+        return self._query(":INST:CAT?")
     
-    def get_commands(self) -> Optional[str]:
-        """Get list of all SCPI commands"""
-        return self.query(":INST:COMM?")
+    # ==================== CONVENIENCE METHODS FOR MAIN_WINDOW.PY ====================
     
-    # ========== Convenience Methods ==========
+    def apply_settings(self, wA: float, dA: float, wB: float, dB: float,
+                       wC: float, dC: float, wD: float, dD: float) -> bool:
+        """Apply width/delay for channels A-D (main_window.py compatible)"""
+        success = True
+        success &= self.set_channel_delay(1, dA)
+        success &= self.set_channel_width(1, wA)
+        success &= self.set_channel_delay(2, dB)
+        success &= self.set_channel_width(2, wB)
+        success &= self.set_channel_delay(3, dC)
+        success &= self.set_channel_width(3, wC)
+        success &= self.set_channel_delay(4, dD)
+        success &= self.set_channel_width(4, wD)
+        return success
     
-    def configure_pulse(self, channel: Channel, delay: float, width: float,
-                       polarity: Polarity = Polarity.NORMAL,
-                       enabled: bool = True) -> bool:
-        """
-        Configure a complete pulse in one call
+    def read_settings(self) -> Tuple[float, float, float, float, float, float, float, float]:
+        """Read width/delay for channels A-D (main_window.py compatible)"""
+        wA = self.get_channel_width(1)
+        dA = self.get_channel_delay(1)
+        wB = self.get_channel_width(2)
+        dB = self.get_channel_delay(2)
+        wC = self.get_channel_width(3)
+        dC = self.get_channel_delay(3)
+        wD = self.get_channel_width(4)
+        dD = self.get_channel_delay(4)
+        return (wA, dA, wB, dB, wC, dC, wD, dD)
+    
+    def fire_internal(self) -> bool:
+        """Fire single internal pulse"""
+        self.set_system_mode(SystemMode.SINGLE)
+        time.sleep(0.01)
+        return self.run()
+    
+    def arm_trigger(self) -> bool:
+        """Arm for external trigger"""
+        self.set_trigger_mode(TriggerMode.TRIGGERED)
+        return self.run()
+    
+    def arm_external_trigger(self, level: float = 2.5) -> bool:
+        """Arm for external trigger with level"""
+        self.set_trigger_mode(TriggerMode.TRIGGERED)
+        self.set_trigger_level(level)
+        self.set_trigger_edge(TriggerEdge.RISING)
+        return self.run()
+    
+    def disarm_trigger(self) -> bool:
+        """Disarm trigger"""
+        self.stop()
+        return self.set_trigger_mode(TriggerMode.DISABLED)
+    
+    def enable_trigger(self, enabled: bool) -> bool:
+        """Enable/disable external trigger mode"""
+        mode = TriggerMode.TRIGGERED if enabled else TriggerMode.DISABLED
+        return self.set_trigger_mode(mode)
+    
+    def enable_output(self, channel: str, enabled: bool) -> bool:
+        """Enable/disable channel (accepts 'CHA', 'CHB', 'A', 'B', etc.)"""
+        return self.set_channel_state(channel, enabled)
+    
+    def set_trigger_settings(self, source: str, slope: str, level: float) -> bool:
+        """Configure trigger (main_window.py compatible)"""
+        # Source: INT or EXT
+        if source.upper() in ("EXT", "EXTERNAL", "TRIG"):
+            self.set_trigger_mode(TriggerMode.TRIGGERED)
+        else:
+            self.set_trigger_mode(TriggerMode.DISABLED)
         
-        Args:
-            channel: Channel to configure
-            delay: Delay in seconds
-            width: Pulse width in seconds
-            polarity: Output polarity
-            enabled: Enable channel after configuration
-        """
-        results = [
-            self.set_channel_delay(channel, delay),
-            self.set_channel_width(channel, width),
-            self.set_channel_polarity(channel, polarity),
-            self.set_channel_state(channel, enabled)
-        ]
-        return all(results)
+        # Slope: POS or NEG
+        rising = slope.upper() in ("POS", "POSITIVE", "RIS", "RISING")
+        self.set_trigger_edge(TriggerEdge.RISING if rising else TriggerEdge.FALLING)
+        
+        # Level
+        self.set_trigger_level(level)
+        return True
+    
+    def configure_pulse(self, channel, delay: float, width: float,
+                        polarity: Polarity = Polarity.NORMAL, enabled: bool = True) -> bool:
+        """Configure complete pulse"""
+        ch = self._resolve_channel(channel)
+        success = True
+        success &= self.set_channel_delay(ch, delay)
+        success &= self.set_channel_width(ch, width)
+        success &= self.set_channel_polarity(ch, polarity)
+        success &= self.set_channel_state(ch, enabled)
+        return success
     
     def configure_continuous(self, frequency: float) -> bool:
-        """Configure for continuous mode at given frequency"""
-        results = [
-            self.set_system_mode(SystemMode.NORMAL),
-            self.set_trigger_mode(TriggerMode.DISABLED),
-            self.set_frequency(frequency)
-        ]
-        return all(results)
-    
-    def configure_external_trigger(self, level: float = 2.5,
-                                   edge: TriggerEdge = TriggerEdge.RISING,
-                                   single_shot: bool = True) -> bool:
-        """Configure for external trigger operation"""
-        mode = SystemMode.SINGLE if single_shot else SystemMode.NORMAL
-        results = [
-            self.set_system_mode(mode),
-            self.set_trigger_mode(TriggerMode.TRIGGERED),
-            self.set_trigger_level(level),
-            self.set_trigger_edge(edge)
-        ]
-        return all(results)
+        """Configure continuous mode at frequency"""
+        self.set_system_mode(SystemMode.CONTINUOUS)
+        self.set_trigger_mode(TriggerMode.DISABLED)
+        return self.set_frequency(frequency)
     
     def configure_burst(self, count: int, frequency: float) -> bool:
-        """Configure for burst mode"""
-        results = [
-            self.set_system_mode(SystemMode.BURST),
-            self.set_burst_count(count),
-            self.set_frequency(frequency)
-        ]
-        return all(results)
-    
-    def read_all_channel_settings(self, channel: Channel) -> Optional[ChannelConfig]:
-        """Read all settings for a channel from the instrument"""
-        config = ChannelConfig()
-        
-        state = self.get_channel_state(channel)
-        if state is not None:
-            config.enabled = state
-        
-        width = self.get_channel_width(channel)
-        if width is not None:
-            config.width = width
-        
-        delay = self.get_channel_delay(channel)
-        if delay is not None:
-            config.delay = delay
-        
-        # Update state cache
-        if channel in self.state.channels:
-            self.state.channels[channel] = config
-        
-        return config
-    
-    def sync_state(self):
-        """Synchronize internal state with instrument"""
-        self.state.running = self.is_running()
-        
-        # Read system settings
-        mode = self.get_system_mode()
-        if mode:
-            self.state.system.mode = mode
-        
-        period = self.get_period()
-        if period:
-            self.state.system.period = period
-        
-        # Read channel settings
-        for ch in Channel:
-            if ch == Channel.T0:
-                continue
-            if ch.value <= self._num_channels:
-                self.read_all_channel_settings(ch)
+        """Configure burst mode"""
+        self.set_system_mode(SystemMode.BURST)
+        self.set_burst_count(count)
+        return self.set_frequency(frequency)
 
 
-# Example usage and testing
+# Test if run directly
 if __name__ == "__main__":
-    # Example: Create controller and demonstrate usage
-    print("BNC 575 Series Controller")
-    print("=" * 50)
+    print("BNC575 Controller Test")
+    print("=" * 40)
     
-    # Simulated usage (would need actual hardware to test)
-    print("\nExample usage:")
-    print("""
-    # Connect to BNC575 via USB
-    bnc = BNC575Controller(port='COM3', baudrate=38400)
-    bnc.connect()
-    
-    # Get instrument info
-    print(bnc.get_identification())
-    
-    # Configure for 1 kHz continuous operation
-    bnc.configure_continuous(frequency=1000)
-    
-    # Set up Channel A: 10 µs delay, 1 µs pulse
-    bnc.configure_pulse(Channel.A, delay=10e-6, width=1e-6)
-    
-    # Set up Channel B: 20 µs delay, 2 µs pulse
-    bnc.configure_pulse(Channel.B, delay=20e-6, width=2e-6)
-    
-    # Start pulses
-    bnc.run()
-    
-    # Stop after some time
-    time.sleep(5)
-    bnc.stop()
-    
-    # Store configuration
-    bnc.store_config(1, "My Config")
-    
-    # Disconnect
-    bnc.disconnect()
-    """)
+    bnc = BNC575Controller()
+    try:
+        bnc.connect("COM5")
+        print(f"Connected: {bnc.identify()}")
+        print(f"Channels: {bnc.get_num_channels()}")
+        print(f"Period: {bnc.get_period()}")
+        print(f"Mode: {bnc.get_system_mode()}")
         
+        # Test channel read
+        for ch in [1, 2, 3, 4]:
+            w = bnc.get_channel_width(ch)
+            d = bnc.get_channel_delay(ch)
+            print(f"Ch {ch}: width={w:.3e}, delay={d:.3e}")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        bnc.close()

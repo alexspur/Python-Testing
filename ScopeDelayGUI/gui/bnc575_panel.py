@@ -253,332 +253,354 @@
 BNC 575 Series Digital Delay/Pulse Generator GUI Panel
 Based on BNC 575 Series Operating Manual Version 5.6
 
-This panel provides a comprehensive interface for controlling the BNC575,
-with backward compatibility for existing code that uses simple getter methods.
+Designed to work with main_window.py and provide full device control.
 
 Features:
-- Tabbed interface: System, Channels, Trigger/Gate, Store/Recall
-- Unit selectors for time (s/ms/µs/ns/ps) and frequency (Hz/kHz/MHz)
-- Support for 2, 4, or 8 channel models
-- Backward compatible get_delayA(), get_widthA(), etc. methods
-
-Author: Generated based on BNC 575 Manual
+- 4 channel timing configuration (A, B, C, D) with unit selectors
+- System mode selection (Continuous, Single Shot, Burst, Duty Cycle)
+- Trigger configuration (INT/EXT, level, edge)
+- Gate configuration
+- Period/Frequency control
+- Channel enable/disable
+- Store/Recall configurations
 """
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
-    QLabel, QLineEdit, QPushButton, QComboBox, QTabWidget,
-    QCheckBox, QSpinBox, QDoubleSpinBox, QFrame, QScrollArea,
-    QSizePolicy, QMessageBox, QStatusBar
+    QLabel, QLineEdit, QPushButton, QComboBox, QDoubleSpinBox,
+    QSpinBox, QCheckBox, QTabWidget, QFrame, QSizePolicy,
+    QButtonGroup, QScrollArea
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QColor, QPalette
-from typing import Optional, Dict, Callable
-from enum import Enum
+from PyQt6.QtGui import QFont
+from typing import Optional
+
+# Try to import StatusLamp from utils
+try:
+    from utils.status_lamp import StatusLamp
+except ImportError:
+    class StatusLamp(QLabel):
+        def __init__(self):
+            super().__init__("●")
+            self.setStyleSheet("font-size: 14pt;")
+        def set_status(self, color: str, text: str):
+            colors = {"green": "#00ff00", "red": "#ff0000", "yellow": "#ffff00", "gray": "#888888"}
+            self.setStyleSheet(f"color: {colors.get(color, '#888888')}; font-size: 14pt;")
+            self.setToolTip(text)
 
 
-class TimeUnit(Enum):
-    """Time units with conversion factors to seconds"""
-    SECONDS = ("s", 1.0)
-    MILLISECONDS = ("ms", 1e-3)
-    MICROSECONDS = ("µs", 1e-6)
-    NANOSECONDS = ("ns", 1e-9)
-    PICOSECONDS = ("ps", 1e-12)
+class UnitSelector(QWidget):
+    """Time unit selector with buttons"""
     
-    def __init__(self, symbol: str, factor: float):
-        self.symbol = symbol
-        self.factor = factor
-
-
-class FreqUnit(Enum):
-    """Frequency units with conversion factors to Hz"""
-    HZ = ("Hz", 1.0)
-    KHZ = ("kHz", 1e3)
-    MHZ = ("MHz", 1e6)
+    unitChanged = pyqtSignal()
     
-    def __init__(self, symbol: str, factor: float):
-        self.symbol = symbol
-        self.factor = factor
-
-
-class ChannelWidget(QWidget):
-    """Widget for configuring a single channel"""
+    # Units: (label, multiplier to seconds)
+    UNITS = [
+        ("s", 1.0),
+        ("ms", 1e-3),
+        ("µs", 1e-6),
+        ("ns", 1e-9),
+    ]
     
-    settingsChanged = pyqtSignal(str)  # Emits channel name when settings change
-    
-    def __init__(self, channel_name: str, parent=None):
+    def __init__(self, default_unit: str = "µs", parent=None):
         super().__init__(parent)
-        self.channel_name = channel_name
-        self._setup_ui()
+        self._multiplier = 1e-6
+        self._setup_ui(default_unit)
     
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(4)
-        layout.setContentsMargins(4, 4, 4, 4)
+    def _setup_ui(self, default_unit: str):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
         
-        # Header with enable checkbox
-        header = QHBoxLayout()
-        self.enable_check = QCheckBox(f"Channel {self.channel_name} Enabled")
-        self.enable_check.setStyleSheet("font-weight: bold; font-size: 11pt;")
-        header.addWidget(self.enable_check)
-        header.addStretch()
-        layout.addLayout(header)
+        self.btn_group = QButtonGroup(self)
+        self.btn_group.setExclusive(True)
         
-        # Timing section
-        timing_group = QGroupBox("Timing")
-        timing_layout = QGridLayout(timing_group)
-        timing_layout.setSpacing(4)
-        
-        # Delay
-        timing_layout.addWidget(QLabel("Delay:"), 0, 0)
-        self.delay_edit = QLineEdit("0")
-        self.delay_edit.setMaximumWidth(120)
-        timing_layout.addWidget(self.delay_edit, 0, 1)
-        self.delay_unit = QComboBox()
-        for unit in TimeUnit:
-            self.delay_unit.addItem(unit.symbol, unit)
-        self.delay_unit.setCurrentText("µs")
-        timing_layout.addWidget(self.delay_unit, 0, 2)
-        
-        # Width
-        timing_layout.addWidget(QLabel("Width:"), 1, 0)
-        self.width_edit = QLineEdit("100")
-        self.width_edit.setMaximumWidth(120)
-        timing_layout.addWidget(self.width_edit, 1, 1)
-        self.width_unit = QComboBox()
-        for unit in TimeUnit:
-            self.width_unit.addItem(unit.symbol, unit)
-        self.width_unit.setCurrentText("ns")
-        timing_layout.addWidget(self.width_unit, 1, 2)
-        
-        # Sync source
-        timing_layout.addWidget(QLabel("Sync:"), 2, 0)
-        self.sync_combo = QComboBox()
-        self.sync_combo.addItems(["T0", "CHA", "CHB", "CHC", "CHD", "CHE", "CHF", "CHG", "CHH"])
-        timing_layout.addWidget(self.sync_combo, 2, 1, 1, 2)
-        
-        layout.addWidget(timing_group)
-        
-        # Output section
-        output_group = QGroupBox("Output")
-        output_layout = QGridLayout(output_group)
-        output_layout.setSpacing(4)
-        
-        # Mode
-        output_layout.addWidget(QLabel("Mode:"), 0, 0)
-        self.output_mode = QComboBox()
-        self.output_mode.addItems(["TTL", "Adjustable"])
-        output_layout.addWidget(self.output_mode, 0, 1)
-        
-        # Polarity
-        output_layout.addWidget(QLabel("Polarity:"), 0, 2)
-        self.polarity_combo = QComboBox()
-        self.polarity_combo.addItems(["Normal (High)", "Inverted (Low)"])
-        output_layout.addWidget(self.polarity_combo, 0, 3)
-        
-        # Amplitude (for adjustable mode)
-        output_layout.addWidget(QLabel("Amplitude:"), 1, 0)
-        self.amplitude_spin = QDoubleSpinBox()
-        self.amplitude_spin.setRange(2.0, 20.0)
-        self.amplitude_spin.setValue(4.0)
-        self.amplitude_spin.setSuffix(" V")
-        self.amplitude_spin.setDecimals(2)
-        output_layout.addWidget(self.amplitude_spin, 1, 1)
-        
-        layout.addWidget(output_group)
-        
-        # Channel mode section
-        mode_group = QGroupBox("Channel Mode")
-        mode_layout = QGridLayout(mode_group)
-        mode_layout.setSpacing(4)
-        
-        mode_layout.addWidget(QLabel("Mode:"), 0, 0)
-        self.channel_mode = QComboBox()
-        self.channel_mode.addItems(["Normal", "Single Shot", "Burst", "Duty Cycle"])
-        mode_layout.addWidget(self.channel_mode, 0, 1)
-        
-        # Burst count
-        mode_layout.addWidget(QLabel("Burst:"), 0, 2)
-        self.burst_spin = QSpinBox()
-        self.burst_spin.setRange(1, 9999999)
-        self.burst_spin.setValue(1)
-        mode_layout.addWidget(self.burst_spin, 0, 3)
-        
-        # Duty cycle counts
-        mode_layout.addWidget(QLabel("On:"), 1, 0)
-        self.on_spin = QSpinBox()
-        self.on_spin.setRange(1, 9999999)
-        self.on_spin.setValue(1)
-        mode_layout.addWidget(self.on_spin, 1, 1)
-        
-        mode_layout.addWidget(QLabel("Off:"), 1, 2)
-        self.off_spin = QSpinBox()
-        self.off_spin.setRange(1, 9999999)
-        self.off_spin.setValue(1)
-        mode_layout.addWidget(self.off_spin, 1, 3)
-        
-        # Wait count
-        mode_layout.addWidget(QLabel("Wait:"), 2, 0)
-        self.wait_spin = QSpinBox()
-        self.wait_spin.setRange(0, 9999999)
-        self.wait_spin.setValue(0)
-        mode_layout.addWidget(self.wait_spin, 2, 1)
-        
-        layout.addWidget(mode_group)
-        
-        # Connect signals
-        self.enable_check.stateChanged.connect(lambda: self.settingsChanged.emit(self.channel_name))
-        self.delay_edit.editingFinished.connect(lambda: self.settingsChanged.emit(self.channel_name))
-        self.width_edit.editingFinished.connect(lambda: self.settingsChanged.emit(self.channel_name))
+        for i, (label, mult) in enumerate(self.UNITS):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setFixedSize(28, 22)
+            btn.setStyleSheet("""
+                QPushButton { 
+                    padding: 1px; 
+                    font-size: 8pt;
+                    border: 1px solid #888;
+                    border-radius: 2px;
+                }
+                QPushButton:checked { 
+                    background-color: #4CAF50; 
+                    color: white;
+                    border: 1px solid #388E3C;
+                }
+            """)
+            btn.clicked.connect(lambda checked, m=mult: self._on_click(m))
+            self.btn_group.addButton(btn, i)
+            layout.addWidget(btn)
+            
+            if label == default_unit:
+                btn.setChecked(True)
+                self._multiplier = mult
     
-    def get_delay_seconds(self) -> float:
-        """Get delay value in seconds"""
-        try:
-            value = float(self.delay_edit.text())
-            unit = self.delay_unit.currentData()
-            return value * unit.factor
-        except (ValueError, AttributeError):
-            return 0.0
+    def _on_click(self, mult: float):
+        self._multiplier = mult
+        self.unitChanged.emit()
     
-    def set_delay_seconds(self, seconds: float):
-        """Set delay from seconds value"""
-        unit = self.delay_unit.currentData()
-        value = seconds / unit.factor
-        self.delay_edit.setText(f"{value:.6g}")
+    def get_multiplier(self) -> float:
+        return self._multiplier
     
-    def get_width_seconds(self) -> float:
-        """Get width value in seconds"""
-        try:
-            value = float(self.width_edit.text())
-            unit = self.width_unit.currentData()
-            return value * unit.factor
-        except (ValueError, AttributeError):
-            return 100e-9
+    def set_unit(self, unit: str):
+        """Set unit by name"""
+        for i, (label, mult) in enumerate(self.UNITS):
+            if label == unit:
+                btn = self.btn_group.button(i)
+                if btn:
+                    btn.setChecked(True)
+                    self._multiplier = mult
+                break
+
+
+class FreqUnitSelector(QWidget):
+    """Frequency unit selector"""
     
-    def set_width_seconds(self, seconds: float):
-        """Set width from seconds value"""
-        unit = self.width_unit.currentData()
-        value = seconds / unit.factor
-        self.width_edit.setText(f"{value:.6g}")
+    unitChanged = pyqtSignal()
     
-    def is_enabled(self) -> bool:
-        """Check if channel is enabled"""
-        return self.enable_check.isChecked()
+    UNITS = [
+        ("Hz", 1.0),
+        ("kHz", 1e3),
+        ("MHz", 1e6),
+    ]
     
-    def set_enabled(self, enabled: bool):
-        """Set channel enabled state"""
-        self.enable_check.setChecked(enabled)
+    def __init__(self, default_unit: str = "Hz", parent=None):
+        super().__init__(parent)
+        self._multiplier = 1.0
+        self._setup_ui(default_unit)
+    
+    def _setup_ui(self, default_unit: str):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+        
+        self.btn_group = QButtonGroup(self)
+        self.btn_group.setExclusive(True)
+        
+        for i, (label, mult) in enumerate(self.UNITS):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setFixedSize(32, 22)
+            btn.setStyleSheet("""
+                QPushButton { padding: 1px; font-size: 8pt; border: 1px solid #888; border-radius: 2px; }
+                QPushButton:checked { background-color: #2196F3; color: white; border: 1px solid #1976D2; }
+            """)
+            btn.clicked.connect(lambda checked, m=mult: self._on_click(m))
+            self.btn_group.addButton(btn, i)
+            layout.addWidget(btn)
+            
+            if label == default_unit:
+                btn.setChecked(True)
+                self._multiplier = mult
+    
+    def _on_click(self, mult: float):
+        self._multiplier = mult
+        self.unitChanged.emit()
+    
+    def get_multiplier(self) -> float:
+        return self._multiplier
 
 
 class BNC575Panel(QWidget):
     """
-    Main GUI panel for BNC 575 Series Digital Delay/Pulse Generator
+    Complete GUI Panel for BNC 575 Pulse Generator
     
-    Provides tabbed interface with:
-    - System tab: Mode, period/frequency, trigger settings
-    - Channels tab: Individual channel configuration
-    - Trigger/Gate tab: External input configuration
-    - Store/Recall tab: Configuration memory management
-    
-    Backward compatible methods:
-    - get_delayA(), get_delayB(), etc. (returns seconds)
-    - get_widthA(), get_widthB(), etc. (returns seconds)
+    Provides:
+    - Direct widget access: widthA, delayA, widthB, delayB, etc.
+    - get_widthA(), get_delayA() etc. methods returning seconds
+    - Trigger/gate configuration
+    - System mode and period control
+    - Channel enable toggles
     """
     
-    # Signals for main window integration
-    connectRequested = pyqtSignal()
-    disconnectRequested = pyqtSignal()
-    runRequested = pyqtSignal()
-    stopRequested = pyqtSignal()
-    triggerRequested = pyqtSignal()
-    applySystemRequested = pyqtSignal()
-    applyChannelsRequested = pyqtSignal()
-    applyTriggerRequested = pyqtSignal()
-    storeRequested = pyqtSignal(int, str)  # location, label
-    recallRequested = pyqtSignal(int)  # location
-    
-    def __init__(self, parent=None, num_channels: int = 8):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.num_channels = min(8, max(2, num_channels))
-        self.channel_widgets: Dict[str, ChannelWidget] = {}
         self._setup_ui()
     
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setSpacing(6)
-        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(4)
+        main_layout.setContentsMargins(4, 4, 4, 4)
         
-        # Title and connection
-        title_layout = QHBoxLayout()
-        title = QLabel("BNC 575 Digital Delay/Pulse Generator")
-        title.setStyleSheet("font-size: 14pt; font-weight: bold;")
-        title_layout.addWidget(title)
-        title_layout.addStretch()
+        # ========== HEADER ==========
+        header = QHBoxLayout()
+        title = QLabel("BNC 575 Pulse Generator")
+        title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+        header.addWidget(title)
+        header.addStretch()
+        self.lamp = StatusLamp()
+        self.lamp.set_status("red", "Not Connected")
+        header.addWidget(self.lamp)
+        main_layout.addLayout(header)
         
-        # Connection controls
-        self.port_edit = QLineEdit("COM1")
-        self.port_edit.setMaximumWidth(80)
-        title_layout.addWidget(QLabel("Port:"))
-        title_layout.addWidget(self.port_edit)
+        # ========== CONNECTION BUTTONS ==========
+        conn_layout = QHBoxLayout()
+        self.btn_connect = QPushButton("Connect")
+        self.btn_disconnect = QPushButton("Disconnect")
+        self.btn_fire = QPushButton("Fire (INT)")
+        self.btn_fire.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold;")
+        conn_layout.addWidget(self.btn_connect)
+        conn_layout.addWidget(self.btn_disconnect)
+        conn_layout.addWidget(self.btn_fire)
+        conn_layout.addStretch()
+        main_layout.addLayout(conn_layout)
         
-        self.baud_combo = QComboBox()
-        self.baud_combo.addItems(["115200", "57600", "38400", "19200", "9600", "4800"])
-        self.baud_combo.setMaximumWidth(80)
-        title_layout.addWidget(QLabel("Baud:"))
-        title_layout.addWidget(self.baud_combo)
-        
-        self.connect_btn = QPushButton("Connect")
-        self.connect_btn.clicked.connect(self.connectRequested.emit)
-        title_layout.addWidget(self.connect_btn)
-        
-        main_layout.addLayout(title_layout)
-        
-        # Run/Stop controls
-        control_layout = QHBoxLayout()
-        
-        self.run_btn = QPushButton("▶ RUN")
-        self.run_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 8px 16px;")
-        self.run_btn.clicked.connect(self.runRequested.emit)
-        control_layout.addWidget(self.run_btn)
-        
-        self.stop_btn = QPushButton("■ STOP")
-        self.stop_btn.setStyleSheet("background-color: #f44336; color: white; font-weight: bold; padding: 8px 16px;")
-        self.stop_btn.clicked.connect(self.stopRequested.emit)
-        control_layout.addWidget(self.stop_btn)
-        
-        self.trigger_btn = QPushButton("⚡ TRIGGER")
-        self.trigger_btn.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold; padding: 8px 16px;")
-        self.trigger_btn.clicked.connect(self.triggerRequested.emit)
-        control_layout.addWidget(self.trigger_btn)
-        
-        self.arm_btn = QPushButton("ARM")
-        self.arm_btn.setStyleSheet("padding: 8px 16px;")
-        control_layout.addWidget(self.arm_btn)
-        
-        control_layout.addStretch()
-        
-        # Status indicator
-        self.status_label = QLabel("● Disconnected")
-        self.status_label.setStyleSheet("color: gray; font-weight: bold;")
-        control_layout.addWidget(self.status_label)
-        
-        main_layout.addLayout(control_layout)
-        
-        # Tab widget
+        # ========== TABS ==========
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
         
         # Create tabs
+        self._create_timing_tab()
         self._create_system_tab()
-        self._create_channels_tab()
-        self._create_trigger_gate_tab()
-        self._create_store_recall_tab()
+        self._create_trigger_tab()
+        self._create_advanced_tab()
     
-    def _create_system_tab(self):
-        """Create System configuration tab"""
+    def _create_timing_tab(self):
+        """Channel timing configuration"""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        layout.setSpacing(8)
+        layout.setSpacing(4)
+        
+        # Channel timing group
+        timing_group = QGroupBox("Channel Timing (Width / Delay)")
+        timing_layout = QGridLayout(timing_group)
+        timing_layout.setSpacing(4)
+        
+        # Headers
+        timing_layout.addWidget(QLabel("Ch"), 0, 0)
+        timing_layout.addWidget(QLabel("Width"), 0, 1)
+        timing_layout.addWidget(QLabel("Unit"), 0, 2)
+        timing_layout.addWidget(QLabel("Delay"), 0, 4)
+        timing_layout.addWidget(QLabel("Unit"), 0, 5)
+        timing_layout.addWidget(QLabel("En"), 0, 7)
+        
+        # Channel A
+        timing_layout.addWidget(QLabel("A:"), 1, 0)
+        self.widthA = QDoubleSpinBox()
+        self.widthA.setRange(0, 999999)
+        self.widthA.setDecimals(3)
+        self.widthA.setValue(1.0)
+        self.widthA.setFixedWidth(80)
+        timing_layout.addWidget(self.widthA, 1, 1)
+        self.widthA_unit = UnitSelector("µs")
+        timing_layout.addWidget(self.widthA_unit, 1, 2)
+        timing_layout.addWidget(QLabel(""), 1, 3)  # spacer
+        self.delayA = QDoubleSpinBox()
+        self.delayA.setRange(-999999, 999999)
+        self.delayA.setDecimals(3)
+        self.delayA.setValue(0.0)
+        self.delayA.setFixedWidth(80)
+        timing_layout.addWidget(self.delayA, 1, 4)
+        self.delayA_unit = UnitSelector("µs")
+        timing_layout.addWidget(self.delayA_unit, 1, 5)
+        timing_layout.addWidget(QLabel(""), 1, 6)  # spacer
+        self.btn_en_a = QPushButton("A")
+        self.btn_en_a.setCheckable(True)
+        self.btn_en_a.setChecked(True)
+        self.btn_en_a.setFixedWidth(30)
+        self._style_enable_btn(self.btn_en_a)
+        timing_layout.addWidget(self.btn_en_a, 1, 7)
+        
+        # Channel B
+        timing_layout.addWidget(QLabel("B:"), 2, 0)
+        self.widthB = QDoubleSpinBox()
+        self.widthB.setRange(0, 999999)
+        self.widthB.setDecimals(3)
+        self.widthB.setValue(1.0)
+        self.widthB.setFixedWidth(80)
+        timing_layout.addWidget(self.widthB, 2, 1)
+        self.widthB_unit = UnitSelector("µs")
+        timing_layout.addWidget(self.widthB_unit, 2, 2)
+        self.delayB = QDoubleSpinBox()
+        self.delayB.setRange(-999999, 999999)
+        self.delayB.setDecimals(3)
+        self.delayB.setValue(0.0)
+        self.delayB.setFixedWidth(80)
+        timing_layout.addWidget(self.delayB, 2, 4)
+        self.delayB_unit = UnitSelector("µs")
+        timing_layout.addWidget(self.delayB_unit, 2, 5)
+        self.btn_en_b = QPushButton("B")
+        self.btn_en_b.setCheckable(True)
+        self.btn_en_b.setChecked(True)
+        self.btn_en_b.setFixedWidth(30)
+        self._style_enable_btn(self.btn_en_b)
+        timing_layout.addWidget(self.btn_en_b, 2, 7)
+        
+        # Channel C
+        timing_layout.addWidget(QLabel("C:"), 3, 0)
+        self.widthC = QDoubleSpinBox()
+        self.widthC.setRange(0, 999999)
+        self.widthC.setDecimals(3)
+        self.widthC.setValue(40.0)
+        self.widthC.setFixedWidth(80)
+        timing_layout.addWidget(self.widthC, 3, 1)
+        self.widthC_unit = UnitSelector("µs")
+        timing_layout.addWidget(self.widthC_unit, 3, 2)
+        self.delayC = QDoubleSpinBox()
+        self.delayC.setRange(-999999, 999999)
+        self.delayC.setDecimals(3)
+        self.delayC.setValue(0.0)
+        self.delayC.setFixedWidth(80)
+        timing_layout.addWidget(self.delayC, 3, 4)
+        self.delayC_unit = UnitSelector("µs")
+        timing_layout.addWidget(self.delayC_unit, 3, 5)
+        self.btn_en_c = QPushButton("C")
+        self.btn_en_c.setCheckable(True)
+        self.btn_en_c.setChecked(True)
+        self.btn_en_c.setFixedWidth(30)
+        self._style_enable_btn(self.btn_en_c)
+        timing_layout.addWidget(self.btn_en_c, 3, 7)
+        
+        # Channel D
+        timing_layout.addWidget(QLabel("D:"), 4, 0)
+        self.widthD = QDoubleSpinBox()
+        self.widthD.setRange(0, 999999)
+        self.widthD.setDecimals(3)
+        self.widthD.setValue(40.0)
+        self.widthD.setFixedWidth(80)
+        timing_layout.addWidget(self.widthD, 4, 1)
+        self.widthD_unit = UnitSelector("µs")
+        timing_layout.addWidget(self.widthD_unit, 4, 2)
+        self.delayD = QDoubleSpinBox()
+        self.delayD.setRange(-999999, 999999)
+        self.delayD.setDecimals(3)
+        self.delayD.setValue(0.0)
+        self.delayD.setFixedWidth(80)
+        timing_layout.addWidget(self.delayD, 4, 4)
+        self.delayD_unit = UnitSelector("µs")
+        timing_layout.addWidget(self.delayD_unit, 4, 5)
+        self.btn_en_d = QPushButton("D")
+        self.btn_en_d.setCheckable(True)
+        self.btn_en_d.setChecked(True)
+        self.btn_en_d.setFixedWidth(30)
+        self._style_enable_btn(self.btn_en_d)
+        timing_layout.addWidget(self.btn_en_d, 4, 7)
+        
+        layout.addWidget(timing_group)
+        
+        # Apply/Read buttons
+        btn_layout = QHBoxLayout()
+        self.btn_apply = QPushButton("Apply Settings")
+        self.btn_apply.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 6px;")
+        self.btn_read = QPushButton("Read Settings")
+        self.btn_read.setStyleSheet("padding: 6px;")
+        btn_layout.addWidget(self.btn_apply)
+        btn_layout.addWidget(self.btn_read)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+        
+        layout.addStretch()
+        self.tabs.addTab(tab, "Timing")
+    
+    def _create_system_tab(self):
+        """System mode and rate configuration"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
         
         # System Mode
         mode_group = QGroupBox("System Mode")
@@ -590,146 +612,94 @@ class BNC575Panel(QWidget):
         mode_layout.addWidget(self.system_mode, 0, 1)
         
         mode_layout.addWidget(QLabel("Burst Count:"), 0, 2)
-        self.sys_burst_spin = QSpinBox()
-        self.sys_burst_spin.setRange(1, 9999999)
-        self.sys_burst_spin.setValue(1)
-        mode_layout.addWidget(self.sys_burst_spin, 0, 3)
+        self.burst_count = QSpinBox()
+        self.burst_count.setRange(1, 9999999)
+        self.burst_count.setValue(1)
+        mode_layout.addWidget(self.burst_count, 0, 3)
         
         mode_layout.addWidget(QLabel("On Count:"), 1, 0)
-        self.sys_on_spin = QSpinBox()
-        self.sys_on_spin.setRange(1, 9999999)
-        self.sys_on_spin.setValue(1)
-        mode_layout.addWidget(self.sys_on_spin, 1, 1)
+        self.on_count = QSpinBox()
+        self.on_count.setRange(1, 9999999)
+        self.on_count.setValue(1)
+        mode_layout.addWidget(self.on_count, 1, 1)
         
         mode_layout.addWidget(QLabel("Off Count:"), 1, 2)
-        self.sys_off_spin = QSpinBox()
-        self.sys_off_spin.setRange(1, 9999999)
-        self.sys_off_spin.setValue(1)
-        mode_layout.addWidget(self.sys_off_spin, 1, 3)
+        self.off_count = QSpinBox()
+        self.off_count.setRange(1, 9999999)
+        self.off_count.setValue(1)
+        mode_layout.addWidget(self.off_count, 1, 3)
         
         layout.addWidget(mode_group)
         
         # Rate/Period
-        rate_group = QGroupBox("Rate / Period")
+        rate_group = QGroupBox("Rate / Period (T₀)")
         rate_layout = QGridLayout(rate_group)
         
         rate_layout.addWidget(QLabel("Period:"), 0, 0)
-        self.period_edit = QLineEdit("1")
-        self.period_edit.setMaximumWidth(120)
-        rate_layout.addWidget(self.period_edit, 0, 1)
-        self.period_unit = QComboBox()
-        for unit in TimeUnit:
-            self.period_unit.addItem(unit.symbol, unit)
-        self.period_unit.setCurrentText("ms")
+        self.period = QDoubleSpinBox()
+        self.period.setRange(0.0001, 999999)
+        self.period.setDecimals(4)
+        self.period.setValue(1.0)
+        self.period.setFixedWidth(100)
+        rate_layout.addWidget(self.period, 0, 1)
+        self.period_unit = UnitSelector("ms")
         rate_layout.addWidget(self.period_unit, 0, 2)
         
         rate_layout.addWidget(QLabel("Frequency:"), 1, 0)
-        self.freq_edit = QLineEdit("1000")
-        self.freq_edit.setMaximumWidth(120)
-        rate_layout.addWidget(self.freq_edit, 1, 1)
-        self.freq_unit = QComboBox()
-        for unit in FreqUnit:
-            self.freq_unit.addItem(unit.symbol, unit)
-        self.freq_unit.setCurrentText("Hz")
+        self.frequency = QDoubleSpinBox()
+        self.frequency.setRange(0.0001, 20000000)
+        self.frequency.setDecimals(2)
+        self.frequency.setValue(1000.0)
+        self.frequency.setFixedWidth(100)
+        rate_layout.addWidget(self.frequency, 1, 1)
+        self.freq_unit = FreqUnitSelector("Hz")
         rate_layout.addWidget(self.freq_unit, 1, 2)
         
-        # Sync period and frequency
-        self.period_edit.editingFinished.connect(self._period_changed)
-        self.freq_edit.editingFinished.connect(self._freq_changed)
+        # Sync period/freq
+        self.period.valueChanged.connect(self._period_changed)
+        self.frequency.valueChanged.connect(self._freq_changed)
+        self.period_unit.unitChanged.connect(self._period_changed)
+        self.freq_unit.unitChanged.connect(self._freq_changed)
         
         layout.addWidget(rate_group)
         
         # Clock source
         clock_group = QGroupBox("Clock Source")
-        clock_layout = QGridLayout(clock_group)
-        
-        clock_layout.addWidget(QLabel("Source:"), 0, 0)
+        clock_layout = QHBoxLayout(clock_group)
+        clock_layout.addWidget(QLabel("Source:"))
         self.clock_source = QComboBox()
         self.clock_source.addItems(["System", "Ext 10MHz", "Ext 20MHz", "Ext 25MHz",
                                     "Ext 40MHz", "Ext 50MHz", "Ext 80MHz", "Ext 100MHz"])
-        clock_layout.addWidget(self.clock_source, 0, 1)
-        
-        clock_layout.addWidget(QLabel("Ref Out:"), 0, 2)
-        self.ref_output = QComboBox()
-        self.ref_output.addItems(["T0 Pulse", "100MHz", "50MHz", "33MHz", "25MHz",
-                                  "20MHz", "16MHz", "14MHz", "12MHz", "11MHz", "10MHz"])
-        clock_layout.addWidget(self.ref_output, 0, 3)
-        
+        clock_layout.addWidget(self.clock_source)
+        clock_layout.addStretch()
         layout.addWidget(clock_group)
         
         # Apply button
-        apply_layout = QHBoxLayout()
-        apply_layout.addStretch()
-        apply_btn = QPushButton("Apply System Settings")
-        apply_btn.clicked.connect(self.applySystemRequested.emit)
-        apply_layout.addWidget(apply_btn)
-        layout.addLayout(apply_layout)
+        self.btn_apply_system = QPushButton("Apply System Settings")
+        self.btn_apply_system.setStyleSheet("background-color: #2196F3; color: white; padding: 6px;")
+        layout.addWidget(self.btn_apply_system)
         
         layout.addStretch()
         self.tabs.addTab(tab, "System")
     
-    def _create_channels_tab(self):
-        """Create Channels configuration tab"""
+    def _create_trigger_tab(self):
+        """Trigger and gate configuration"""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        # Channel sub-tabs
-        channel_tabs = QTabWidget()
-        
-        channel_names = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'][:self.num_channels]
-        
-        for name in channel_names:
-            channel_widget = ChannelWidget(name)
-            self.channel_widgets[name] = channel_widget
-            
-            # Wrap in scroll area for smaller screens
-            scroll = QScrollArea()
-            scroll.setWidget(channel_widget)
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QFrame.Shape.NoFrame)
-            
-            channel_tabs.addTab(scroll, f"Ch {name}")
-        
-        layout.addWidget(channel_tabs)
-        
-        # Apply button
-        apply_layout = QHBoxLayout()
-        apply_layout.addStretch()
-        
-        enable_all_btn = QPushButton("Enable All")
-        enable_all_btn.clicked.connect(self._enable_all_channels)
-        apply_layout.addWidget(enable_all_btn)
-        
-        disable_all_btn = QPushButton("Disable All")
-        disable_all_btn.clicked.connect(self._disable_all_channels)
-        apply_layout.addWidget(disable_all_btn)
-        
-        apply_btn = QPushButton("Apply Channel Settings")
-        apply_btn.clicked.connect(self.applyChannelsRequested.emit)
-        apply_layout.addWidget(apply_btn)
-        
-        layout.addLayout(apply_layout)
-        
-        self.tabs.addTab(tab, "Channels")
-    
-    def _create_trigger_gate_tab(self):
-        """Create Trigger/Gate configuration tab"""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        
-        # Trigger section
-        trig_group = QGroupBox("Trigger Input")
+        # Trigger
+        trig_group = QGroupBox("Trigger Configuration")
         trig_layout = QGridLayout(trig_group)
         
-        trig_layout.addWidget(QLabel("Mode:"), 0, 0)
-        self.trig_mode = QComboBox()
-        self.trig_mode.addItems(["Disabled", "Triggered", "Dual Trigger"])
-        trig_layout.addWidget(self.trig_mode, 0, 1)
+        trig_layout.addWidget(QLabel("Source:"), 0, 0)
+        self.trig_source = QComboBox()
+        self.trig_source.addItems(["INT", "EXT"])
+        trig_layout.addWidget(self.trig_source, 0, 1)
         
-        trig_layout.addWidget(QLabel("Edge:"), 0, 2)
-        self.trig_edge = QComboBox()
-        self.trig_edge.addItems(["Rising", "Falling"])
-        trig_layout.addWidget(self.trig_edge, 0, 3)
+        trig_layout.addWidget(QLabel("Slope:"), 0, 2)
+        self.trig_slope = QComboBox()
+        self.trig_slope.addItems(["POS", "NEG"])
+        trig_layout.addWidget(self.trig_slope, 0, 3)
         
         trig_layout.addWidget(QLabel("Level:"), 1, 0)
         self.trig_level = QDoubleSpinBox()
@@ -739,10 +709,29 @@ class BNC575Panel(QWidget):
         self.trig_level.setDecimals(2)
         trig_layout.addWidget(self.trig_level, 1, 1)
         
+        # Enable trigger checkbox
+        self.btn_en_trig = QPushButton("Enable Ext Trigger")
+        self.btn_en_trig.setCheckable(True)
+        self.btn_en_trig.setStyleSheet("""
+            QPushButton { padding: 6px; }
+            QPushButton:checked { background-color: #9C27B0; color: white; }
+        """)
+        trig_layout.addWidget(self.btn_en_trig, 1, 2, 1, 2)
+        
         layout.addWidget(trig_group)
         
-        # Gate section
-        gate_group = QGroupBox("Gate Input")
+        # Trigger buttons
+        trig_btn_layout = QHBoxLayout()
+        self.btn_apply_trigger = QPushButton("Apply Trigger Settings")
+        self.btn_arm = QPushButton("Arm (EXT TRIG)")
+        self.btn_arm.setStyleSheet("background-color: #9C27B0; color: white; padding: 6px;")
+        trig_btn_layout.addWidget(self.btn_apply_trigger)
+        trig_btn_layout.addWidget(self.btn_arm)
+        trig_btn_layout.addStretch()
+        layout.addLayout(trig_btn_layout)
+        
+        # Gate
+        gate_group = QGroupBox("Gate Configuration")
         gate_layout = QGridLayout(gate_group)
         
         gate_layout.addWidget(QLabel("Mode:"), 0, 0)
@@ -760,358 +749,339 @@ class BNC575Panel(QWidget):
         self.gate_level.setRange(0.20, 15.0)
         self.gate_level.setValue(2.5)
         self.gate_level.setSuffix(" V")
-        self.gate_level.setDecimals(2)
         gate_layout.addWidget(self.gate_level, 1, 1)
         
         layout.addWidget(gate_group)
         
-        # Apply button
-        apply_layout = QHBoxLayout()
-        apply_layout.addStretch()
-        apply_btn = QPushButton("Apply Trigger/Gate Settings")
-        apply_btn.clicked.connect(self.applyTriggerRequested.emit)
-        apply_layout.addWidget(apply_btn)
-        layout.addLayout(apply_layout)
-        
         layout.addStretch()
         self.tabs.addTab(tab, "Trigger/Gate")
     
-    def _create_store_recall_tab(self):
-        """Create Store/Recall configuration tab"""
+    def _create_advanced_tab(self):
+        """Advanced settings: polarity, sync, store/recall"""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        # Store section
-        store_group = QGroupBox("Store Configuration")
-        store_layout = QGridLayout(store_group)
+        # Polarity
+        pol_group = QGroupBox("Channel Polarity")
+        pol_layout = QGridLayout(pol_group)
         
-        store_layout.addWidget(QLabel("Location:"), 0, 0)
+        for i, ch in enumerate(['A', 'B', 'C', 'D']):
+            pol_layout.addWidget(QLabel(f"Ch {ch}:"), 0, i*2)
+            combo = QComboBox()
+            combo.addItems(["Normal", "Inverted"])
+            setattr(self, f'polarity_{ch}', combo)
+            pol_layout.addWidget(combo, 0, i*2+1)
+        
+        layout.addWidget(pol_group)
+        
+        # Sync source
+        sync_group = QGroupBox("Channel Sync Source")
+        sync_layout = QGridLayout(sync_group)
+        
+        for i, ch in enumerate(['A', 'B', 'C', 'D']):
+            sync_layout.addWidget(QLabel(f"Ch {ch}:"), 0, i*2)
+            combo = QComboBox()
+            combo.addItems(["T0", "CHA", "CHB", "CHC", "CHD"])
+            setattr(self, f'sync_{ch}', combo)
+            sync_layout.addWidget(combo, 0, i*2+1)
+        
+        layout.addWidget(sync_group)
+        
+        # Output mode
+        output_group = QGroupBox("Output Mode / Amplitude")
+        output_layout = QGridLayout(output_group)
+        
+        for i, ch in enumerate(['A', 'B', 'C', 'D']):
+            output_layout.addWidget(QLabel(f"Ch {ch}:"), i, 0)
+            mode_combo = QComboBox()
+            mode_combo.addItems(["TTL", "Adjustable"])
+            setattr(self, f'output_mode_{ch}', mode_combo)
+            output_layout.addWidget(mode_combo, i, 1)
+            
+            amp_spin = QDoubleSpinBox()
+            amp_spin.setRange(2.0, 20.0)
+            amp_spin.setValue(4.0)
+            amp_spin.setSuffix(" V")
+            amp_spin.setEnabled(False)  # Only for adjustable
+            setattr(self, f'amplitude_{ch}', amp_spin)
+            output_layout.addWidget(amp_spin, i, 2)
+            
+            # Connect to enable/disable amplitude
+            mode_combo.currentTextChanged.connect(
+                lambda text, spin=amp_spin: spin.setEnabled(text == "Adjustable")
+            )
+        
+        layout.addWidget(output_group)
+        
+        # Store/Recall
+        store_group = QGroupBox("Store / Recall Configuration")
+        store_layout = QHBoxLayout(store_group)
+        
+        store_layout.addWidget(QLabel("Location:"))
         self.store_location = QSpinBox()
         self.store_location.setRange(1, 12)
         self.store_location.setValue(1)
-        store_layout.addWidget(self.store_location, 0, 1)
+        store_layout.addWidget(self.store_location)
         
-        store_layout.addWidget(QLabel("Label:"), 0, 2)
-        self.store_label = QLineEdit()
-        self.store_label.setMaxLength(14)
-        self.store_label.setPlaceholderText("Optional (14 chars max)")
-        store_layout.addWidget(self.store_label, 0, 3)
+        self.btn_store = QPushButton("Store")
+        self.btn_recall = QPushButton("Recall")
+        self.btn_factory = QPushButton("Factory Reset")
+        self.btn_factory.setStyleSheet("background-color: #f44336; color: white;")
         
-        store_btn = QPushButton("Store")
-        store_btn.clicked.connect(self._on_store_clicked)
-        store_layout.addWidget(store_btn, 0, 4)
+        store_layout.addWidget(self.btn_store)
+        store_layout.addWidget(self.btn_recall)
+        store_layout.addWidget(self.btn_factory)
+        store_layout.addStretch()
         
         layout.addWidget(store_group)
         
-        # Recall section
-        recall_group = QGroupBox("Recall Configuration")
-        recall_layout = QGridLayout(recall_group)
+        # Display settings
+        disp_group = QGroupBox("Display Settings")
+        disp_layout = QHBoxLayout(disp_group)
         
-        recall_layout.addWidget(QLabel("Location:"), 0, 0)
-        self.recall_location = QSpinBox()
-        self.recall_location.setRange(0, 12)
-        self.recall_location.setValue(0)
-        recall_layout.addWidget(self.recall_location, 0, 1)
+        disp_layout.addWidget(QLabel("Brightness:"))
+        self.brightness = QSpinBox()
+        self.brightness.setRange(0, 4)
+        self.brightness.setValue(2)
+        disp_layout.addWidget(self.brightness)
         
-        recall_layout.addWidget(QLabel("(0 = Factory Default)"), 0, 2)
+        self.display_enabled = QCheckBox("Display On")
+        self.display_enabled.setChecked(True)
+        disp_layout.addWidget(self.display_enabled)
         
-        recall_btn = QPushButton("Recall")
-        recall_btn.clicked.connect(self._on_recall_clicked)
-        recall_layout.addWidget(recall_btn, 0, 3)
+        self.keylock = QCheckBox("Keylock")
+        disp_layout.addWidget(self.keylock)
         
-        layout.addWidget(recall_group)
-        
-        # Quick recall buttons
-        quick_group = QGroupBox("Quick Recall")
-        quick_layout = QGridLayout(quick_group)
-        
-        for i in range(13):
-            row = i // 5
-            col = i % 5
-            btn = QPushButton(f"{i}" if i > 0 else "Default")
-            btn.clicked.connect(lambda checked, loc=i: self.recallRequested.emit(loc))
-            quick_layout.addWidget(btn, row, col)
-        
-        layout.addWidget(quick_group)
+        disp_layout.addStretch()
+        layout.addWidget(disp_group)
         
         layout.addStretch()
-        self.tabs.addTab(tab, "Store/Recall")
+        self.tabs.addTab(tab, "Advanced")
     
-    # ========== Private Methods ==========
+    def _style_enable_btn(self, btn: QPushButton):
+        """Style channel enable button"""
+        btn.setStyleSheet("""
+            QPushButton { 
+                padding: 2px; 
+                border: 1px solid #888;
+                border-radius: 3px;
+            }
+            QPushButton:checked { 
+                background-color: #4CAF50; 
+                color: white;
+                border: 1px solid #388E3C;
+            }
+        """)
     
     def _period_changed(self):
         """Update frequency when period changes"""
         try:
-            value = float(self.period_edit.text())
-            unit = self.period_unit.currentData()
-            period_s = value * unit.factor
+            period_s = self.period.value() * self.period_unit.get_multiplier()
             if period_s > 0:
-                freq_hz = 1.0 / period_s
-                freq_unit = self.freq_unit.currentData()
-                self.freq_edit.setText(f"{freq_hz / freq_unit.factor:.6g}")
-        except (ValueError, ZeroDivisionError):
+                freq = 1.0 / period_s
+                freq_mult = self.freq_unit.get_multiplier()
+                self.frequency.blockSignals(True)
+                self.frequency.setValue(freq / freq_mult)
+                self.frequency.blockSignals(False)
+        except:
             pass
     
     def _freq_changed(self):
         """Update period when frequency changes"""
         try:
-            value = float(self.freq_edit.text())
-            unit = self.freq_unit.currentData()
-            freq_hz = value * unit.factor
-            if freq_hz > 0:
-                period_s = 1.0 / freq_hz
-                period_unit = self.period_unit.currentData()
-                self.period_edit.setText(f"{period_s / period_unit.factor:.6g}")
-        except (ValueError, ZeroDivisionError):
+            freq = self.frequency.value() * self.freq_unit.get_multiplier()
+            if freq > 0:
+                period = 1.0 / freq
+                period_mult = self.period_unit.get_multiplier()
+                self.period.blockSignals(True)
+                self.period.setValue(period / period_mult)
+                self.period.blockSignals(False)
+        except:
             pass
     
-    def _enable_all_channels(self):
-        """Enable all channels"""
-        for widget in self.channel_widgets.values():
-            widget.set_enabled(True)
+    # ==================== GETTER METHODS (return seconds) ====================
     
-    def _disable_all_channels(self):
-        """Disable all channels"""
-        for widget in self.channel_widgets.values():
-            widget.set_enabled(False)
+    def get_widthA(self) -> float:
+        """Get width A in seconds"""
+        return self.widthA.value() * self.widthA_unit.get_multiplier()
     
-    def _on_store_clicked(self):
-        """Handle store button click"""
-        location = self.store_location.value()
-        label = self.store_label.text()
-        self.storeRequested.emit(location, label)
+    def get_delayA(self) -> float:
+        """Get delay A in seconds"""
+        return self.delayA.value() * self.delayA_unit.get_multiplier()
     
-    def _on_recall_clicked(self):
-        """Handle recall button click"""
-        location = self.recall_location.value()
-        self.recallRequested.emit(location)
+    def get_widthB(self) -> float:
+        """Get width B in seconds"""
+        return self.widthB.value() * self.widthB_unit.get_multiplier()
     
-    # ========== Public Interface ==========
+    def get_delayB(self) -> float:
+        """Get delay B in seconds"""
+        return self.delayB.value() * self.delayB_unit.get_multiplier()
     
-    def set_connected(self, connected: bool):
-        """Update UI to reflect connection state"""
-        if connected:
-            self.status_label.setText("● Connected")
-            self.status_label.setStyleSheet("color: green; font-weight: bold;")
-            self.connect_btn.setText("Disconnect")
-        else:
-            self.status_label.setText("● Disconnected")
-            self.status_label.setStyleSheet("color: gray; font-weight: bold;")
-            self.connect_btn.setText("Connect")
+    def get_widthC(self) -> float:
+        """Get width C in seconds"""
+        return self.widthC.value() * self.widthC_unit.get_multiplier()
     
-    def set_running(self, running: bool):
-        """Update UI to reflect running state"""
-        if running:
-            self.status_label.setText("● Running")
-            self.status_label.setStyleSheet("color: green; font-weight: bold;")
-        else:
-            self.status_label.setText("● Stopped")
-            self.status_label.setStyleSheet("color: orange; font-weight: bold;")
+    def get_delayC(self) -> float:
+        """Get delay C in seconds"""
+        return self.delayC.value() * self.delayC_unit.get_multiplier()
     
-    def get_port(self) -> str:
-        """Get selected port"""
-        return self.port_edit.text()
+    def get_widthD(self) -> float:
+        """Get width D in seconds"""
+        return self.widthD.value() * self.widthD_unit.get_multiplier()
     
-    def get_baudrate(self) -> int:
-        """Get selected baud rate"""
-        return int(self.baud_combo.currentText())
+    def get_delayD(self) -> float:
+        """Get delay D in seconds"""
+        return self.delayD.value() * self.delayD_unit.get_multiplier()
     
-    def get_period_seconds(self) -> float:
-        """Get T0 period in seconds"""
-        try:
-            value = float(self.period_edit.text())
-            unit = self.period_unit.currentData()
-            return value * unit.factor
-        except (ValueError, AttributeError):
-            return 0.001
+    def get_period(self) -> float:
+        """Get period in seconds"""
+        return self.period.value() * self.period_unit.get_multiplier()
     
-    def get_frequency_hz(self) -> float:
+    def get_frequency(self) -> float:
         """Get frequency in Hz"""
-        try:
-            value = float(self.freq_edit.text())
-            unit = self.freq_unit.currentData()
-            return value * unit.factor
-        except (ValueError, AttributeError):
-            return 1000.0
+        return self.frequency.value() * self.freq_unit.get_multiplier()
     
-    def get_system_mode(self) -> str:
-        """Get system mode string"""
-        return self.system_mode.currentText()
+    # ==================== SETTER METHODS (accept seconds) ====================
     
-    def get_trigger_mode(self) -> str:
-        """Get trigger mode string"""
-        return self.trig_mode.currentText()
+    def set_widthA(self, seconds: float):
+        """Set width A from seconds"""
+        mult = self.widthA_unit.get_multiplier()
+        self.widthA.setValue(seconds / mult)
+    
+    def set_delayA(self, seconds: float):
+        """Set delay A from seconds"""
+        mult = self.delayA_unit.get_multiplier()
+        self.delayA.setValue(seconds / mult)
+    
+    def set_widthB(self, seconds: float):
+        """Set width B from seconds"""
+        mult = self.widthB_unit.get_multiplier()
+        self.widthB.setValue(seconds / mult)
+    
+    def set_delayB(self, seconds: float):
+        """Set delay B from seconds"""
+        mult = self.delayB_unit.get_multiplier()
+        self.delayB.setValue(seconds / mult)
+    
+    def set_widthC(self, seconds: float):
+        """Set width C from seconds"""
+        mult = self.widthC_unit.get_multiplier()
+        self.widthC.setValue(seconds / mult)
+    
+    def set_delayC(self, seconds: float):
+        """Set delay C from seconds"""
+        mult = self.delayC_unit.get_multiplier()
+        self.delayC.setValue(seconds / mult)
+    
+    def set_widthD(self, seconds: float):
+        """Set width D from seconds"""
+        mult = self.widthD_unit.get_multiplier()
+        self.widthD.setValue(seconds / mult)
+    
+    def set_delayD(self, seconds: float):
+        """Set delay D from seconds"""
+        mult = self.delayD_unit.get_multiplier()
+        self.delayD.setValue(seconds / mult)
+    
+    def set_period(self, seconds: float):
+        """Set period from seconds"""
+        mult = self.period_unit.get_multiplier()
+        self.period.setValue(seconds / mult)
+    
+    # ==================== CHANNEL ENABLE STATE ====================
+    
+    def is_channel_enabled(self, channel: str) -> bool:
+        """Check if channel is enabled"""
+        ch = channel.upper().replace("CH", "")
+        btn = getattr(self, f'btn_en_{ch.lower()}', None)
+        return btn.isChecked() if btn else False
+    
+    def set_channel_enabled(self, channel: str, enabled: bool):
+        """Set channel enabled state"""
+        ch = channel.upper().replace("CH", "")
+        btn = getattr(self, f'btn_en_{ch.lower()}', None)
+        if btn:
+            btn.setChecked(enabled)
+    
+    # ==================== TRIGGER SETTINGS ====================
+    
+    def get_trigger_source(self) -> str:
+        """Get trigger source: INT or EXT"""
+        return self.trig_source.currentText()
+    
+    def get_trigger_slope(self) -> str:
+        """Get trigger slope: POS or NEG"""
+        return self.trig_slope.currentText()
     
     def get_trigger_level(self) -> float:
         """Get trigger level in volts"""
         return self.trig_level.value()
     
-    def get_trigger_edge(self) -> str:
-        """Get trigger edge string"""
-        return self.trig_edge.currentText()
+    def is_trigger_enabled(self) -> bool:
+        """Check if external trigger is enabled"""
+        return self.btn_en_trig.isChecked()
     
-    def get_gate_mode(self) -> str:
-        """Get gate mode string"""
-        return self.gate_mode.currentText()
+    # ==================== SYSTEM MODE ====================
     
-    def get_gate_level(self) -> float:
-        """Get gate level in volts"""
-        return self.gate_level.value()
+    def get_system_mode(self) -> str:
+        """Get system mode"""
+        modes = {
+            "Continuous": "NORM",
+            "Single Shot": "SING", 
+            "Burst": "BURS",
+            "Duty Cycle": "DCYC"
+        }
+        return modes.get(self.system_mode.currentText(), "NORM")
     
-    def get_gate_logic(self) -> str:
-        """Get gate logic string"""
-        return self.gate_logic.currentText()
+    def set_system_mode(self, mode: str):
+        """Set system mode"""
+        modes = {
+            "NORM": "Continuous",
+            "SING": "Single Shot",
+            "BURS": "Burst",
+            "DCYC": "Duty Cycle"
+        }
+        text = modes.get(mode.upper(), "Continuous")
+        idx = self.system_mode.findText(text)
+        if idx >= 0:
+            self.system_mode.setCurrentIndex(idx)
     
-    # ========== Backward Compatible Channel Access Methods ==========
+    # ==================== STATUS ====================
     
-    def get_delayA(self) -> float:
-        """Get Channel A delay in seconds (backward compatible)"""
-        if 'A' in self.channel_widgets:
-            return self.channel_widgets['A'].get_delay_seconds()
-        return 0.0
+    def set_connected(self, connected: bool, info: str = ""):
+        """Update connection status"""
+        if connected:
+            self.lamp.set_status("green", f"Connected: {info}")
+            self.btn_connect.setEnabled(False)
+            self.btn_disconnect.setEnabled(True)
+        else:
+            self.lamp.set_status("red", "Not Connected")
+            self.btn_connect.setEnabled(True)
+            self.btn_disconnect.setEnabled(False)
     
-    def get_delayB(self) -> float:
-        """Get Channel B delay in seconds (backward compatible)"""
-        if 'B' in self.channel_widgets:
-            return self.channel_widgets['B'].get_delay_seconds()
-        return 0.0
-    
-    def get_delayC(self) -> float:
-        """Get Channel C delay in seconds (backward compatible)"""
-        if 'C' in self.channel_widgets:
-            return self.channel_widgets['C'].get_delay_seconds()
-        return 0.0
-    
-    def get_delayD(self) -> float:
-        """Get Channel D delay in seconds (backward compatible)"""
-        if 'D' in self.channel_widgets:
-            return self.channel_widgets['D'].get_delay_seconds()
-        return 0.0
-    
-    def get_delayE(self) -> float:
-        """Get Channel E delay in seconds"""
-        if 'E' in self.channel_widgets:
-            return self.channel_widgets['E'].get_delay_seconds()
-        return 0.0
-    
-    def get_delayF(self) -> float:
-        """Get Channel F delay in seconds"""
-        if 'F' in self.channel_widgets:
-            return self.channel_widgets['F'].get_delay_seconds()
-        return 0.0
-    
-    def get_delayG(self) -> float:
-        """Get Channel G delay in seconds"""
-        if 'G' in self.channel_widgets:
-            return self.channel_widgets['G'].get_delay_seconds()
-        return 0.0
-    
-    def get_delayH(self) -> float:
-        """Get Channel H delay in seconds"""
-        if 'H' in self.channel_widgets:
-            return self.channel_widgets['H'].get_delay_seconds()
-        return 0.0
-    
-    def get_widthA(self) -> float:
-        """Get Channel A width in seconds (backward compatible)"""
-        if 'A' in self.channel_widgets:
-            return self.channel_widgets['A'].get_width_seconds()
-        return 100e-9
-    
-    def get_widthB(self) -> float:
-        """Get Channel B width in seconds (backward compatible)"""
-        if 'B' in self.channel_widgets:
-            return self.channel_widgets['B'].get_width_seconds()
-        return 100e-9
-    
-    def get_widthC(self) -> float:
-        """Get Channel C width in seconds (backward compatible)"""
-        if 'C' in self.channel_widgets:
-            return self.channel_widgets['C'].get_width_seconds()
-        return 100e-9
-    
-    def get_widthD(self) -> float:
-        """Get Channel D width in seconds (backward compatible)"""
-        if 'D' in self.channel_widgets:
-            return self.channel_widgets['D'].get_width_seconds()
-        return 100e-9
-    
-    def get_widthE(self) -> float:
-        """Get Channel E width in seconds"""
-        if 'E' in self.channel_widgets:
-            return self.channel_widgets['E'].get_width_seconds()
-        return 100e-9
-    
-    def get_widthF(self) -> float:
-        """Get Channel F width in seconds"""
-        if 'F' in self.channel_widgets:
-            return self.channel_widgets['F'].get_width_seconds()
-        return 100e-9
-    
-    def get_widthG(self) -> float:
-        """Get Channel G width in seconds"""
-        if 'G' in self.channel_widgets:
-            return self.channel_widgets['G'].get_width_seconds()
-        return 100e-9
-    
-    def get_widthH(self) -> float:
-        """Get Channel H width in seconds"""
-        if 'H' in self.channel_widgets:
-            return self.channel_widgets['H'].get_width_seconds()
-        return 100e-9
-    
-    def get_channel_enabled(self, channel: str) -> bool:
-        """Get channel enabled state"""
-        if channel in self.channel_widgets:
-            return self.channel_widgets[channel].is_enabled()
-        return False
-    
-    def set_channel_enabled(self, channel: str, enabled: bool):
-        """Set channel enabled state"""
-        if channel in self.channel_widgets:
-            self.channel_widgets[channel].set_enabled(enabled)
-    
-    def get_channel_delay(self, channel: str) -> float:
-        """Get channel delay in seconds"""
-        if channel in self.channel_widgets:
-            return self.channel_widgets[channel].get_delay_seconds()
-        return 0.0
-    
-    def set_channel_delay(self, channel: str, delay: float):
-        """Set channel delay in seconds"""
-        if channel in self.channel_widgets:
-            self.channel_widgets[channel].set_delay_seconds(delay)
-    
-    def get_channel_width(self, channel: str) -> float:
-        """Get channel width in seconds"""
-        if channel in self.channel_widgets:
-            return self.channel_widgets[channel].get_width_seconds()
-        return 100e-9
-    
-    def set_channel_width(self, channel: str, width: float):
-        """Set channel width in seconds"""
-        if channel in self.channel_widgets:
-            self.channel_widgets[channel].set_width_seconds(width)
+    def set_running(self, running: bool):
+        """Update running status"""
+        if running:
+            self.lamp.set_status("green", "Running")
+        else:
+            self.lamp.set_status("yellow", "Stopped")
 
 
-# Example usage
+# Test standalone
 if __name__ == "__main__":
     import sys
     from PyQt6.QtWidgets import QApplication
     
     app = QApplication(sys.argv)
-    
-    # Create panel (8-channel version)
-    panel = BNC575Panel(num_channels=8)
-    panel.setWindowTitle("BNC 575 Control Panel")
-    panel.resize(700, 600)
+    panel = BNC575Panel()
+    panel.setWindowTitle("BNC575 Panel Test")
+    panel.resize(500, 600)
     panel.show()
     
-    # Demonstrate backward compatible methods
-    print("Testing backward compatible methods:")
-    print(f"  get_delayA(): {panel.get_delayA()}")
-    print(f"  get_widthA(): {panel.get_widthA()}")
-    print(f"  get_period_seconds(): {panel.get_period_seconds()}")
-    print(f"  get_frequency_hz(): {panel.get_frequency_hz()}")
+    # Test getters
+    print(f"Width A: {panel.get_widthA()}")
+    print(f"Delay A: {panel.get_delayA()}")
+    print(f"Period: {panel.get_period()}")
+    print(f"Mode: {panel.get_system_mode()}")
     
     sys.exit(app.exec())
