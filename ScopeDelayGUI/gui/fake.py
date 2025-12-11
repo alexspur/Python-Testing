@@ -441,7 +441,7 @@ class ScopeDelayMainWindow(QMainWindow):
         # ------------------------------
         # WJ HIGH VOLTAGE SUPPLIES
         # ------------------------------
-        default_wj_ports = ["COM6", "COM10"]
+        default_wj_ports = ["COM6", "COM11"]
         for i, wj in enumerate(self.wj_units):
             try:
                 port = self.conn.get(f"WJ{i+1}_COM", default_wj_ports[i])

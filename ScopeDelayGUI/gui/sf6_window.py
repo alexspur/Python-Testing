@@ -76,10 +76,10 @@ class SF6Window(QMainWindow):
         self.kv2_gauge = GaugeWidget(min_value=0, max_value=100, label="kV", size=120)
         self.ma2_gauge = GaugeWidget(min_value=0, max_value=6, label="mA", size=120)
 
-        gauges_layout.addWidget(QLabel("WJ1:"), 0, 0)
+        gauges_layout.addWidget(QLabel("Negative:"), 0, 0)
         gauges_layout.addWidget(self.kv1_gauge, 0, 1)
         gauges_layout.addWidget(self.ma1_gauge, 0, 2)
-        gauges_layout.addWidget(QLabel("WJ2:"), 1, 0)
+        gauges_layout.addWidget(QLabel("Positive:"), 1, 0)
         gauges_layout.addWidget(self.kv2_gauge, 1, 1)
         gauges_layout.addWidget(self.ma2_gauge, 1, 2)
         wj_layout.addLayout(gauges_layout)
@@ -126,8 +126,9 @@ class SF6Window(QMainWindow):
         self.btn_wj_connect = []
         self.btn_wj_disconnect = []
 
+        port_labels = ["Negative Port:", "Positive Port:"]
         for i in range(2):
-            label = QLabel(f"WJ{i+1} Port:")
+            label = QLabel(port_labels[i])
             combo = QComboBox()
             combo.addItem("No COM ports")
             btn_c = QPushButton("Connect")

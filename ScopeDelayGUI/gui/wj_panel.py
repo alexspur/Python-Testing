@@ -193,7 +193,9 @@ class WJRow:
     def __init__(self, index):
         self.index = index
 
-        self.label = QLabel(f"WJ Power Supply #{index+1}")
+        # Custom labels for each power supply
+        labels = ["Negative Power Supply", "Positive Power Supply"]
+        self.label = QLabel(labels[index] if index < len(labels) else f"WJ Power Supply #{index+1}")
 
         # ⭐ COM PORT DROPDOWN
         self.port_combo = QComboBox()
