@@ -91,7 +91,7 @@ class CaptureSingleWorker(QThread):
     # Signal: (error_message, scope_name)
     error = pyqtSignal(str, str)
 
-    def __init__(self, scope, scope_name: str, timeout: float = 10.0, parent=None):
+    def __init__(self, scope, scope_name: str, timeout: float = 300.0, parent=None):
         """
         Initialize the capture worker.
 

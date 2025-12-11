@@ -560,10 +560,16 @@ class RigolScope:
         
     def _query_binary(self, cmd: str) -> bytes:
         """Query oscilloscope and return binary data with TMC header parsing."""
-        self.instr.write(cmd)
-        # Read raw bytes - the scope returns TMC format: #NXXXXXX<data>
-        raw = self.instr.read_raw()
-        return self._parse_tmc_data(raw)
+        # Temporarily disable read termination for binary data
+        old_term = self.instr.read_termination
+        self.instr.read_termination = None
+        try:
+            self.instr.write(cmd)
+            # Read raw bytes - the scope returns TMC format: #NXXXXXX<data>
+            raw = self.instr.read_raw()
+            return self._parse_tmc_data(raw)
+        finally:
+            self.instr.read_termination = old_term
         
     def _parse_tmc_data(self, raw: bytes) -> bytes:
         """
@@ -800,8 +806,8 @@ class RigolScope:
         
         return (t1, v1), (t2, v2)
         
-    def wait_and_capture(self, ch1: int = 1, ch2: int = 2, 
-                         timeout: float = 10.0) -> tuple:
+    def wait_and_capture(self, ch1: int = 1, ch2: int = 2,
+                         timeout: float = 300.0) -> tuple:
         """
         Arm single trigger, wait for acquisition, then capture two channels.
         

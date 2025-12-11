@@ -2571,7 +2571,7 @@ class ScopeDelayMainWindow(QMainWindow):
         self.log(f"[{name}] capture started...")
 
         # The new CaptureSingleWorker handles arming internally via wait_and_capture
-        self.single_worker = CaptureSingleWorker(rigol, name, timeout=10.0)
+        self.single_worker = CaptureSingleWorker(rigol, name, timeout=300.0)
         self.single_worker.finished.connect(lambda ch1, ch2, nm: self.on_single_capture_finished(ch1, ch2, plot_widget, nm))
         self.single_worker.error.connect(lambda msg, nm: self.on_single_capture_error(msg, nm))
         self.single_worker.start()
@@ -2805,6 +2805,16 @@ class ScopeDelayMainWindow(QMainWindow):
             self.arduino_stream.data_signal.connect(self.on_analog_data)
             self.arduino_stream.error_signal.connect(lambda msg: self.log(f"[Arduino Stream ERROR] {msg}"))
             self.arduino_stream.start()
+
+            # Auto-close Marx1 Supply (DO0) and Marx1 Return (DO4) on connect
+            try:
+                self.arduino.set_digital_output(0, 1)  # Marx1 Supply ON (closed)
+                self.arduino.set_digital_output(4, 1)  # Marx1 Return ON (closed)
+                sf6_panel.switches[0].setChecked(True)  # Update GUI switch
+                sf6_panel.switches[1].setChecked(True)  # Update GUI switch
+                self.log("[Arduino] Auto-closed Marx1 Supply and Marx1 Return")
+            except Exception as e:
+                self.log(f"[Arduino] Failed to auto-close Marx1 valves: {e}")
 
         except Exception as e:
             self.set_status("red", "Arduino connection failed")
