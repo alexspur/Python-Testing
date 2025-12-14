@@ -1,0 +1,168 @@
+12 12 2025 Testing Trigger generator with 25 kOhm Resistor
+
+
+Neg:
+Pos:
+
+
+Test 1: 13 psi  25 kOhm Resistor Triggered first try
+Neg:5.5 kV
+Pos:0kV
+=== Auto-connect starting ===
+[DG535] Connected on COM4
+[BNC575] Connected on COM5: BNC,575-4,31707,2.4.2-2.0.11
+[BNC575] Read all settings from device
+[Arduino] Connected on COM8
+[Arduino] Stream worker started
+[WJ1] Connected on COM6
+[WJ2] Connected on COM10
+[AutoConnect] Rigol1_VISA CONNECTED → RIGOL TECHNOLOGIES,DS7054,DS7A232900210,00.01.02.00.07
+[AutoConnect] Rigol2_VISA CONNECTED → RIGOL TECHNOLOGIES,DS7054,DS7A230800035,01.01.02.00.06
+[AutoConnect] Rigol3_VISA CONNECTED → RIGOL TECHNOLOGIES,DS7054,DS7A233300256,00.01.02.00.07
+=== Auto-connect done ===
+[DATA LOGGER] Saving to: logs\experiment_log_20251212_142639.csv
+[Arduino] on 0
+[Arduino] on 4
+[Arduino] off 0
+[Arduino] on 0
+[Rigol #1] capture started...
+[Rigol #2] capture started...
+[WJ1] Set → 75.0 kV, 2.0 mA ({'type': 'A', 'raw': 'A'})
+[WJ2] Set → 75.0 kV, 2.0 mA ({'type': 'A', 'raw': 'A'})
+[WJ1] HV ON → {'type': 'UNKNOWN', 'raw': ''}
+[WJ2] HV ON → {'type': 'UNKNOWN', 'raw': ''}
+[WJ1] HV OFF → {'type': 'A', 'raw': 'A'}
+[WJ2] HV OFF → {'type': 'A', 'raw': 'A'}
+[BNC575] Internal pulse fired.
+[Rigol #2] capture complete.
+[Rigol #1] capture complete.
+Saved:
+rigol1_20251212_142840.csv
+rigol2_20251212_142840.csv
+rigol3_20251212_142840.csv
+
+
+
+Test 2: 13 psi 25 kOhm Resistor Triggered second try
+
+Neg: 5.7 kV
+Pos:0 kV
+
+=== Auto-connect starting ===
+[DG535] Connected on COM4
+[BNC575] Connected on COM5: BNC,575-4,31707,2.4.2-2.0.11
+[BNC575] Read all settings from device
+[Arduino] Connected on COM8
+[Arduino] Stream worker started
+[WJ1] Connected on COM6
+[WJ2] Connected on COM10
+[AutoConnect] Rigol1_VISA CONNECTED → RIGOL TECHNOLOGIES,DS7054,DS7A232900210,00.01.02.00.07
+[AutoConnect] Rigol2_VISA CONNECTED → RIGOL TECHNOLOGIES,DS7054,DS7A230800035,01.01.02.00.06
+[AutoConnect] Rigol3_VISA CONNECTED → RIGOL TECHNOLOGIES,DS7054,DS7A233300256,00.01.02.00.07
+=== Auto-connect done ===
+[DATA LOGGER] Saving to: logs\experiment_log_20251212_143120.csv
+[Rigol #1] capture started...
+[Rigol #2] capture started...
+[WJ1] Set → 75.0 kV, 2.0 mA ({'type': 'A', 'raw': 'A'})
+[WJ2] Set → 75.0 kV, 2.0 mA ({'type': 'UNKNOWN', 'raw': '00000'})
+[WJ1] HV ON → {'type': 'UNKNOWN', 'raw': ''}
+[WJ2] HV ON → {'type': 'UNKNOWN', 'raw': ''}
+[Arduino] on 0
+[Arduino] on 4
+[WJ1] HV OFF → {'type': 'A', 'raw': 'A'}
+[WJ2] HV OFF → {'type': 'A', 'raw': 'A'}
+[BNC575] Internal pulse fired.
+[BNC575] Internal pulse fired.
+[Rigol #2] capture complete.
+[Rigol #1] capture complete.
+Saved:
+rigol1_20251212_143250.csv
+rigol2_20251212_143250.csv
+rigol3_20251212_143250.csv
+
+
+Test 3: 13 psi 25 kOhm Resistor Triggered first try
+Neg: 5.5 kV
+Pos: 0 kV
+=== Auto-connect starting ===
+[DG535] Connected on COM4
+[BNC575] Connected on COM5: BNC,575-4,31707,2.4.2-2.0.11
+[BNC575] Read all settings from device
+[Arduino] Connected on COM8
+[Arduino] Stream worker started
+[WJ1] Connected on COM6
+[WJ2] Connected on COM10
+[AutoConnect] Rigol1_VISA CONNECTED → RIGOL TECHNOLOGIES,DS7054,DS7A232900210,00.01.02.00.07
+[AutoConnect] Rigol2_VISA CONNECTED → RIGOL TECHNOLOGIES,DS7054,DS7A230800035,01.01.02.00.06
+[AutoConnect] Rigol3_VISA CONNECTED → RIGOL TECHNOLOGIES,DS7054,DS7A233300256,00.01.02.00.07
+=== Auto-connect done ===
+[DATA LOGGER] Saving to: logs\experiment_log_20251212_143443.csv
+[Arduino] on 0
+[Arduino] on 4
+[Rigol #1] capture started...
+[Rigol #2] capture started...
+[WJ1] Set → 75.0 kV, 2.0 mA ({'type': 'A', 'raw': 'A'})
+[WJ2] Set → 75.0 kV, 2.0 mA ({'type': 'A', 'raw': 'AR0000004'})
+[WJ1] HV ON → {'type': 'UNKNOWN', 'raw': ''}
+[WJ2] HV ON → {'type': 'UNKNOWN', 'raw': ''}
+[WJ1] HV OFF → {'type': 'A', 'raw': 'A'}
+[WJ2] HV OFF → {'type': 'A', 'raw': 'A'}
+[BNC575] Internal pulse fired.
+[Rigol #2] capture complete.
+[Rigol #1] capture complete.
+Saved:
+rigol1_20251212_143610.csv
+rigol2_20251212_143611.csv
+rigol3_20251212_143611.csv
+
+
+Test 4: 13 psi 25 kOhm Resistor Triggered first try
+Neg: 5.5 kV
+Pos: 0 kV
+	
+
+=== Auto-connect starting ===
+[DG535] Connected on COM4
+[BNC575] Connected on COM5: BNC,575-4,31707,2.4.2-2.0.11
+[BNC575] Read all settings from device
+[Arduino] Connected on COM8
+[Arduino] Stream worker started
+[WJ1] Connected on COM6
+[WJ2] NOT CONNECTED: could not open port 'COM10': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+[AutoConnect] Rigol1_VISA CONNECTED → RIGOL TECHNOLOGIES,DS7054,DS7A232900210,00.01.02.00.07
+[AutoConnect] Rigol2_VISA CONNECTED → RIGOL TECHNOLOGIES,DS7054,DS7A230800035,01.01.02.00.06
+[AutoConnect] Rigol3_VISA CONNECTED → RIGOL TECHNOLOGIES,DS7054,DS7A233300256,00.01.02.00.07
+=== Auto-connect done ===
+[DATA LOGGER] Saving to: logs\experiment_log_20251212_143744.csv
+[Arduino] on 0
+[Arduino] on 4
+[Rigol #1] capture started...
+[Rigol #2] capture started...
+[WJ1] Set → 75.0 kV, 2.0 mA ({'type': 'A', 'raw': 'A'})
+[WJ2 ERROR] WJPowerSupply not connected
+[WJ2] Connecting on COM11...
+[WJ1] Set → 75.0 kV, 2.0 mA ({'type': 'A', 'raw': 'A'})
+[WJ2] Set → 75.0 kV, 2.0 mA ({'type': 'A', 'raw': 'A'})
+[WJ1] HV ON → {'type': 'UNKNOWN', 'raw': '044\rA'}
+[WJ2] HV ON → {'type': 'A', 'raw': 'A'}
+[WJ1] Set → 75.0 kV, 2.0 mA ({'type': 'A', 'raw': 'A'})
+[WJ2] Set → 75.0 kV, 2.0 mA ({'type': 'A', 'raw': 'A'})
+[WJ1] HV ON → {'type': 'A', 'raw': 'A'}
+[WJ2] HV ON → {'type': 'UNKNOWN', 'raw': 'R0370000000004A\rA'}
+[WJ1] Set → 75.0 kV, 2.0 mA ({'type': 'A', 'raw': 'A'})
+[WJ2] Set → 75.0 kV, 2.0 mA ({'type': 'A', 'raw': 'A'})
+[WJ1] HV ON → {'type': 'UNKNOWN', 'raw': ''}
+[WJ2] HV ON → {'type': 'UNKNOWN', 'raw': ''}
+[WJ1] HV OFF → {'type': 'A', 'raw': 'A'}
+[WJ2] HV OFF → {'type': 'A', 'raw': 'A'}
+[BNC575] Internal pulse fired.
+[BNC575] Internal pulse fired.
+[Rigol #2] capture complete.
+[Rigol #1] capture complete.
+Saved:
+rigol1_20251212_144031.csv
+rigol2_20251212_144032.csv
+rigol3_20251212_144032.csv
+
+
+
