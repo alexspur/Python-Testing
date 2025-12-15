@@ -1,0 +1,4 @@
+timestamp_sec,datetime,event_type,source,param1,param2,param3,param4,notes
+2.904887,2025-12-15 16:53:17.450,INFO,SYSTEM,,,,,GUI started successfully
+12.689684,2025-12-15 16:53:27.235,BNC575_PULSE,BNC575,INTERNAL,,,,INTERNAL
+13.050816,2025-12-15 16:53:27.596,SCOPE_CAPTURE,Rigol1,1,1000,1000,,"Rigol #1 captured (CH1:1000 pts, CH2:1000 pts)"

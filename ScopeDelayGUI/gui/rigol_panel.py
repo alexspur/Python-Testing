@@ -177,10 +177,6 @@ class RigolPanel(QGroupBox):
         layout = QGridLayout()
         self.setLayout(layout)
 
-        # Status Lamp
-        self.lamp = StatusLamp(size=14)
-        layout.addWidget(self.lamp)
-
         # --- BUTTONS ---
         self.btn_r1 = QPushButton("Connect Rigol #1")
         self.btn_r2 = QPushButton("Connect Rigol #2")

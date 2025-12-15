@@ -17,7 +17,7 @@ from gui.wj_plot_window import WJPlotWindow
 from utils.logger import LogPanel
 from utils.status_lamp import StatusLamp
 from utils.serial_tools import list_serial_ports
-from utils.capture_single_worker import CaptureSingleWorker
+from utils.capture_single_worker import CaptureSingleWorker, CaptureFourChannelWorker
 from utils.connect_memory import load_memory, save_memory
 from utils.arduino_stream_worker import ArduinoStreamWorker
 from utils.data_logger import DataLogger
@@ -35,6 +35,7 @@ class ScopeDelayMainWindow(QMainWindow):
 
         self.setWindowTitle("Scope + Delay + SF6 Control")
         self.setGeometry(100, 100, 1700, 900)
+        self.setMinimumSize(800, 600)
         self.conn = load_memory()
         self.wj_plot_window = None
 
@@ -79,10 +80,12 @@ class ScopeDelayMainWindow(QMainWindow):
 
         # Remove tabs - just use main layout for Scope + Delay controls
         self.build_scope_controls(main_layout)
-        self.refresh_wj_ports()
 
         # Create SF6 window as separate top-level window (now includes WJ plots)
         self.sf6_window = SF6Window()
+
+        # Populate WJ COM ports (after sf6_window is created so it gets populated too)
+        self.refresh_wj_ports()
 
         # Attempt auto-connect
         self.auto_connect_all()
@@ -92,7 +95,7 @@ class ScopeDelayMainWindow(QMainWindow):
         # Connect SF6 window controls
         self.connect_sf6_window()
 
-        # Create scope plot window
+        # Create scope plot window (now with 4-channel support)
         self.scope_window = ScopePlotWindow(parent=self)
 
         # Start WJ reader threads and connect to SF6 window plot
@@ -148,7 +151,7 @@ class ScopeDelayMainWindow(QMainWindow):
         self.wj_ma1_buf = []
         self.wj_kv2_buf = []
         self.wj_ma2_buf = []
-        self.wj_max_points = 500
+        self.wj_max_points = 3000  # Store ~5 minutes of history at ~10 Hz
 
         for idx, wj in enumerate(self.wj_units):
             worker = WJReaderThread(wj)
@@ -190,7 +193,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self.wj_kv1_buf.append(kv)
             self.wj_ma1_buf.append(ma)
 
-            # Rolling window for unit 1
+            # Rolling window for unit 1 (keep more points for history)
             if len(self.wj_t1_buf) > self.wj_max_points:
                 self.wj_t1_buf = self.wj_t1_buf[-self.wj_max_points:]
                 self.wj_kv1_buf = self.wj_kv1_buf[-self.wj_max_points:]
@@ -208,7 +211,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self.wj_kv2_buf.append(kv)
             self.wj_ma2_buf.append(ma)
 
-            # Rolling window for unit 2
+            # Rolling window for unit 2 (keep more points for history)
             if len(self.wj_t2_buf) > self.wj_max_points:
                 self.wj_t2_buf = self.wj_t2_buf[-self.wj_max_points:]
                 self.wj_kv2_buf = self.wj_kv2_buf[-self.wj_max_points:]
@@ -217,6 +220,9 @@ class ScopeDelayMainWindow(QMainWindow):
             # Update curves for unit 2
             self.sf6_window.kv2_curve.setData(self.wj_t2_buf, self.wj_kv2_buf)
             self.sf6_window.ma2_curve.setData(self.wj_t2_buf, self.wj_ma2_buf)
+
+        # Auto-scroll the plot to show the last 60 seconds
+        self.sf6_window.update_wj_scroll(t)
 
     def position_and_show_windows(self):
         """Position windows on appropriate monitors and show them"""
@@ -243,17 +249,17 @@ class ScopeDelayMainWindow(QMainWindow):
 
         # Main window on middle screen
         self.setScreen(middle_screen)
-        mid_geo = middle_screen.geometry()
-        self.move(mid_geo.x() + 50, mid_geo.y() + 50)
+        self.move(middle_screen.availableGeometry().topLeft())
+        self.showMaximized()
 
         # SF6 window on left screen
         self.sf6_window.setScreen(left_screen)
-        self.sf6_window.move(left_screen.geometry().topLeft())
+        self.sf6_window.move(left_screen.availableGeometry().topLeft())
         self.sf6_window.showMaximized()
 
         # Scope window on right screen
         self.scope_window.setScreen(right_screen)
-        self.scope_window.move(right_screen.geometry().topLeft())
+        self.scope_window.move(right_screen.availableGeometry().topLeft())
         self.scope_window.showMaximized()
 
     def build_scope_controls(self, main_layout):
@@ -576,16 +582,28 @@ class ScopeDelayMainWindow(QMainWindow):
         from datetime import datetime
 
         def export_scope_csv(scope, prefix):
-            """Export current waveform data from scope to CSV."""
-            (t1, v1), (t2, v2) = scope.capture_two_channels()
+            """Export current waveform data from scope to CSV (4 channels)."""
+            data = scope.capture_four_channels()
+            (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
+            
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{prefix}_{timestamp}.csv"
 
+            # Find max length among all channels
+            max_len = max(len(t1), len(t2), len(t3), len(t4))
+
             with open(filename, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["time_s", "ch1_v", "ch2_v"])
-                for i in range(len(t1)):
-                    writer.writerow([t1[i], v1[i], v2[i] if i < len(v2) else ""])
+                writer.writerow(["time_s", "ch1_v", "ch2_v", "ch3_v", "ch4_v"])
+                for i in range(max_len):
+                    row = [
+                        t1[i] if i < len(t1) else "",
+                        v1[i] if i < len(v1) else "",
+                        v2[i] if i < len(v2) else "",
+                        v3[i] if i < len(v3) else "",
+                        v4[i] if i < len(v4) else "",
+                    ]
+                    writer.writerow(row)
             return filename
 
         try:
@@ -658,6 +676,11 @@ class ScopeDelayMainWindow(QMainWindow):
 
     def on_dg_fire(self):
         try:
+            # SAFETY INTERLOCK: Ensure WJ HV supplies are OFF before firing
+            if not self.ensure_wj_hv_off():
+                self.log("[DG535] Fire ABORTED - WJ HV interlock failed")
+                return
+
             delayA = self.dg_panel.get_delayA()
             widthA = self.dg_panel.get_widthA()
 
@@ -811,7 +834,12 @@ class ScopeDelayMainWindow(QMainWindow):
         if not self.bnc_connected:
             self.error_popup("BNC575", "Not connected")
             return
-            
+
+        # SAFETY INTERLOCK: Ensure WJ HV supplies are OFF before firing
+        if not self.ensure_wj_hv_off():
+            self.log("[BNC575] Fire ABORTED - WJ HV interlock failed")
+            return
+
         try:
             self.set_status("yellow", "Firing BNC575 internal pulse...")
             self.bnc.fire_internal()
@@ -1002,59 +1030,61 @@ class ScopeDelayMainWindow(QMainWindow):
             self.log(f"[Rigol3 ERROR] {e}")
             self.error_popup("Rigol #3 Error", str(e))
 
-    def _capture_single_scope(self, rigol, plot_widget, name):
-        try:
-            plot_widget.clear()
-
-            self.set_status("yellow", f"Capturing {name}...")
-            self.log(f"[{name}] Preparing for capture...")
-
-            rigol.stop()
-            rigol.single()
-            time.sleep(0.2)
-
-            (t1, v1), (t2, v2) = rigol.wait_and_capture()
-
-            plot_widget.plot(t1, v1, pen="r")
-            plot_widget.plot(t2, v2, pen="b")
-
-            self.set_status("green", f"{name} captured")
-            self.log(f"[{name}] Capture complete.")
-
-        except Exception as e:
-            self.error_popup(f"{name} Capture Error", str(e))
-            self.log(f"[{name} ERROR] {e}")
-
 
     def on_capture_r1(self):
+        """Capture 4 channels from Rigol #1"""
         if not self.rigol1_connected:
             self.error_popup("Rigol #1", "Not connected.")
             return
-        self.start_single_capture(self.rigol1, self.scope_window.plot1, "Rigol #1")
+        self.start_four_channel_capture(self.rigol1, "Rigol #1", 1)
 
 
     def on_capture_r2(self):
+        """Capture 4 channels from Rigol #2"""
         if not self.rigol2_connected:
             self.error_popup("Rigol #2", "Not connected.")
             return
-        self.start_single_capture(self.rigol2, self.scope_window.plot2, "Rigol #2")
+        self.start_four_channel_capture(self.rigol2, "Rigol #2", 2)
 
 
     def on_capture_r3(self):
+        """Capture 4 channels from Rigol #3"""
         if not self.rigol3_connected:
             self.error_popup("Rigol #3", "Not connected.")
             return
-        self.start_single_capture(self.rigol3, self.scope_window.plot3, "Rigol #3")
+        self.start_four_channel_capture(self.rigol3, "Rigol #3", 3)
 
-    def start_single_capture(self, rigol, plot_widget, name):
-        self.set_status("yellow", f"Capturing {name}...")
-        self.log(f"[{name}] capture started...")
+    def start_four_channel_capture(self, rigol, name, scope_id):
+        """Start a 4-channel capture worker for a scope"""
+        self.set_status("yellow", f"Capturing {name} (4 channels)...")
+        self.log(f"[{name}] 4-channel capture started...")
 
-        # The new CaptureSingleWorker handles arming internally via wait_and_capture
-        self.single_worker = CaptureSingleWorker(rigol, name, timeout=300.0)
-        self.single_worker.finished.connect(lambda ch1, ch2, nm: self.on_single_capture_finished(ch1, ch2, plot_widget, nm))
-        self.single_worker.error.connect(lambda msg, nm: self.on_single_capture_error(msg, nm))
-        self.single_worker.start()
+        worker = CaptureFourChannelWorker(rigol, name, timeout=300.0)
+        worker.finished.connect(lambda data, nm: self.on_four_channel_capture_finished(data, nm, scope_id))
+        worker.error.connect(lambda msg, nm: self.on_single_capture_error(msg, nm))
+        
+        # Store worker reference to prevent garbage collection
+        setattr(self, f'capture_worker_{scope_id}', worker)
+        worker.start()
+
+    def on_four_channel_capture_finished(self, data, name, scope_id):
+        """Handle 4-channel capture completion"""
+        (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
+
+        # Update the appropriate plot
+        if scope_id == 1:
+            self.scope_window.update_r1(t1, v1, t2, v2, t3, v3, t4, v4)
+        elif scope_id == 2:
+            self.scope_window.update_r2(t1, v1, t2, v2, t3, v3, t4, v4)
+        elif scope_id == 3:
+            self.scope_window.update_r3(t1, v1, t2, v2, t3, v3, t4, v4)
+
+        # Log capture (count non-empty channels)
+        ch_counts = [len(t1), len(t2), len(t3), len(t4)]
+        self.data_logger.log_scope_capture(scope_id, ch_counts[0], ch_counts[1])
+
+        self.set_status("green", f"{name} captured (4 ch)")
+        self.log(f"[{name}] 4-channel capture complete. Points: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)}")
 
     def on_r1_disconnect(self):
         try:
@@ -1084,27 +1114,6 @@ class ScopeDelayMainWindow(QMainWindow):
         self.rigol3_connected = False
 
 
-    def on_single_capture_finished(self, ch1, ch2, plot_widget, name):
-        (t1, v1) = ch1
-        (t2, v2) = ch2
-
-        # Log scope capture
-        scope_id = 0
-        if plot_widget == self.scope_window.plot1:
-            self.scope_window.update_r1(t1, v1, t2, v2)
-            scope_id = 1
-        elif plot_widget == self.scope_window.plot2:
-            self.scope_window.update_r2(t1, v1, t2, v2)
-            scope_id = 2
-        elif plot_widget == self.scope_window.plot3:
-            self.scope_window.update_r3(t1, v1, t2, v2)
-            scope_id = 3
-
-        self.data_logger.log_scope_capture(scope_id, len(t1), len(t2))
-
-        self.set_status("green", f"{name} captured")
-        self.log(f"[{name}] capture complete.")
-
     def on_single_capture_error(self, msg, name):
         self.set_status("red", f"{name} error")
         self.error_popup(f"{name} Capture Error", msg)
@@ -1112,8 +1121,14 @@ class ScopeDelayMainWindow(QMainWindow):
 
 
     def on_capture_all_scopes(self):
-        self.set_status("yellow", "Preparing for capture...")
-        self.log("[CAPTURE] Starting threaded capture...")
+        """Capture all 4 channels from all connected scopes"""
+        self.set_status("yellow", "Preparing for 4-channel capture...")
+        self.log("[CAPTURE] Starting 4-channel capture sequence...")
+
+        # SAFETY INTERLOCK: Ensure WJ HV supplies are OFF before firing
+        if not self.ensure_wj_hv_off():
+            self.log("[CAPTURE] Capture ABORTED - WJ HV interlock failed")
+            return
 
         # 1. STOP and ARM all Rigols early
         try:
@@ -1175,55 +1190,34 @@ class ScopeDelayMainWindow(QMainWindow):
 
         time.sleep(0.5)
 
-        # 5. CAPTURE waveforms
-        self.set_status("yellow", "Capturing waveforms...")
+        # 5. CAPTURE waveforms (4 channels each)
+        self.set_status("yellow", "Capturing 4-channel waveforms...")
 
         if self.rigol1_connected:
-            (t1, v1), (t2, v2) = self.rigol1.wait_and_capture()
-            self.scope_window.update_r1(t1, v1, t2, v2)
+            data = self.rigol1.wait_and_capture_four()
+            (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
+            self.scope_window.update_r1(t1, v1, t2, v2, t3, v3, t4, v4)
             self.data_logger.log_scope_capture(1, len(t1), len(t2))
+            self.log(f"[Rigol1] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
 
         if self.rigol2_connected:
-            (t1, v1), (t2, v2) = self.rigol2.wait_and_capture()
-            self.scope_window.update_r2(t1, v1, t2, v2)
+            data = self.rigol2.wait_and_capture_four()
+            (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
+            self.scope_window.update_r2(t1, v1, t2, v2, t3, v3, t4, v4)
             self.data_logger.log_scope_capture(2, len(t1), len(t2))
+            self.log(f"[Rigol2] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
 
         if self.rigol3_connected:
-            (t1, v1), (t2, v2) = self.rigol3.wait_and_capture()
-            self.scope_window.update_r3(t1, v1, t2, v2)
+            data = self.rigol3.wait_and_capture_four()
+            (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
+            self.scope_window.update_r3(t1, v1, t2, v2, t3, v3, t4, v4)
             self.data_logger.log_scope_capture(3, len(t1), len(t2))
+            self.log(f"[Rigol3] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
 
         self.data_logger.log_scope_all_capture()
 
-        self.set_status("green", "Capture complete")
+        self.set_status("green", "4-channel capture complete")
         self.log("[CAPTURE] Done.")
-
-
-    def _capture_error(self, msg):
-        self.set_status("red", "Capture error")
-        self.log(f"[CAPTURE ERROR] {msg}")
-        self.error_popup("Capture Error", msg)
-
-    def _capture_log(self, msg):
-        self.log("[CAPTURE] " + msg)
-        self.set_status("yellow", msg)
-
-    def _plot_capture(self, index, data):
-        (t1, v1), (t2, v2) = data
-
-        if index == 0:
-            p = self.scope_window.plot1
-        elif index == 1:
-            p = self.scope_window.plot2
-        else:
-            p = self.scope_window.plot3
-
-        if index == 0:
-            self.scope_window.update_r1(t1, v1, t2, v2)
-        elif index == 1:
-            self.scope_window.update_r2(t1, v1, t2, v2)
-        elif index == 2:
-            self.scope_window.update_r3(t1, v1, t2, v2)
 
 
     def on_r1_single(self):
@@ -1343,6 +1337,81 @@ class ScopeDelayMainWindow(QMainWindow):
     # ------------------------------------------------------------------
     #  WJ HV POWER SUPPLY HANDLERS
     # ------------------------------------------------------------------
+    def ensure_wj_hv_off(self, max_retries: int = 5, retry_delay: float = 0.3) -> bool:
+        """
+        Safety interlock: Turn off HV on all connected WJ supplies and verify.
+
+        Returns True if all connected supplies confirm HV is OFF.
+        Returns True if no supplies are connected (nothing to interlock).
+        Returns False if any supply fails to confirm HV OFF after retries.
+        """
+        import time
+
+        # Check which WJ units are connected
+        connected_units = []
+        for i, wj in enumerate(self.wj_units):
+            if wj.is_connected:
+                connected_units.append((i, wj))
+
+        if not connected_units:
+            self.log("[SAFETY] No WJ supplies connected - proceeding")
+            return True
+
+        self.log(f"[SAFETY] Turning off HV on {len(connected_units)} connected WJ supply(ies)...")
+        self.set_status("yellow", "Turning off HV supplies...")
+
+        # Send HV OFF to all connected units
+        for i, wj in connected_units:
+            try:
+                resp = wj.hv_off_pulse()
+                self.log(f"[WJ{i+1}] HV OFF command sent: {resp}")
+            except Exception as e:
+                self.log(f"[WJ{i+1} ERROR] Failed to send HV OFF: {e}")
+                self.error_popup("WJ Safety Error", f"Failed to turn off WJ{i+1}: {e}")
+                return False
+
+        # Give supplies time to respond
+        time.sleep(0.1)
+
+        # Verify HV is off on all units with retries
+        for i, wj in connected_units:
+            hv_confirmed_off = False
+
+            for attempt in range(max_retries):
+                try:
+                    data = wj.query()
+
+                    if data.get("type") != "R":
+                        self.log(f"[WJ{i+1}] Query returned non-R packet: {data}")
+                        time.sleep(retry_delay)
+                        continue
+
+                    hv_on = data.get("hv_on", True)  # Default to True (unsafe) if missing
+
+                    if not hv_on:
+                        self.log(f"[WJ{i+1}] HV confirmed OFF (attempt {attempt + 1})")
+                        hv_confirmed_off = True
+                        break
+                    else:
+                        self.log(f"[WJ{i+1}] HV still ON, retrying... (attempt {attempt + 1}/{max_retries})")
+                        # Send another HV OFF command
+                        wj.hv_off_pulse()
+                        time.sleep(retry_delay)
+
+                except Exception as e:
+                    self.log(f"[WJ{i+1} ERROR] Query failed: {e}")
+                    time.sleep(retry_delay)
+
+            if not hv_confirmed_off:
+                self.log(f"[WJ{i+1}] FAILED to confirm HV OFF after {max_retries} attempts!")
+                self.error_popup("WJ Safety Error",
+                    f"WJ{i+1} failed to confirm HV OFF.\nFiring aborted for safety.")
+                self.set_status("red", f"WJ{i+1} HV OFF failed - ABORT")
+                return False
+
+        self.log("[SAFETY] All WJ supplies confirmed HV OFF - safe to fire")
+        return True
+
     def on_wj_connect(self, index, port_override=None):
         row = self.wj_panel.rows[index]
         port = port_override or row.port_combo.currentText()
@@ -1476,7 +1545,95 @@ class ScopeDelayMainWindow(QMainWindow):
         self.scope_window.raise_()
         self.scope_window.activateWindow()
 
+    def _has_scope_data(self):
+        """Check if any scope plot has data that hasn't been exported"""
+        if not hasattr(self, 'scope_window') or not self.scope_window:
+            return False
+
+        # Check all curves for data
+        for curves in [self.scope_window.r1_curves, self.scope_window.r2_curves, self.scope_window.r3_curves]:
+            for curve in curves:
+                if curve is not None:
+                    x, y = curve.getData()
+                    if x is not None and len(x) > 0:
+                        return True
+        return False
+
+    def _auto_export_scope_data(self):
+        """Auto-export all scope data to CSV files on close"""
+        import csv
+        from datetime import datetime
+
+        if not hasattr(self, 'scope_window') or not self.scope_window:
+            return []
+
+        saved_files = []
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Helper to export one scope's data
+        def export_scope(curves, scope_name):
+            # Get data from all 4 channels
+            data = []
+            for curve in curves:
+                if curve is not None:
+                    x, y = curve.getData()
+                    if x is not None and y is not None:
+                        data.append((list(x), list(y)))
+                    else:
+                        data.append(([], []))
+                else:
+                    data.append(([], []))
+
+            # Check if any channel has data
+            has_data = any(len(d[0]) > 0 for d in data)
+            if not has_data:
+                return None
+
+            (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
+            filename = f"{scope_name}_auto_{timestamp}.csv"
+
+            # Find max length among all channels
+            max_len = max(len(t1), len(t2), len(t3), len(t4))
+
+            with open(filename, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["time_s", "ch1_v", "ch2_v", "ch3_v", "ch4_v"])
+                for i in range(max_len):
+                    row = [
+                        t1[i] if i < len(t1) else "",
+                        v1[i] if i < len(v1) else "",
+                        v2[i] if i < len(v2) else "",
+                        v3[i] if i < len(v3) else "",
+                        v4[i] if i < len(v4) else "",
+                    ]
+                    writer.writerow(row)
+            return filename
+
+        # Export each scope
+        f1 = export_scope(self.scope_window.r1_curves, "rigol1")
+        if f1:
+            saved_files.append(f1)
+
+        f2 = export_scope(self.scope_window.r2_curves, "rigol2")
+        if f2:
+            saved_files.append(f2)
+
+        f3 = export_scope(self.scope_window.r3_curves, "rigol3")
+        if f3:
+            saved_files.append(f3)
+
+        return saved_files
+
     def closeEvent(self, event):
+        # Auto-export scope data if any exists
+        if self._has_scope_data():
+            try:
+                saved_files = self._auto_export_scope_data()
+                if saved_files:
+                    self.log(f"[AUTO-EXPORT] Saved scope data on close: {', '.join(saved_files)}")
+            except Exception as e:
+                self.log(f"[AUTO-EXPORT ERROR] Failed to save scope data: {e}")
+
         if hasattr(self, 'wj_workers'):
             for worker in self.wj_workers:
                 if worker.isRunning():

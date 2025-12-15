@@ -1,492 +1,9 @@
-# # import pyvisa
-# # import numpy as np
-# # import time
-
-
-# # class RigolScope:
-# #     """
-# #     Waveform capture helper for Rigol DS7000/MSO7000 series.
-# #     Uses binary block reads (WAV:FORM BYTE) and provides
-# #     arm()/wait_and_capture() helpers for the GUI.
-# #     """
-
-# #     def __init__(self, resource_str: str):
-# #         self.resource_str = resource_str
-# #         self.rm = None
-# #         self.inst = None
-
-# #     # ---------------------------------------------------------
-# #     # Connect
-# #     # ---------------------------------------------------------
-# #     def connect(self):
-# #         self.rm = pyvisa.ResourceManager()
-# #         self.inst = self.rm.open_resource(self.resource_str)
-
-# #         # Increase timeout for slow data transfers
-# #         self.inst.timeout = 30000  # 30 seconds (was 15s)
-# #         self.inst.chunk_size = 20_000_000  # 20 MB for long memory (was 2MB)
-
-# #         self.inst.write("*CLS")
-# #         time.sleep(0.1)
-
-# #         print(f"[RIGOL] Connected: {self.resource_str}")
-# #         print(f"[RIGOL] Timeout: {self.inst.timeout}ms, Chunk size: {self.inst.chunk_size} bytes")
-
-# #     def identify(self) -> str:
-# #         return self.inst.query("*IDN?").strip()
-
-# #     # ---------------------------------------------------------
-# #     # Arm + wait helpers (for GUI capture button)
-# #     # ---------------------------------------------------------
-# #     def arm(self):
-# #         """
-# #         Put scope into SINGLE mode and wait for trigger.
-# #         """
-# #         print(f"[RIGOL] Arming scope (STOP -> SINGLE)...")
-# #         self.inst.write(":STOP")
-# #         time.sleep(0.1)
-# #         self.inst.write(":SINGLE")
-# #         time.sleep(0.2)
-
-# #         # Verify scope is armed
-# #         try:
-# #             status = self.inst.query(":TRIGger:STATus?").strip().upper()
-# #             print(f"[RIGOL] Arm complete, status: {status}")
-# #         except:
-# #             print(f"[RIGOL] WARNING: Could not verify arm status")
-
-# #     # ---------------------------------------------------------
-# #     # Capture two channels (ORIGINAL WORKING CODE)
-# #     # ---------------------------------------------------------
-# #     def capture_two_channels(self, ch1="CHAN1", ch2="CHAN2"):
-# #         """
-# #         Correct method for DS7000 dual-channel capture.
-# #         Must use RAW mode and set WAV:SOUR only AFTER acquisition.
-# #         """
-
-# #         try:
-# #             # Check if scope has stopped (data available)
-# #             status = self.inst.query(":TRIGger:STATus?").strip().upper()
-# #             print(f"[RIGOL] Current status before capture: {status}")
-
-# #             if status != "STOP":
-# #                 print(f"[RIGOL] WARNING: Scope not in STOP state, capture may fail")
-
-# #             # ------------------------------
-# #             # Read CH1
-# #             # ------------------------------
-# #             print(f"[RIGOL] Setting up waveform mode...")
-# #             self.inst.write(":WAV:MODE RAW")
-# #             time.sleep(0.05)
-# #             self.inst.write(":WAV:FORM BYTE")
-# #             time.sleep(0.05)
-# #             self.inst.write(f":WAV:SOUR {ch1}")
-# #             time.sleep(0.05)
-
-# #             print(f"[RIGOL] Reading {ch1} preamble...")
-# #             pre1 = self.inst.query(":WAV:PRE?").split(',')
-# #             yinc1 = float(pre1[7])
-# #             yorig1 = float(pre1[8])
-# #             yref1 = float(pre1[9])
-# #             xinc1 = float(pre1[4])
-# #             xorig1 = float(pre1[5])
-
-# #             print(f"[RIGOL] Reading {ch1} waveform data (this may take time)...")
-# #             yraw1 = self.inst.query_binary_values(":WAV:DATA?", datatype='B', container=list)
-# #             v1 = (np.array(yraw1) - yorig1 - yref1) * yinc1
-# #             t1 = xorig1 + np.arange(len(v1)) * xinc1
-# #             print(f"[RIGOL] {ch1}: {len(v1)} points captured")
-
-# #             # ------------------------------
-# #             # Read CH2
-# #             # ------------------------------
-# #             print(f"[RIGOL] Reading {ch2}...")
-# #             self.inst.write(f":WAV:SOUR {ch2}")
-# #             time.sleep(0.05)
-
-# #             print(f"[RIGOL] Reading {ch2} preamble...")
-# #             pre2 = self.inst.query(":WAV:PRE?").split(',')
-# #             yinc2 = float(pre2[7])
-# #             yorig2 = float(pre2[8])
-# #             yref2 = float(pre2[9])
-# #             xinc2 = float(pre2[4])
-# #             xorig2 = float(pre2[5])
-
-# #             print(f"[RIGOL] Reading {ch2} waveform data (this may take time)...")
-# #             yraw2 = self.inst.query_binary_values(":WAV:DATA?", datatype='B', container=list)
-# #             v2 = (np.array(yraw2) - yorig2 - yref2) * yinc2
-# #             t2 = xorig2 + np.arange(len(v2)) * xinc2
-# #             print(f"[RIGOL] {ch2}: {len(v2)} points captured")
-
-# #             print(f"[RIGOL] Capture successful!")
-# #             return (t1, v1), (t2, v2)
-
-# #         except Exception as e:
-# #             print(f"[RIGOL] ERROR in capture_two_channels: {e}")
-# #             raise
-
-# #     # ---------------------------------------------------------
-# #     # Wait and capture
-# #     # ---------------------------------------------------------
-# #     def wait_and_capture(self, ch1="CHAN1", ch2="CHAN2", timeout=30.0):
-# #         """
-# #         Wait for trigger and capture two channels.
-
-# #         Args:
-# #             ch1: First channel to capture (default CHAN1)
-# #             ch2: Second channel to capture (default CHAN2)
-# #             timeout: Timeout in seconds (default 30.0)
-
-# #         Returns:
-# #             Tuple of ((t1,v1), (t2,v2)) or None on timeout.
-# #         """
-# #         start = time.time()
-
-# #         print(f"[RIGOL] Waiting for trigger... (timeout={timeout}s)")
-
-# #         # Wait for acquisition to finish
-# #         triggered = False
-# #         saw_wait = False
-
-# #         while (time.time() - start) < timeout:
-# #             try:
-# #                 st = self.inst.query(":TRIGger:STATus?").strip().upper()
-
-# #                 # Print status for debugging (only first occurrence)
-# #                 if st == "WAIT" and not saw_wait:
-# #                     print(f"[RIGOL] Status: WAIT (waiting for trigger)")
-# #                     saw_wait = True
-# #                 elif st == "TD" and not triggered:
-# #                     print(f"[RIGOL] Status: TD (triggered, acquiring)")
-# #                     triggered = True
-# #                 elif st == "STOP" and not triggered and not saw_wait:
-# #                     # Scope is already stopped - never armed or trigger already happened
-# #                     print(f"[RIGOL] Status: STOP (already stopped - scope may not be armed)")
-# #                     # Try to capture anyway - data might be from previous trigger
-# #                     triggered = True
-# #                     break
-
-# #                 # Track if we've seen trigger
-# #                 if st == "TD":
-# #                     triggered = True
-
-# #                 # STOP means acquisition complete
-# #                 if st == "STOP" and (triggered or saw_wait):
-# #                     print(f"[RIGOL] Status: STOP (acquisition complete)")
-# #                     break
-
-# #             except Exception as e:
-# #                 print(f"[RIGOL] Error checking status: {e}")
-# #                 time.sleep(0.05)
-# #                 continue
-
-# #             time.sleep(0.02)
-# #         else:
-# #             # Timeout occurred
-# #             elapsed = time.time() - start
-# #             print(f"[RIGOL] TIMEOUT after {elapsed:.1f}s - never triggered")
-# #             return None
-
-# #         # Check if we actually have valid data to capture
-# #         if not triggered and not saw_wait:
-# #             print(f"[RIGOL] WARNING: Scope never triggered, but will try to capture existing data")
-
-# #         # Give scope time to settle before reading data
-# #         time.sleep(0.1)
-
-# #         print(f"[RIGOL] Capturing waveforms from {ch1} and {ch2}...")
-# #         return self.capture_two_channels(ch1, ch2)
-
-# #     # ---------------------------------------------------------
-# #     # Export to CSV
-# #     # ---------------------------------------------------------
-# #     def export_csv(self, filename_prefix="rigol"):
-# #         """
-# #         Captures CH1 and CH2 and exports them to CSV.
-# #         Output format:
-# #             time(s), ch1(V), ch2(V)
-# #         """
-# #         import csv
-# #         from datetime import datetime
-
-# #         # Capture
-# #         (t1, v1), (t2, v2) = self.capture_two_channels()
-
-# #         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-# #         filename = f"{filename_prefix}_{timestamp}.csv"
-
-# #         # Save combined 3-column CSV
-# #         rows = zip(t1, v1, v2)
-
-# #         with open(filename, "w", newline="") as f:
-# #             writer = csv.writer(f)
-# #             writer.writerow(["time_s", "ch1_v", "ch2_v"])
-# #             writer.writerows(rows)
-
-# #         return filename
-
-# #     # ---------------------------------------------------------
-# #     # Cleanup
-# #     # ---------------------------------------------------------
-# #     def close(self):
-# #         if self.inst:
-# #             self.inst.close()
-# #             self.inst = None
-# #         if self.rm:
-# #             self.rm.close()
-# #             self.rm = None
-# import pyvisa
-# import numpy as np
-# import time
-
-
-# class RigolScope:
-#     """
-#     Waveform capture helper for Rigol DS7000/MSO7000 series.
-#     Uses binary block reads (WAV:FORM BYTE) and provides
-#     arm()/wait_and_capture() helpers for the GUI.
-#     """
-
-#     def __init__(self, resource_str: str, **kwargs):
-#         self.resource_str = resource_str
-#         self.rm = None
-#         self.inst = None
-
-#     # ---------------------------------------------------------
-#     # Connect
-#     # ---------------------------------------------------------
-#     def connect(self):  
-#         self.rm = pyvisa.ResourceManager()
-#         self.inst = self.rm.open_resource(self.resource_str)
-
-#         self.inst.timeout = 15000
-#         self.inst.chunk_size = 2_000_000  # 2 MB for long memory
-
-#         self.inst.write("*CLS")
-#         time.sleep(0.1)
-
-#     def identify(self) -> str:
-#         return self.inst.query("*IDN?").strip()
-
-#     # ---------------------------------------------------------
-#     # Prepare waveform for a single channel
-#     # ---------------------------------------------------------
-#     def _setup_waveform(self, ch: str):
-#         """
-#         Prepare waveform extraction for channel `ch`.
-#         IMPORTANT: DO NOT STOP THE SCOPE HERE.
-#         Stopping should only happen in wait_and_capture().
-#         """
-
-#         # Ensure channel is ON
-#         self.inst.write(f":{ch}:DISP ON")
-#         time.sleep(0.02)
-
-#         # Set waveform extraction settings
-#         self.inst.write(":WAV:MODE NORM")
-#         self.inst.write(":WAV:FORM BYTE")
-#         self.inst.write(f":WAV:SOUR {ch}")
-#         time.sleep(0.05)
-
-#         # Ask for full memory depth
-#         self.inst.write(":WAV:STAR 1")
-#         mdep = int(float(self.inst.query(":ACQ:MDEP?")))
-#         self.inst.write(f":WAV:STOP {mdep}")
-
-#         # Read preamble
-#         pre = self.inst.query(":WAV:PRE?").split(',')
-#         npts = int(pre[2])
-#         xinc = float(pre[4])
-#         xorig = float(pre[5])
-#         yinc = float(pre[7])
-#         yorig = float(pre[8])
-#         yref = float(pre[9])
-
-#         return npts, xinc, xorig, yinc, yorig, yref
-
-#     # ---------------------------------------------------------
-#     # Read SCPI block safely
-#     # ---------------------------------------------------------
-#     def _read_block(self) -> np.ndarray:
-#         raw = self.inst.read_raw()
-
-#         if raw[0:1] != b'#':
-#             raise RuntimeError("Invalid Rigol block header")
-
-#         num_digits = int(raw[1:2])
-#         size = int(raw[2:2 + num_digits])
-#         start = 2 + num_digits
-#         end = start + size
-
-#         data = raw[start:end]
-#         return np.frombuffer(data, dtype=np.uint8)
-
-#     # ---------------------------------------------------------
-#     # Capture a single channel
-#     # ---------------------------------------------------------
-#     def capture_channel(self, ch: str = "CHAN1"):
-#         npts, xinc, xorig, yinc, yorig, yref = self._setup_waveform(ch)
-
-#         # Request data block
-#         self.inst.write(":WAV:DATA?")
-#         time.sleep(0.05)
-#         yraw = self._read_block()
-
-#         # Convert to volts
-#         volts = (yraw - yref) * yinc + yorig
-
-#         # Time array
-#         t = xorig + np.arange(len(volts)) * xinc
-#         return t, volts
-
-#     # ---------------------------------------------------------
-#     # Capture two channels as a tuple
-#     # ---------------------------------------------------------
-#     def capture_two_channels(self, ch1="CHAN1", ch2="CHAN2"):
-#         """
-#         Correct method for DS7000 dual-channel capture.
-#         Must use RAW mode and set WAV:SOUR only AFTER acquisition.
-#         """
-
-#         # ------------------------------
-#         # Read CH1
-#         # ------------------------------
-#         self.inst.write(":WAV:MODE RAW")
-#         self.inst.write(":WAV:FORM BYTE")
-#         self.inst.write(f":WAV:SOUR {ch1}")
-#         pre1 = self.inst.query(":WAV:PRE?").split(',')
-#         yinc1 = float(pre1[7])
-#         yorig1 = float(pre1[8])
-#         yref1 = float(pre1[9])
-#         xinc1 = float(pre1[4])
-#         xorig1 = float(pre1[5])
-
-#         yraw1 = self.inst.query_binary_values(":WAV:DATA?", datatype='B')
-#         v1 = (np.array(yraw1) - yorig1 - yref1) * yinc1
-#         t1 = xorig1 + np.arange(len(v1)) * xinc1
-
-#         # ------------------------------
-#         # Read CH2
-#         # ------------------------------
-#         self.inst.write(f":WAV:SOUR {ch2}")
-#         pre2 = self.inst.query(":WAV:PRE?").split(',')
-#         yinc2 = float(pre2[7])
-#         yorig2 = float(pre2[8])
-#         yref2 = float(pre2[9])
-#         xinc2 = float(pre2[4])
-#         xorig2 = float(pre2[5])
-
-#         yraw2 = self.inst.query_binary_values(":WAV:DATA?", datatype='B')
-#         v2 = (np.array(yraw2) - yorig2 - yref2) * yinc2
-#         t2 = xorig2 + np.arange(len(v2)) * xinc2
-
-#         return (t1, v1), (t2, v2)
-
-#     # ---------------------------------------------------------
-#     # Arm + wait helpers (for GUI capture button)
-#     # ---------------------------------------------------------
-#     def arm(self):
-#         """
-#         Put scope into SINGLE mode and wait for trigger.
-#         """
-#         self.inst.write(":STOP")
-#         time.sleep(0.05)
-#         self.inst.write(":SINGLE")
-#         time.sleep(0.1)
-
-#     def wait_and_capture(self, ch1="CHAN1", ch2="CHAN2", timeout=None):
-#         """
-#         Correct trigger-wait logic for Rigol DS7000/MSO7000.
-#         Supports:
-#         - timeout = None → wait forever for trigger
-#         - timeout = float → wait up to N seconds
-#         """
-
-#         # Arm the scope
-#         self.inst.write(":STOP")
-#         time.sleep(0.05)
-#         self.inst.write(":SINGLE")
-#         time.sleep(0.1)
-
-#         start = time.time()
-
-#         # -----------------------------------------
-#         # 1. Wait for scope to leave initial STOP
-#         # -----------------------------------------
-#         while True:
-#             st = self.inst.query(":TRIGger:STATus?").strip()
-
-#             if st != "STOP":
-#                 break
-
-#             # If user set a finite timeout
-#             if timeout is not None and (time.time() - start > timeout):
-#                 return None  # never armed properly
-
-#             time.sleep(0.01)
-
-#         # -----------------------------------------
-#         # 2. Wait for acquisition to finish
-#         # -----------------------------------------
-#         while True:
-#             st = self.inst.query(":TRIGger:STATus?").strip()
-
-#             # STOP now means acquisition is complete
-#             if st == "STOP":
-#                 break
-
-#             if timeout is not None and (time.time() - start > timeout):
-#                 return None  # no trigger detected
-
-#             time.sleep(0.01)
-
-#         # -----------------------------------------
-#         # 3. Get waveform data
-#         # -----------------------------------------
-#         return self.capture_two_channels(ch1, ch2)
-
-#     def export_csv(self, filename_prefix="rigol"):
-#         """
-#         Captures CH1 and CH2 and exports them to CSV.
-#         Output format:
-#             time(s), ch1(V), ch2(V)
-#         """
-#         # Capture (no rearm arg!)
-#         (t1, v1), (t2, v2) = self.capture_two_channels()
-
-#         import csv
-#         from datetime import datetime
-
-#         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-#         filename = f"{filename_prefix}_{timestamp}.csv"
-
-#         # Save combined 3-column CSV
-#         rows = zip(t1, v1, v2)
-
-#         with open(filename, "w", newline="") as f:
-#             writer = csv.writer(f)
-#             writer.writerow(["time_s", "ch1_v", "ch2_v"])
-#             writer.writerows(rows)
-
-#         return filename
-
-#     # ---------------------------------------------------------
-#     # Cleanup
-#     # ---------------------------------------------------------
-#     def close(self):
-#         if self.inst:
-#             self.inst.close()
-#             self.inst = None
-#         if self.rm:
-#             self.rm.close()
-#             self.rm = None
-
 """
 Rigol DS7000/MSO7000 Series Oscilloscope Driver
 
 Based on Rigol DS7000-MSO7000 Programming Guide.
 
-This driver captures 2 channels of waveform data from a Rigol oscilloscope
+This driver captures up to 4 channels of waveform data from a Rigol oscilloscope
 and returns properly scaled voltage/time arrays.
 """
 
@@ -622,6 +139,35 @@ class RigolScope:
     def force_trigger(self):
         """Force a trigger event."""
         self._write(':TFORce')
+        
+    def is_channel_displayed(self, channel: int) -> bool:
+        """
+        Check if a channel is currently displayed/enabled.
+        
+        Args:
+            channel: Channel number (1-4)
+            
+        Returns:
+            True if channel is displayed, False otherwise
+        """
+        try:
+            resp = self._query(f':CHANnel{channel}:DISPlay?')
+            return resp in ('1', 'ON')
+        except:
+            return False
+    
+    def get_displayed_channels(self) -> list:
+        """
+        Get list of currently displayed channel numbers.
+        
+        Returns:
+            List of channel numbers that are displayed (e.g., [1, 2, 3])
+        """
+        displayed = []
+        for ch in range(1, 5):
+            if self.is_channel_displayed(ch):
+                displayed.append(ch)
+        return displayed
         
     def wait_for_trigger(self, timeout: float = 10.0, poll_interval: float = 0.1) -> bool:
         """
@@ -805,13 +351,75 @@ class RigolScope:
         t2, v2 = self._read_channel_data(ch2)
         
         return (t1, v1), (t2, v2)
+    
+    def capture_four_channels(self, ch1: int = 1, ch2: int = 2, 
+                               ch3: int = 3, ch4: int = 4) -> tuple:
+        """
+        Capture waveform data from four channels.
+        
+        This reads the currently displayed waveform data (NORMAL mode).
+        The scope should already be stopped with data on screen.
+        If a channel is not displayed, returns empty arrays for that channel.
+        
+        Args:
+            ch1: First channel number (default: 1)
+            ch2: Second channel number (default: 2)
+            ch3: Third channel number (default: 3)
+            ch4: Fourth channel number (default: 4)
+            
+        Returns:
+            Tuple of ((t1, v1), (t2, v2), (t3, v3), (t4, v4)) where each is numpy arrays
+        """
+        results = []
+        for ch in [ch1, ch2, ch3, ch4]:
+            try:
+                # Check if channel is displayed before trying to read
+                if self.is_channel_displayed(ch):
+                    t, v = self._read_channel_data(ch)
+                    results.append((t, v))
+                else:
+                    # Channel not displayed, return empty arrays
+                    results.append((np.array([]), np.array([])))
+            except Exception as e:
+                # If channel read fails, return empty arrays
+                print(f"[RIGOL] Warning: Could not read channel {ch}: {e}")
+                results.append((np.array([]), np.array([])))
+        
+        return tuple(results)
+    
+    def capture_channels(self, channels: list = None) -> tuple:
+        """
+        Capture waveform data from specified channels.
+        
+        Args:
+            channels: List of channel numbers to capture (default: [1, 2, 3, 4])
+            
+        Returns:
+            Tuple of (t, v) pairs for each channel
+        """
+        if channels is None:
+            channels = [1, 2, 3, 4]
+        
+        results = []
+        for ch in channels:
+            try:
+                if self.is_channel_displayed(ch):
+                    t, v = self._read_channel_data(ch)
+                    results.append((t, v))
+                else:
+                    results.append((np.array([]), np.array([])))
+            except Exception as e:
+                print(f"[RIGOL] Warning: Could not read channel {ch}: {e}")
+                results.append((np.array([]), np.array([])))
+        
+        return tuple(results)
         
     def wait_and_capture(self, ch1: int = 1, ch2: int = 2,
                          timeout: float = 300.0) -> tuple:
         """
         Arm single trigger, wait for acquisition, then capture two channels.
         
-        This is the main method for triggered acquisition.
+        This is the main method for triggered acquisition (legacy 2-channel).
         
         Args:
             ch1: First channel number (default: 1)
@@ -833,6 +441,32 @@ class RigolScope:
             
         # Capture both channels
         return self.capture_two_channels(ch1, ch2)
+    
+    def wait_and_capture_four(self, ch1: int = 1, ch2: int = 2,
+                               ch3: int = 3, ch4: int = 4,
+                               timeout: float = 300.0) -> tuple:
+        """
+        Arm single trigger, wait for acquisition, then capture four channels.
+        
+        Args:
+            ch1-ch4: Channel numbers (default: 1, 2, 3, 4)
+            timeout: Maximum time to wait for trigger in seconds
+            
+        Returns:
+            Tuple of ((t1, v1), (t2, v2), (t3, v3), (t4, v4)) where each is numpy arrays
+            
+        Raises:
+            TimeoutError: If trigger doesn't occur within timeout
+        """
+        # Arm single trigger
+        self.single()
+        
+        # Wait for trigger and acquisition to complete
+        if not self.wait_for_trigger(timeout=timeout):
+            raise TimeoutError(f"Trigger timeout after {timeout} seconds")
+            
+        # Capture all four channels
+        return self.capture_four_channels(ch1, ch2, ch3, ch4)
 
 
 # Convenience function for quick testing
@@ -846,6 +480,10 @@ def test_connection(resource_name: str = None):
         # Try to read trigger status
         status = scope.get_trigger_status()
         print(f"Trigger status: {status}")
+        
+        # Show which channels are displayed
+        displayed = scope.get_displayed_channels()
+        print(f"Displayed channels: {displayed}")
         
         return True
     except Exception as e:

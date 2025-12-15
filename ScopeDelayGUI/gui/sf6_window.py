@@ -20,6 +20,7 @@ class SF6Window(QMainWindow):
         self.setWindowFlags(Qt.WindowType.Window)
 
         self.resize(900, 1080)
+        self.setMinimumSize(800, 600)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -165,6 +166,26 @@ class SF6Window(QMainWindow):
         self.wj_plot_widget.setMinimumHeight(280)
         plot_layout.addWidget(self.wj_plot_widget)
 
+        # Auto-scroll settings
+        self.wj_auto_scroll = True  # Enable auto-scroll by default
+        self.wj_view_window = 60  # Show 60 seconds of data
+
+        # Connect mouse drag to disable auto-scroll when user pans manually
+        self.wj_plot_widget.scene().sigMouseClicked.connect(self._on_wj_plot_clicked)
+        self.wj_plot_widget.sigRangeChanged.connect(self._on_wj_range_changed)
+        self._wj_programmatic_range_change = False  # Flag to track programmatic vs user changes
+
+        # Add auto-scroll toggle button
+        scroll_btn_layout = QHBoxLayout()
+        self.btn_auto_scroll = QPushButton("Auto-Scroll: ON")
+        self.btn_auto_scroll.setCheckable(True)
+        self.btn_auto_scroll.setChecked(True)
+        self.btn_auto_scroll.clicked.connect(self._toggle_auto_scroll)
+        self.btn_auto_scroll.setStyleSheet("QPushButton:checked { background-color: #90EE90; }")
+        scroll_btn_layout.addWidget(self.btn_auto_scroll)
+        scroll_btn_layout.addStretch()
+        plot_layout.addLayout(scroll_btn_layout)
+
         vertical_splitter.addWidget(plot_group)
 
         # Set equal sizes for all 3 sections
@@ -207,3 +228,33 @@ class SF6Window(QMainWindow):
                                       **{'font-size': '16pt', 'font-family': 'Times New Roman', 'font-weight': 'bold'})
         self.wj_plot_widget.setLabel('bottom', 'Time (s)',
                                       **{'font-size': '16pt', 'font-family': 'Times New Roman', 'font-weight': 'bold'})
+
+    def _toggle_auto_scroll(self):
+        """Toggle auto-scroll on/off"""
+        self.wj_auto_scroll = self.btn_auto_scroll.isChecked()
+        if self.wj_auto_scroll:
+            self.btn_auto_scroll.setText("Auto-Scroll: ON")
+        else:
+            self.btn_auto_scroll.setText("Auto-Scroll: OFF")
+
+    def _on_wj_plot_clicked(self, event):
+        """Handle plot click - doesn't disable auto-scroll on click"""
+        pass
+
+    def _on_wj_range_changed(self, viewBox, ranges):
+        """Detect when user manually pans/zooms the plot"""
+        # If this was a programmatic change, ignore it
+        if self._wj_programmatic_range_change:
+            return
+        # User manually changed the view - disable auto-scroll
+        if self.wj_auto_scroll:
+            self.wj_auto_scroll = False
+            self.btn_auto_scroll.setChecked(False)
+            self.btn_auto_scroll.setText("Auto-Scroll: OFF")
+
+    def update_wj_scroll(self, current_time):
+        """Update the X-axis range to show the last 60 seconds if auto-scroll is enabled"""
+        if self.wj_auto_scroll and current_time > self.wj_view_window:
+            self._wj_programmatic_range_change = True
+            self.wj_plot_widget.setXRange(current_time - self.wj_view_window, current_time, padding=0)
+            self._wj_programmatic_range_change = False
