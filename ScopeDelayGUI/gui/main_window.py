@@ -3,7 +3,8 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QPushButton, QSizePolicy, QGridLayout,
 )
 from PyQt6.QtCore import QThread, Qt
-
+from PyQt6.QtWidgets import QFileDialog, QProgressDialog, QMessageBox
+from PyQt6.QtCore import Qt
 import time
 
 from gui.dg535_panel import DG535Panel
@@ -21,6 +22,7 @@ from utils.capture_single_worker import CaptureSingleWorker, CaptureFourChannelW
 from utils.connect_memory import load_memory, save_memory
 from utils.arduino_stream_worker import ArduinoStreamWorker
 from utils.data_logger import DataLogger
+from utils.csv_export_worker import CSVExportWorker
 
 from instruments.dg535 import DG535Controller
 from instruments.bnc575 import BNC575Controller, SystemMode, TriggerMode, TriggerEdge
@@ -109,6 +111,9 @@ class ScopeDelayMainWindow(QMainWindow):
 
         # Write a test log entry to verify logging is working
         self.data_logger.log_info("SYSTEM", "GUI started successfully")
+        self.current_data = None
+        self.export_worker = None
+        self.export_progress = None
 
         
     def refresh_wj_ports(self):
@@ -576,62 +581,128 @@ class ScopeDelayMainWindow(QMainWindow):
         else:
             sf6_panel.lamp.set_status("red", "Not Connected")
 
-
     def on_export_csv(self):
-        import csv
-        from datetime import datetime
+        """Export captured waveform data to CSV using background worker."""
+        if self.current_data is None:
+            QMessageBox.warning(self, "No Data", "No waveform data captured yet!\n\nCapture from a scope first.")
+            return
+        
+        # Open file dialog
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export CSV",
+            "",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if not filename:
+            return  # User cancelled
+        
+        # Show progress dialog
+        self.export_progress = QProgressDialog(
+            "Exporting to CSV...",
+            "Cancel",
+            0, 100,
+            self
+        )
+        self.export_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.export_progress.setWindowTitle("CSV Export")
+        self.export_progress.setMinimumWidth(400)
+        
+        # Create export worker
+        self.export_worker = CSVExportWorker(self.current_data, filename)
+        
+        # Connect signals
+        self.export_worker.progress.connect(self.export_progress.setValue)
+        self.export_worker.finished.connect(self.on_export_finished)
+        self.export_worker.error.connect(self.on_export_error)
+        self.export_progress.canceled.connect(self.export_worker.terminate)
+        
+        # Start export
+        self.export_worker.start()
+        
+        self.log(f"[EXPORT] Starting CSV export to {filename}...")
+    def on_export_finished(self, filename):
+        """Handle successful CSV export."""
+        if self.export_progress:
+            self.export_progress.close()
+        
+        QMessageBox.information(
+            self,
+            "Export Complete",
+            f"✅ Data exported successfully!\n\nFile:\n{filename}"
+        )
+        self.set_status("green", "Export complete")
+        self.log(f"[EXPORT] ✅ Saved to {filename}")
 
-        def export_scope_csv(scope, prefix):
-            """Export current waveform data from scope to CSV (4 channels)."""
-            data = scope.capture_four_channels()
-            (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
+    def on_export_error(self, error_msg):
+        """Handle CSV export error."""
+        if self.export_progress:
+            self.export_progress.close()
+        
+        QMessageBox.critical(
+            self,
+            "Export Error",
+            f"❌ Failed to export CSV:\n\n{error_msg}"
+        )
+        self.set_status("red", "Export failed")
+        self.log(f"[EXPORT] ❌ Error: {error_msg}")
+
+    # def on_export_csv(self):
+    #     import csv
+    #     from datetime import datetime
+
+    #     def export_scope_csv(scope, prefix):
+    #         """Export current waveform data from scope to CSV (4 channels)."""
+    #         data = scope.capture_four_channels()
+    #         (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
             
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{prefix}_{timestamp}.csv"
+    #         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    #         filename = f"{prefix}_{timestamp}.csv"
 
-            # Find max length among all channels
-            max_len = max(len(t1), len(t2), len(t3), len(t4))
+    #         # Find max length among all channels
+    #         max_len = max(len(t1), len(t2), len(t3), len(t4))
 
-            with open(filename, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["time_s", "ch1_v", "ch2_v", "ch3_v", "ch4_v"])
-                for i in range(max_len):
-                    row = [
-                        t1[i] if i < len(t1) else "",
-                        v1[i] if i < len(v1) else "",
-                        v2[i] if i < len(v2) else "",
-                        v3[i] if i < len(v3) else "",
-                        v4[i] if i < len(v4) else "",
-                    ]
-                    writer.writerow(row)
-            return filename
+    #         with open(filename, "w", newline="") as f:
+    #             writer = csv.writer(f)
+    #             writer.writerow(["time_s", "ch1_v", "ch2_v", "ch3_v", "ch4_v"])
+    #             for i in range(max_len):
+    #                 row = [
+    #                     t1[i] if i < len(t1) else "",
+    #                     v1[i] if i < len(v1) else "",
+    #                     v2[i] if i < len(v2) else "",
+    #                     v3[i] if i < len(v3) else "",
+    #                     v4[i] if i < len(v4) else "",
+    #                 ]
+    #                 writer.writerow(row)
+    #         return filename
 
-        try:
-            saved_files = []
+    #     try:
+    #         saved_files = []
 
-            if self.rigol1_connected:
-                f = export_scope_csv(self.rigol1, "rigol1")
-                saved_files.append(f)
+    #         if self.rigol1_connected:
+    #             f = export_scope_csv(self.rigol1, "rigol1")
+    #             saved_files.append(f)
 
-            if self.rigol2_connected:
-                f = export_scope_csv(self.rigol2, "rigol2")
-                saved_files.append(f)
+    #         if self.rigol2_connected:
+    #             f = export_scope_csv(self.rigol2, "rigol2")
+    #             saved_files.append(f)
 
-            if self.rigol3_connected:
-                f = export_scope_csv(self.rigol3, "rigol3")
-                saved_files.append(f)
+    #         if self.rigol3_connected:
+    #             f = export_scope_csv(self.rigol3, "rigol3")
+    #             saved_files.append(f)
 
-            if not saved_files:
-                self.error_popup("No Data", "No scopes are connected.")
-                return
+    #         if not saved_files:
+    #             self.error_popup("No Data", "No scopes are connected.")
+    #             return
 
-            msg = "Saved:\n" + "\n".join(saved_files)
-            self.log(msg)
-            self.set_status("green", "Waveforms exported")
+    #         msg = "Saved:\n" + "\n".join(saved_files)
+    #         self.log(msg)
+    #         self.set_status("green", "Waveforms exported")
 
-        except Exception as e:
-            self.error_popup("CSV Export Error", str(e))
-            self.log(f"[CSV ERROR] {e}")
+    #     except Exception as e:
+    #         self.error_popup("CSV Export Error", str(e))
+    #         self.log(f"[CSV ERROR] {e}")
 
 
     # ------------------------------------------------------------------
@@ -1070,6 +1141,8 @@ class ScopeDelayMainWindow(QMainWindow):
     def on_four_channel_capture_finished(self, data, name, scope_id):
         """Handle 4-channel capture completion"""
         (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
+        # Store data for export
+        self.current_data = data  # ← ADD THIS LINE
 
         # Update the appropriate plot
         if scope_id == 1:
@@ -1193,8 +1266,34 @@ class ScopeDelayMainWindow(QMainWindow):
         # 5. CAPTURE waveforms (4 channels each)
         self.set_status("yellow", "Capturing 4-channel waveforms...")
 
+        # if self.rigol1_connected:
+        #     data = self.rigol1.wait_and_capture_four()
+        #     (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
+        #     self.scope_window.update_r1(t1, v1, t2, v2, t3, v3, t4, v4)
+        #     self.data_logger.log_scope_capture(1, len(t1), len(t2))
+        #     self.log(f"[Rigol1] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
+
+        # if self.rigol2_connected:
+        #     data = self.rigol2.wait_and_capture_four()
+        #     (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
+        #     self.scope_window.update_r2(t1, v1, t2, v2, t3, v3, t4, v4)
+        #     self.data_logger.log_scope_capture(2, len(t1), len(t2))
+        #     self.log(f"[Rigol2] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
+
+        # if self.rigol3_connected:
+        #     data = self.rigol3.wait_and_capture_four()
+        #     (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
+        #     self.scope_window.update_r3(t1, v1, t2, v2, t3, v3, t4, v4)
+        #     self.data_logger.log_scope_capture(3, len(t1), len(t2))
+        #     self.log(f"[Rigol3] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
+
+        # self.data_logger.log_scope_all_capture()
+
+        # self.set_status("green", "4-channel capture complete")
+        # self.log("[CAPTURE] Done.")
         if self.rigol1_connected:
             data = self.rigol1.wait_and_capture_four()
+            self.current_data = data  # ← ADD THIS
             (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
             self.scope_window.update_r1(t1, v1, t2, v2, t3, v3, t4, v4)
             self.data_logger.log_scope_capture(1, len(t1), len(t2))
@@ -1202,6 +1301,7 @@ class ScopeDelayMainWindow(QMainWindow):
 
         if self.rigol2_connected:
             data = self.rigol2.wait_and_capture_four()
+            self.current_data = data  # ← ADD THIS
             (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
             self.scope_window.update_r2(t1, v1, t2, v2, t3, v3, t4, v4)
             self.data_logger.log_scope_capture(2, len(t1), len(t2))
@@ -1209,13 +1309,13 @@ class ScopeDelayMainWindow(QMainWindow):
 
         if self.rigol3_connected:
             data = self.rigol3.wait_and_capture_four()
+            self.current_data = data  # ← ADD THIS
             (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
             self.scope_window.update_r3(t1, v1, t2, v2, t3, v3, t4, v4)
             self.data_logger.log_scope_capture(3, len(t1), len(t2))
             self.log(f"[Rigol3] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
 
         self.data_logger.log_scope_all_capture()
-
         self.set_status("green", "4-channel capture complete")
         self.log("[CAPTURE] Done.")
 

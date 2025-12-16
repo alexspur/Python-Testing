@@ -1,8 +1,8 @@
-
 # """
 # Worker thread for single oscilloscope capture.
 
 # Runs capture in background thread to avoid blocking the GUI.
+# Supports both 2-channel (legacy) and 4-channel capture modes.
 # """
 
 # from PyQt6.QtCore import QThread, pyqtSignal
@@ -13,18 +13,24 @@
 #     Worker thread for capturing waveform data from a single oscilloscope.
 
 #     Signals:
-#         finished: Emitted when capture completes with (ch1_data, ch2_data, scope_name)
+#         finished: Emitted when 2-channel capture completes with (ch1_data, ch2_data, scope_name)
 #                   where ch1_data = (t1, v1) and ch2_data = (t2, v2)
+#         finished_four: Emitted when 4-channel capture completes with (data_tuple, scope_name)
+#                        where data_tuple = ((t1,v1), (t2,v2), (t3,v3), (t4,v4))
 #         error: Emitted on capture error with (error_message, scope_name)
 #     """
 
-#     # Signal: ((t1, v1), (t2, v2), scope_name)
+#     # Signal: ((t1, v1), (t2, v2), scope_name) - 2 channel legacy
 #     finished = pyqtSignal(object, object, str)
+    
+#     # Signal: (4-channel data tuple, scope_name)
+#     finished_four = pyqtSignal(object, str)
 
 #     # Signal: (error_message, scope_name)
 #     error = pyqtSignal(str, str)
 
-#     def __init__(self, scope, scope_name: str, timeout: float = 300.0, parent=None):
+#     def __init__(self, scope, scope_name: str, timeout: float = 300.0, 
+#                  four_channel: bool = False, parent=None):
 #         """
 #         Initialize the capture worker.
 
@@ -32,32 +38,123 @@
 #             scope: RigolScope instance (must already be connected)
 #             scope_name: Name identifier for this scope (e.g., 'R1', 'R2', 'R3')
 #             timeout: Capture timeout in seconds
+#             four_channel: If True, capture 4 channels; otherwise capture 2
 #             parent: Parent QObject
 #         """
 #         super().__init__(parent)
 #         self.scope = scope
 #         self.scope_name = scope_name
 #         self.timeout = timeout
+#         self.four_channel = four_channel
 
 #     def run(self):
 #         """Execute the capture operation."""
 #         try:
-#             # Wait for trigger and capture both channels
-#             (t1, v1), (t2, v2) = self.scope.wait_and_capture(
-#                 ch1=1, ch2=2, timeout=self.timeout
-#             )
-
-#             # Emit success signal with data
-#             self.finished.emit((t1, v1), (t2, v2), self.scope_name)
+#             if self.four_channel:
+#                 # Wait for trigger and capture all four channels
+#                 data = self.scope.wait_and_capture_four(
+#                     ch1=1, ch2=2, ch3=3, ch4=4, timeout=self.timeout
+#                 )
+#                 # Emit 4-channel signal
+#                 self.finished_four.emit(data, self.scope_name)
+#             else:
+#                 # Wait for trigger and capture two channels (legacy)
+#                 (t1, v1), (t2, v2) = self.scope.wait_and_capture(
+#                     ch1=1, ch2=2, timeout=self.timeout
+#                 )
+#                 # Emit 2-channel signal
+#                 self.finished.emit((t1, v1), (t2, v2), self.scope_name)
 
 #         except Exception as e:
 #             # Emit error signal
+#             self.error.emit(str(e), self.scope_name)
+
+
+# class CaptureFourChannelWorker(QThread):
+#     """
+#     Worker thread specifically for 4-channel capture.
+    
+#     Signals:
+#         finished: Emitted when capture completes with 
+#                   (((t1,v1), (t2,v2), (t3,v3), (t4,v4)), scope_name)
+#         error: Emitted on capture error with (error_message, scope_name)
+#     """
+    
+#     # Signal: (4-channel data tuple, scope_name)
+#     finished = pyqtSignal(object, str)
+    
+#     # Signal: (error_message, scope_name)
+#     error = pyqtSignal(str, str)
+    
+#     def __init__(self, scope, scope_name: str, timeout: float = 300.0, parent=None):
+#         """
+#         Initialize the 4-channel capture worker.
+
+#         Args:
+#             scope: RigolScope instance (must already be connected)
+#             scope_name: Name identifier for this scope
+#             timeout: Capture timeout in seconds
+#             parent: Parent QObject
+#         """
+#         super().__init__(parent)
+#         self.scope = scope
+#         self.scope_name = scope_name
+#         self.timeout = timeout
+        
+#     def run(self):
+#         """Execute the 4-channel capture operation."""
+#         try:
+#             # Wait for trigger and capture all four channels
+#             data = self.scope.wait_and_capture_four(
+#                 ch1=1, ch2=2, ch3=3, ch4=4, timeout=self.timeout
+#             )
+#             self.finished.emit(data, self.scope_name)
+            
+#         except Exception as e:
+#             self.error.emit(str(e), self.scope_name)
+
+
+# class ImmediateFourChannelWorker(QThread):
+#     """
+#     Worker for immediate 4-channel capture (no trigger wait).
+    
+#     Use this when the scope is already stopped with data on screen.
+#     """
+    
+#     # Signal: (4-channel data tuple, scope_name)
+#     finished = pyqtSignal(object, str)
+    
+#     # Signal: (error_message, scope_name)
+#     error = pyqtSignal(str, str)
+    
+#     def __init__(self, scope, scope_name: str, parent=None):
+#         """
+#         Initialize immediate capture worker.
+
+#         Args:
+#             scope: RigolScope instance
+#             scope_name: Name identifier
+#             parent: Parent QObject
+#         """
+#         super().__init__(parent)
+#         self.scope = scope
+#         self.scope_name = scope_name
+        
+#     def run(self):
+#         """Execute immediate 4-channel capture."""
+#         try:
+#             # Capture all four channels without waiting for trigger
+#             data = self.scope.capture_four_channels()
+#             self.finished.emit(data, self.scope_name)
+            
+#         except Exception as e:
 #             self.error.emit(str(e), self.scope_name)
 """
 Worker thread for single oscilloscope capture.
 
 Runs capture in background thread to avoid blocking the GUI.
 Supports both 2-channel (legacy) and 4-channel capture modes.
+Both modes now capture full memory depth (RAW mode).
 """
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -66,12 +163,17 @@ from PyQt6.QtCore import QThread, pyqtSignal
 class CaptureSingleWorker(QThread):
     """
     Worker thread for capturing waveform data from a single oscilloscope.
+    
+    Note: Both 2-channel and 4-channel modes now use RAW mode to capture
+    the full memory depth (1M points) instead of just screen data.
 
     Signals:
         finished: Emitted when 2-channel capture completes with (ch1_data, ch2_data, scope_name)
                   where ch1_data = (t1, v1) and ch2_data = (t2, v2)
+                  Both contain full memory depth data
         finished_four: Emitted when 4-channel capture completes with (data_tuple, scope_name)
                        where data_tuple = ((t1,v1), (t2,v2), (t3,v3), (t4,v4))
+                       All channels contain full memory depth data
         error: Emitted on capture error with (error_message, scope_name)
     """
 
@@ -103,17 +205,17 @@ class CaptureSingleWorker(QThread):
         self.four_channel = four_channel
 
     def run(self):
-        """Execute the capture operation."""
+        """Execute the capture operation with full memory depth (RAW mode)."""
         try:
             if self.four_channel:
-                # Wait for trigger and capture all four channels
+                # Wait for trigger and capture all four channels (full memory)
                 data = self.scope.wait_and_capture_four(
                     ch1=1, ch2=2, ch3=3, ch4=4, timeout=self.timeout
                 )
                 # Emit 4-channel signal
                 self.finished_four.emit(data, self.scope_name)
             else:
-                # Wait for trigger and capture two channels (legacy)
+                # Wait for trigger and capture two channels (full memory, legacy)
                 (t1, v1), (t2, v2) = self.scope.wait_and_capture(
                     ch1=1, ch2=2, timeout=self.timeout
                 )
@@ -127,7 +229,10 @@ class CaptureSingleWorker(QThread):
 
 class CaptureFourChannelWorker(QThread):
     """
-    Worker thread specifically for 4-channel capture.
+    Worker thread specifically for 4-channel capture with trigger.
+    
+    Waits for scope to trigger, then captures all 4 channels with full
+    memory depth (RAW mode - 1M points per channel).
     
     Signals:
         finished: Emitted when capture completes with 
@@ -148,7 +253,7 @@ class CaptureFourChannelWorker(QThread):
         Args:
             scope: RigolScope instance (must already be connected)
             scope_name: Name identifier for this scope
-            timeout: Capture timeout in seconds
+            timeout: Capture timeout in seconds (default: 5 minutes)
             parent: Parent QObject
         """
         super().__init__(parent)
@@ -157,9 +262,9 @@ class CaptureFourChannelWorker(QThread):
         self.timeout = timeout
         
     def run(self):
-        """Execute the 4-channel capture operation."""
+        """Execute the 4-channel capture operation (trigger + full memory)."""
         try:
-            # Wait for trigger and capture all four channels
+            # Wait for trigger and capture all four channels with full memory depth
             data = self.scope.wait_and_capture_four(
                 ch1=1, ch2=2, ch3=3, ch4=4, timeout=self.timeout
             )
@@ -174,6 +279,7 @@ class ImmediateFourChannelWorker(QThread):
     Worker for immediate 4-channel capture (no trigger wait).
     
     Use this when the scope is already stopped with data on screen.
+    Captures all 4 channels with full memory depth (RAW mode - 1M points).
     """
     
     # Signal: (4-channel data tuple, scope_name)
@@ -187,7 +293,7 @@ class ImmediateFourChannelWorker(QThread):
         Initialize immediate capture worker.
 
         Args:
-            scope: RigolScope instance
+            scope: RigolScope instance (should be stopped before calling)
             scope_name: Name identifier
             parent: Parent QObject
         """
@@ -196,11 +302,51 @@ class ImmediateFourChannelWorker(QThread):
         self.scope_name = scope_name
         
     def run(self):
-        """Execute immediate 4-channel capture."""
+        """Execute immediate 4-channel capture (full memory depth)."""
         try:
-            # Capture all four channels without waiting for trigger
+            # Capture all four channels with full memory depth (no trigger wait)
+            # Scope is automatically stopped during capture
             data = self.scope.capture_four_channels()
             self.finished.emit(data, self.scope_name)
+            
+        except Exception as e:
+            self.error.emit(str(e), self.scope_name)
+
+
+class ImmediateTwoChannelWorker(QThread):
+    """
+    Worker for immediate 2-channel capture (no trigger wait).
+    
+    Use this when the scope is already stopped with data on screen.
+    Captures 2 channels with full memory depth (RAW mode - 1M points).
+    """
+    
+    # Signal: ((t1, v1), (t2, v2), scope_name)
+    finished = pyqtSignal(object, object, str)
+    
+    # Signal: (error_message, scope_name)
+    error = pyqtSignal(str, str)
+    
+    def __init__(self, scope, scope_name: str, parent=None):
+        """
+        Initialize immediate 2-channel capture worker.
+
+        Args:
+            scope: RigolScope instance (should be stopped before calling)
+            scope_name: Name identifier
+            parent: Parent QObject
+        """
+        super().__init__(parent)
+        self.scope = scope
+        self.scope_name = scope_name
+        
+    def run(self):
+        """Execute immediate 2-channel capture (full memory depth)."""
+        try:
+            # Scope automatically stops before reading RAW mode data
+            data = self.scope.capture_two_channels()
+            (t1, v1), (t2, v2) = data
+            self.finished.emit((t1, v1), (t2, v2), self.scope_name)
             
         except Exception as e:
             self.error.emit(str(e), self.scope_name)

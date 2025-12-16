@@ -352,13 +352,74 @@ class RigolScope:
         
         return (t1, v1), (t2, v2)
     
-    def capture_four_channels(self, ch1: int = 1, ch2: int = 2, 
-                               ch3: int = 3, ch4: int = 4) -> tuple:
-        """
-        Capture waveform data from four channels.
+    # def capture_four_channels(self, ch1: int = 1, ch2: int = 2, 
+    #                            ch3: int = 3, ch4: int = 4) -> tuple:
+    #     """
+    #     Capture waveform data from four channels.
         
-        This reads the currently displayed waveform data (NORMAL mode).
-        The scope should already be stopped with data on screen.
+    #     This reads the currently displayed waveform data (NORMAL mode).
+    #     The scope should already be stopped with data on screen.
+    #     If a channel is not displayed, returns empty arrays for that channel.
+        
+    #     Args:
+    #         ch1: First channel number (default: 1)
+    #         ch2: Second channel number (default: 2)
+    #         ch3: Third channel number (default: 3)
+    #         ch4: Fourth channel number (default: 4)
+            
+    #     Returns:
+    #         Tuple of ((t1, v1), (t2, v2), (t3, v3), (t4, v4)) where each is numpy arrays
+    #     """
+    #     results = []
+    #     for ch in [ch1, ch2, ch3, ch4]:
+    #         try:
+    #             # Check if channel is displayed before trying to read
+    #             if self.is_channel_displayed(ch):
+    #                 t, v = self._read_channel_data(ch)
+    #                 results.append((t, v))
+    #             else:
+    #                 # Channel not displayed, return empty arrays
+    #                 results.append((np.array([]), np.array([])))
+    #         except Exception as e:
+    #             # If channel read fails, return empty arrays
+    #             print(f"[RIGOL] Warning: Could not read channel {ch}: {e}")
+    #             results.append((np.array([]), np.array([])))
+        
+    #     return tuple(results)
+    
+    # def capture_channels(self, channels: list = None) -> tuple:
+    #     """
+    #     Capture waveform data from specified channels.
+        
+    #     Args:
+    #         channels: List of channel numbers to capture (default: [1, 2, 3, 4])
+            
+    #     Returns:
+    #         Tuple of (t, v) pairs for each channel
+    #     """
+    #     if channels is None:
+    #         channels = [1, 2, 3, 4]
+        
+    #     results = []
+    #     for ch in channels:
+    #         try:
+    #             if self.is_channel_displayed(ch):
+    #                 t, v = self._read_channel_data(ch)
+    #                 results.append((t, v))
+    #             else:
+    #                 results.append((np.array([]), np.array([])))
+    #         except Exception as e:
+    #             print(f"[RIGOL] Warning: Could not read channel {ch}: {e}")
+    #             results.append((np.array([]), np.array([])))
+        
+    #     return tuple(results)
+    def capture_four_channels(self, ch1: int = 1, ch2: int = 2, 
+                            ch3: int = 3, ch4: int = 4) -> tuple:
+        """
+        Capture full memory waveform data from four channels.
+        
+        Reads the full memory depth (RAW mode) from all specified channels.
+        The scope will be stopped before reading to ensure data stability.
         If a channel is not displayed, returns empty arrays for that channel.
         
         Args:
@@ -370,12 +431,15 @@ class RigolScope:
         Returns:
             Tuple of ((t1, v1), (t2, v2), (t3, v3), (t4, v4)) where each is numpy arrays
         """
+        # Stop acquisition to ensure data is stable for RAW mode reading
+        self.stop()
+        
         results = []
         for ch in [ch1, ch2, ch3, ch4]:
             try:
                 # Check if channel is displayed before trying to read
                 if self.is_channel_displayed(ch):
-                    t, v = self._read_channel_data(ch)
+                    t, v = self._read_channel_data_raw(ch)
                     results.append((t, v))
                 else:
                     # Channel not displayed, return empty arrays
@@ -386,10 +450,12 @@ class RigolScope:
                 results.append((np.array([]), np.array([])))
         
         return tuple(results)
-    
     def capture_channels(self, channels: list = None) -> tuple:
         """
-        Capture waveform data from specified channels.
+        Capture full memory waveform data from specified channels.
+        
+        Reads the full memory depth (RAW mode) from all specified channels.
+        The scope will be stopped before reading to ensure data stability.
         
         Args:
             channels: List of channel numbers to capture (default: [1, 2, 3, 4])
@@ -400,11 +466,14 @@ class RigolScope:
         if channels is None:
             channels = [1, 2, 3, 4]
         
+        # Stop acquisition to ensure data is stable for RAW mode reading
+        self.stop()
+        
         results = []
         for ch in channels:
             try:
                 if self.is_channel_displayed(ch):
-                    t, v = self._read_channel_data(ch)
+                    t, v = self._read_channel_data_raw(ch)
                     results.append((t, v))
                 else:
                     results.append((np.array([]), np.array([])))
