@@ -430,6 +430,10 @@ class ScopeDelayMainWindow(QMainWindow):
         # ------------------------------
         # Arduino / SF6
         # ------------------------------
+
+        # ------------------------------
+        # Arduino / SF6
+        # ------------------------------
         try:
             port = self.conn.get("Arduino_COM", "COM8")
             self.arduino.connect(port)
@@ -444,9 +448,53 @@ class ScopeDelayMainWindow(QMainWindow):
             self.arduino_stream.start()
             self.log("[Arduino] Stream worker started")
 
+            # Auto-close Marx1 Supply (DO0) and Marx1 Return (DO4) on connect
+            try:
+                self.arduino.set_digital_output(0, 1)  # Marx1 Supply ON (closed)
+                self.arduino.set_digital_output(4, 1)  # Marx1 Return ON (closed)
+                self.sf6_window.sf6_panel.switches[0].setChecked(True)
+                self.sf6_window.sf6_panel.switches[1].setChecked(True)
+                self.log("[Arduino] Auto-closed Marx1 Supply and Marx1 Return")
+            except Exception as e:
+                self.log(f"[Arduino] Failed to auto-close Marx1 valves: {e}")
+
+            # ─────────────────────────────────────────────
+            # Set initial pressure to 12 PSI on startup
+            # ─────────────────────────────────────────────
+            try:
+                initial_psi = 12.0
+                initial_voltage = (initial_psi / 148.0) * 10.0  # 0.811V
+                self.arduino.set_pressure_voltage(initial_voltage)
+                self.log(f"[Pressure] Initialized to {initial_psi} PSI ({initial_voltage:.3f}V)")
+                
+                # Update GUI display if pressure panel exists
+                if hasattr(self.sf6_window, 'pressure_panel'):
+                    self.sf6_window.pressure_panel.update_output_display(initial_voltage)
+                    self.sf6_window.pressure_panel.spin_value.setValue(initial_psi)
+            except Exception as e:
+                self.log(f"[Pressure] Init failed: {e}")
+
         except Exception as e:
             self.log(f"[Arduino] NOT CONNECTED: {e}")
             self.sf6_window.sf6_panel.lamp.set_status("red", "Not Connected")
+        # try:
+        #     port = self.conn.get("Arduino_COM", "COM8")
+        #     self.arduino.connect(port)
+        #     save_memory("Arduino_COM", port)
+        #     self.log(f"[Arduino] Connected on {port}")
+        #     self.sf6_window.sf6_panel.lamp.set_status("green", "Connected")
+
+        #     # Start Arduino stream worker for continuous data reading
+        #     self.arduino_stream = ArduinoStreamWorker(self.arduino)
+        #     self.arduino_stream.data_signal.connect(self.on_analog_data)
+        #     self.arduino_stream.error_signal.connect(lambda msg: self.log(f"[Arduino Stream ERROR] {msg}"))
+        #     self.arduino_stream.start()
+        #     self.log("[Arduino] Stream worker started")
+            
+
+        # except Exception as e:
+        #     self.log(f"[Arduino] NOT CONNECTED: {e}")
+        #     self.sf6_window.sf6_panel.lamp.set_status("red", "Not Connected")
 
         # ------------------------------
         # WJ HIGH VOLTAGE SUPPLIES
@@ -580,7 +628,23 @@ class ScopeDelayMainWindow(QMainWindow):
             sf6_panel.lamp.set_status("green", "Connected")
         else:
             sf6_panel.lamp.set_status("red", "Not Connected")
+        if hasattr(self.sf6_window, 'pressure_panel'):
+            self.sf6_window.pressure_panel.btn_apply.clicked.connect(self.on_set_pressure)
 
+    def on_set_pressure(self):
+        """Handle pressure setpoint change"""
+        try:
+            voltage = self.sf6_window.pressure_panel.get_voltage()
+            psi = self.sf6_window.pressure_panel.get_psi()
+            
+            response = self.arduino.set_pressure_voltage(voltage)
+            
+            self.sf6_window.pressure_panel.update_output_display(voltage)
+            self.log(f"[Pressure] Set {psi:.1f} PSI → {voltage:.3f} V ({response})")
+            
+        except Exception as e:
+            self.log(f"[Pressure ERROR] {e}")
+            self.error_popup("Pressure Control Error", str(e))
     def on_export_csv(self):
         """Export captured waveform data to CSV using background worker."""
         if self.current_data is None:

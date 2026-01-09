@@ -7,7 +7,10 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from gui.sf6_panel import SF6Panel
 from gui.gauge_widget import GaugeWidget
+from gui.pressure_panel import PressureControlPanel
+
 import pyqtgraph as pg
+
 
 
 class SF6Window(QMainWindow):
@@ -49,6 +52,10 @@ class SF6Window(QMainWindow):
         self.sf6_panel = SF6Panel()
         sf6_layout.addWidget(self.sf6_panel)
 
+
+        self.pressure_panel = PressureControlPanel()
+        sf6_layout.addWidget(self.pressure_panel)
+        
         vertical_splitter.addWidget(sf6_group)
 
         # -------------------------------------------

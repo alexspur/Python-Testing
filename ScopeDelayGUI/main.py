@@ -13,7 +13,7 @@ if __name__ == "__main__":
     base_font.setBold(True)
     app.setFont(base_font)
     app.setStyleSheet("""
-        * {
+        * {l
             font-family: 'Times New Roman';
             font-weight: bold;
             color: black;
