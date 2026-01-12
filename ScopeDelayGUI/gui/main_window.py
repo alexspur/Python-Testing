@@ -20,7 +20,7 @@ from utils.status_lamp import StatusLamp
 from utils.serial_tools import list_serial_ports
 from utils.capture_single_worker import CaptureSingleWorker, CaptureFourChannelWorker
 from utils.connect_memory import load_memory, save_memory
-from utils.arduino_stream_worker import ArduinoStreamWorker
+from utils.pressure_stream_worker import PressureStreamWorker
 from utils.data_logger import DataLogger
 from utils.csv_export_worker import CSVExportWorker
 
@@ -442,11 +442,11 @@ class ScopeDelayMainWindow(QMainWindow):
             self.sf6_window.sf6_panel.lamp.set_status("green", "Connected")
 
             # Start Arduino stream worker for continuous data reading
-            self.arduino_stream = ArduinoStreamWorker(self.arduino)
-            self.arduino_stream.data_signal.connect(self.on_analog_data)
+            self.arduino_stream = PressureStreamWorker(self.arduino)
+            self.arduino_stream.data_signal.connect(self.on_pressure_data)
             self.arduino_stream.error_signal.connect(lambda msg: self.log(f"[Arduino Stream ERROR] {msg}"))
             self.arduino_stream.start()
-            self.log("[Arduino] Stream worker started")
+            self.log("[Arduino] Pressure stream worker started")
 
             # Auto-close Marx1 Supply (DO0) and Marx1 Return (DO4) on connect
             try:
@@ -1439,8 +1439,8 @@ class ScopeDelayMainWindow(QMainWindow):
             self.log(f"[Arduino] Connected on {port}")
             sf6_panel.lamp.set_status("green", "Connected")
 
-            self.arduino_stream = ArduinoStreamWorker(self.arduino)
-            self.arduino_stream.data_signal.connect(self.on_analog_data)
+            self.arduino_stream = PressureStreamWorker(self.arduino)
+            self.arduino_stream.data_signal.connect(self.on_pressure_data)
             self.arduino_stream.error_signal.connect(lambda msg: self.log(f"[Arduino Stream ERROR] {msg}"))
             self.arduino_stream.start()
 
@@ -1460,18 +1460,16 @@ class ScopeDelayMainWindow(QMainWindow):
             sf6_panel.lamp.set_status("red", "Error")
             self.error_popup("Arduino Error", str(e))
 
-    def on_analog_data(self, ch0, ch1, ch2):
-        def mA_to_psi(mA):
-            if mA < 4:
-                return 0
-            if mA > 20:
-                return 200
-            return (mA - 4.0) * 12.5
+    def on_pressure_data(self, psi0: float, psi1: float, psi2: float, voltage: float):
+        """
+        Handle pressure data from PressureStreamWorker.
 
-        psi0 = mA_to_psi(ch0)
-        psi1 = mA_to_psi(ch1)
-        psi2 = mA_to_psi(ch2)
-
+        Args:
+            psi0: PSI from AI0 (4-20mA sensor, 0-200 PSI)
+            psi1: PSI from AI1 (4-20mA sensor, 0-200 PSI)
+            psi2: PSI from AI2 (calibrated pressure sensor, 0-80 PSI)
+            voltage: Output voltage to regulator (0-10V)
+        """
         try:
             self.data_logger.log_arduino_psi(psi0, psi1, psi2)
         except Exception as e:
