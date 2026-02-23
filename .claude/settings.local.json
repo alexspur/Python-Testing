@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(powershell -Command \"Get-WMIObject Win32_SerialPort | Select-Object DeviceID, Description, Name | Format-Table -AutoSize\")",
+      "Bash(cat:*)"
     ]
   }
 }

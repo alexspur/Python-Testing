@@ -1,6 +1,6 @@
 # gui/pressure_panel.py
 from PyQt6.QtWidgets import (
-    QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, 
+    QGroupBox, QVBoxLayout, QHBoxLayout, QLabel,
     QDoubleSpinBox, QPushButton, QComboBox
 )
 from PyQt6.QtCore import Qt
@@ -8,15 +8,24 @@ from PyQt6.QtCore import Qt
 
 class PressureControlPanel(QGroupBox):
     """
-    Panel for controlling Parker P31P pressure regulator via Arduino.
-    
-    Handles PSI/Bar to voltage conversion for 0-148 PSI (0-10 bar) regulator.
+    Panel for controlling pressure regulator via Arduino.
+
+    Uses calibrated voltage-to-PSI relationship:
+        PSI = 2.5106 * V - 0.178
+        V = (PSI + 0.178) / 2.5106
+
+    At 10V output: PSI = 2.5106 * 10 - 0.178 = 24.928 PSI max
+    At 0V output: PSI = -0.178 (clamped to 0)
     """
-    
-    # Regulator specs: 0-10 bar = 0-148 PSI, controlled by 0-10V
-    MAX_PSI = 148.0
-    MAX_BAR = 10.0
+
+    # Calibration constants: PSI = SLOPE * V + INTERCEPT
+    CAL_SLOPE = 2.5106      # PSI per Volt
+    CAL_INTERCEPT = -0.178  # PSI offset
+
+    # Derived limits
     MAX_VOLTAGE = 10.0
+    MAX_PSI = CAL_SLOPE * MAX_VOLTAGE + CAL_INTERCEPT  # ~24.93 PSI
+    MAX_BAR = MAX_PSI / 14.5038  # ~1.72 bar
     PSI_PER_BAR = 14.5038
     
     def __init__(self):
@@ -34,9 +43,9 @@ class PressureControlPanel(QGroupBox):
         setpoint_row.addWidget(QLabel("Setpoint:"))
         self.spin_value = QDoubleSpinBox()
         self.spin_value.setDecimals(2)
-        self.spin_value.setRange(0, 148)
+        self.spin_value.setRange(0, self.MAX_PSI)  # 0 to ~24.93 PSI
         self.spin_value.setValue(0)
-        self.spin_value.setSingleStep(1.0)
+        self.spin_value.setSingleStep(0.5)
         self.spin_value.setFixedWidth(100)
         setpoint_row.addWidget(self.spin_value)
         
@@ -58,12 +67,12 @@ class PressureControlPanel(QGroupBox):
         layout.addLayout(setpoint_row)
         
         # ─────────────────────────────────────────────
-        # QUICK PRESET BUTTONS
+        # QUICK PRESET BUTTONS (0-25 PSI range)
         # ─────────────────────────────────────────────
         preset_row = QHBoxLayout()
         preset_row.addWidget(QLabel("Presets:"))
-        
-        presets = [0, 10, 20, 30, 50, 75, 100]
+
+        presets = [0, 5, 10, 12, 15, 20, 24]
         self.preset_buttons = []
         for psi in presets:
             btn = QPushButton(f"{psi}")
@@ -97,15 +106,15 @@ class PressureControlPanel(QGroupBox):
     def _on_unit_changed(self, unit: str):
         """Update spinbox range when unit changes"""
         if unit == "PSI":
-            self.spin_value.setRange(0, self.MAX_PSI)
-            self.spin_value.setSingleStep(1.0)
-            self.spin_value.setDecimals(1)
-        elif unit == "Bar":
-            self.spin_value.setRange(0, self.MAX_BAR)
-            self.spin_value.setSingleStep(0.1)
+            self.spin_value.setRange(0, self.MAX_PSI)  # 0 to ~24.93 PSI
+            self.spin_value.setSingleStep(0.5)
             self.spin_value.setDecimals(2)
+        elif unit == "Bar":
+            self.spin_value.setRange(0, self.MAX_BAR)  # 0 to ~1.72 bar
+            self.spin_value.setSingleStep(0.05)
+            self.spin_value.setDecimals(3)
         elif unit == "Volts":
-            self.spin_value.setRange(0, self.MAX_VOLTAGE)
+            self.spin_value.setRange(0, self.MAX_VOLTAGE)  # 0 to 10V
             self.spin_value.setSingleStep(0.1)
             self.spin_value.setDecimals(3)
         elif unit == "%":
@@ -123,37 +132,54 @@ class PressureControlPanel(QGroupBox):
     def get_voltage(self) -> float:
         """
         Convert current spinbox value to output voltage (0-10V).
-        
+
+        Uses calibration: PSI = 2.5106 * V - 0.178
+        Inverted: V = (PSI + 0.178) / 2.5106
+
         Returns:
             Voltage to send to Arduino (0-10V)
         """
         value = self.spin_value.value()
         unit = self.combo_unit.currentText()
-        
+
         if unit == "PSI":
-            # PSI → Voltage: V = (PSI / 148) * 10
-            voltage = (value / self.MAX_PSI) * self.MAX_VOLTAGE
+            # PSI → Voltage: V = (PSI - INTERCEPT) / SLOPE
+            # Since INTERCEPT is negative: V = (PSI + 0.178) / 2.5106
+            voltage = (value - self.CAL_INTERCEPT) / self.CAL_SLOPE
         elif unit == "Bar":
-            # Bar → Voltage: V = (Bar / 10) * 10
-            voltage = (value / self.MAX_BAR) * self.MAX_VOLTAGE
+            # Bar → PSI → Voltage
+            psi = value * self.PSI_PER_BAR
+            voltage = (psi - self.CAL_INTERCEPT) / self.CAL_SLOPE
         elif unit == "Volts":
             voltage = value
         elif unit == "%":
-            # Percent → Voltage: V = (% / 100) * 10
+            # Percent of max voltage range
             voltage = (value / 100.0) * self.MAX_VOLTAGE
         else:
             voltage = 0.0
-        
+
         return max(0.0, min(self.MAX_VOLTAGE, voltage))
     
     def get_psi(self) -> float:
-        """Get current setpoint in PSI"""
+        """Get current setpoint in PSI using calibration formula."""
         voltage = self.get_voltage()
-        return (voltage / self.MAX_VOLTAGE) * self.MAX_PSI
-    
+        return self.voltage_to_psi(voltage)
+
+    @classmethod
+    def voltage_to_psi(cls, voltage: float) -> float:
+        """Convert voltage to PSI using calibration: PSI = 2.5106 * V - 0.178"""
+        psi = cls.CAL_SLOPE * voltage + cls.CAL_INTERCEPT
+        return max(0.0, psi)
+
+    @classmethod
+    def psi_to_voltage(cls, psi: float) -> float:
+        """Convert PSI to voltage using calibration: V = (PSI + 0.178) / 2.5106"""
+        voltage = (psi - cls.CAL_INTERCEPT) / cls.CAL_SLOPE
+        return max(0.0, min(cls.MAX_VOLTAGE, voltage))
+
     def update_output_display(self, voltage: float):
         """Update the output status label"""
         self._current_voltage = voltage
-        psi = (voltage / self.MAX_VOLTAGE) * self.MAX_PSI
-        bar = (voltage / self.MAX_VOLTAGE) * self.MAX_BAR
-        self.label_output.setText(f"Output: {voltage:.3f} V ({psi:.1f} PSI / {bar:.2f} bar)")
+        psi = self.voltage_to_psi(voltage)
+        bar = psi / self.PSI_PER_BAR
+        self.label_output.setText(f"Output: {voltage:.3f} V ({psi:.2f} PSI / {bar:.3f} bar)")

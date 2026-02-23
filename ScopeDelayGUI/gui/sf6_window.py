@@ -8,6 +8,7 @@ from PyQt6.QtGui import QFont
 from gui.sf6_panel import SF6Panel
 from gui.gauge_widget import GaugeWidget
 from gui.pressure_panel import PressureControlPanel
+from gui.numato_relay_panel import NumatoRelayPanel
 
 import pyqtgraph as pg
 
@@ -39,24 +40,36 @@ class SF6Window(QMainWindow):
         main_layout.addWidget(vertical_splitter)
 
         # -------------------------------------------
-        # SECTION 1: SF6 Marx Generator Control (TOP)
+        # SECTION 1: SF6 Marx Generator Control + Relay Control (TOP)
         # -------------------------------------------
-        sf6_group = QGroupBox("SF6 Marx Generator Control")
-        sf6_group_font = QFont("Arial", 10)
-        sf6_group_font.setBold(True)
-        sf6_group.setFont(sf6_group_font)
+        top_group = QGroupBox("SF6 Marx Generator Control + Relay Control")
+        top_group_font = QFont("Arial", 10)
+        top_group_font.setBold(True)
+        top_group.setFont(top_group_font)
+        top_layout = QHBoxLayout()
+        top_layout.setContentsMargins(5, 10, 5, 5)
+        top_layout.setSpacing(10)
+        top_group.setLayout(top_layout)
+
+        # Left side: SF6 controls
+        sf6_container = QWidget()
         sf6_layout = QVBoxLayout()
-        sf6_layout.setContentsMargins(5, 10, 5, 5)
-        sf6_group.setLayout(sf6_layout)
+        sf6_layout.setContentsMargins(0, 0, 0, 0)
+        sf6_container.setLayout(sf6_layout)
 
         self.sf6_panel = SF6Panel()
         sf6_layout.addWidget(self.sf6_panel)
 
-
         self.pressure_panel = PressureControlPanel()
         sf6_layout.addWidget(self.pressure_panel)
-        
-        vertical_splitter.addWidget(sf6_group)
+
+        top_layout.addWidget(sf6_container, stretch=2)
+
+        # Right side: Numato Relay Control
+        self.relay_panel = NumatoRelayPanel()
+        top_layout.addWidget(self.relay_panel, stretch=1)
+
+        vertical_splitter.addWidget(top_group)
 
         # -------------------------------------------
         # SECTION 2: WJ Controls (MIDDLE)

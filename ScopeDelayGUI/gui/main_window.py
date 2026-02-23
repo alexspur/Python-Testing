@@ -29,6 +29,7 @@ from instruments.bnc575 import BNC575Controller, SystemMode, TriggerMode, Trigge
 from instruments.rigol import RigolScope
 from instruments.arduino import ArduinoController
 from instruments.wj import WJPowerSupply
+from instruments.numato_relay import NumatoRelayController
 
 
 class ScopeDelayMainWindow(QMainWindow):
@@ -70,7 +71,8 @@ class ScopeDelayMainWindow(QMainWindow):
         )
 
         self.arduino = ArduinoController()
-        
+        self.numato_relay = NumatoRelayController()
+
         self.rigol1_connected = False
         self.rigol2_connected = False
         self.rigol3_connected = False
@@ -460,10 +462,12 @@ class ScopeDelayMainWindow(QMainWindow):
 
             # ─────────────────────────────────────────────
             # Set initial pressure to 12 PSI on startup
+            # Using calibration: V = (PSI + 0.178) / 2.5106
             # ─────────────────────────────────────────────
             try:
                 initial_psi = 12.0
-                initial_voltage = (initial_psi / 148.0) * 10.0  # 0.811V
+                # Calibrated conversion: V = (PSI + 0.178) / 2.5106
+                initial_voltage = (initial_psi + 0.178) / 2.5106  # ~4.85V
                 self.arduino.set_pressure_voltage(initial_voltage)
                 self.log(f"[Pressure] Initialized to {initial_psi} PSI ({initial_voltage:.3f}V)")
                 
@@ -497,12 +501,31 @@ class ScopeDelayMainWindow(QMainWindow):
         #     self.sf6_window.sf6_panel.lamp.set_status("red", "Not Connected")
 
         # ------------------------------
+        # Numato Relay Module (connect BEFORE WJ supplies to avoid port conflict)
+        # ------------------------------
+        relay_port = None
+        try:
+            relay_port = self.conn.get("RELAY_COM", None)
+            if relay_port:
+                self.numato_relay.connect(relay_port)
+                self.sf6_window.relay_panel.set_connected(True, relay_port)
+                self.log(f"[Relay] Connected on {relay_port}")
+        except Exception as e:
+            self.log(f"[Relay] NOT CONNECTED: {e}")
+            self.sf6_window.relay_panel.set_connected(False)
+
+        # ------------------------------
         # WJ HIGH VOLTAGE SUPPLIES
         # ------------------------------
-        default_wj_ports = ["COM6", "COM11"]
+        default_wj_ports = ["COM11", "COM13"]  # Changed defaults to avoid relay port
         for i, wj in enumerate(self.wj_units):
             try:
                 port = self.conn.get(f"WJ{i+1}_COM", default_wj_ports[i])
+                # Skip if this port is already used by relay
+                if port == relay_port:
+                    self.log(f"[WJ{i+1}] Skipping {port} (used by relay)")
+                    self.wj_panel.rows[i].lamp.set_status("red", "Not Connected")
+                    continue
                 wj.connect(port)
                 self.wj_panel.rows[i].lamp.set_status("green", "Connected")
                 self.log(f"[WJ{i+1}] Connected on {port}")
@@ -630,6 +653,105 @@ class ScopeDelayMainWindow(QMainWindow):
             sf6_panel.lamp.set_status("red", "Not Connected")
         if hasattr(self.sf6_window, 'pressure_panel'):
             self.sf6_window.pressure_panel.btn_apply.clicked.connect(self.on_set_pressure)
+
+        # Connect Numato Relay panel
+        self.connect_relay_panel()
+
+    def connect_relay_panel(self):
+        """Connect signals from Numato Relay panel to handlers"""
+        relay_panel = self.sf6_window.relay_panel
+
+        # Populate COM ports
+        self.refresh_relay_ports()
+
+        # Connect buttons
+        relay_panel.btn_refresh.clicked.connect(self.refresh_relay_ports)
+        relay_panel.btn_connect.clicked.connect(self.on_relay_connect)
+        relay_panel.btn_disconnect.clicked.connect(self.on_relay_disconnect)
+
+        # Connect relay control signals
+        relay_panel.relay_state_changed.connect(self.on_relay_state_changed)
+        relay_panel.all_on_requested.connect(self.on_relay_all_on)
+        relay_panel.all_off_requested.connect(self.on_relay_all_off)
+
+    def refresh_relay_ports(self):
+        """Populate COM port list for relay panel"""
+        ports = list_serial_ports()
+        if not ports:
+            ports = ["No COM ports"]
+
+        relay_panel = self.sf6_window.relay_panel
+        relay_panel.port_combo.clear()
+        relay_panel.port_combo.addItems(ports)
+
+        # Load last used port
+        last_port = self.conn.get("RELAY_COM", None)
+        if last_port and last_port in ports:
+            relay_panel.port_combo.setCurrentText(last_port)
+
+    def on_relay_connect(self):
+        """Connect to Numato relay module"""
+        relay_panel = self.sf6_window.relay_panel
+        port = relay_panel.port_combo.currentText()
+
+        if not port or port == "No COM ports":
+            self.error_popup("No Port", "Select a serial port first.")
+            return
+
+        try:
+            self.numato_relay.connect(port)
+            relay_panel.set_connected(True, port)
+            self.log(f"[Relay] Connected to {port}")
+
+            # Save port to memory
+            self.conn["RELAY_COM"] = port
+            save_memory(self.conn)
+
+        except Exception as e:
+            self.log(f"[Relay ERROR] {e}")
+            self.error_popup("Relay Connection Error", str(e))
+
+    def on_relay_disconnect(self):
+        """Disconnect from Numato relay module"""
+        relay_panel = self.sf6_window.relay_panel
+
+        try:
+            self.numato_relay.close()
+            relay_panel.set_connected(False)
+            self.log("[Relay] Disconnected")
+
+        except Exception as e:
+            self.log(f"[Relay ERROR] {e}")
+
+    def on_relay_state_changed(self, channel: int, state: bool):
+        """Handle relay switch toggle"""
+        try:
+            self.numato_relay.set_relay(channel, state)
+            state_str = "ON" if state else "OFF"
+            self.log(f"[Relay] Channel {channel} {state_str}")
+        except Exception as e:
+            self.log(f"[Relay ERROR] {e}")
+            self.error_popup("Relay Error", str(e))
+
+    def on_relay_all_on(self):
+        """Turn all relays ON"""
+        try:
+            self.numato_relay.all_on()
+            self.sf6_window.relay_panel.update_all_states([True, True, True, True])
+            self.log("[Relay] All channels ON")
+        except Exception as e:
+            self.log(f"[Relay ERROR] {e}")
+            self.error_popup("Relay Error", str(e))
+
+    def on_relay_all_off(self):
+        """Turn all relays OFF"""
+        try:
+            self.numato_relay.all_off()
+            self.sf6_window.relay_panel.update_all_states([False, False, False, False])
+            self.log("[Relay] All channels OFF")
+        except Exception as e:
+            self.log(f"[Relay ERROR] {e}")
+            self.error_popup("Relay Error", str(e))
 
     def on_set_pressure(self):
         """Handle pressure setpoint change"""

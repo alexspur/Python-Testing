@@ -1,14 +1,20 @@
 # utils/pressure_stream_worker.py
 """
-Stream worker for Arduino pressure sensor data with PSI calibration.
+Stream worker for Arduino pressure sensor data.
 
-Parses the DATA format: DATA,count,mA0,mA1,raw2,voltage
+Parses the DATA format from stream_with_psi_conversion.ino:
+    DATA,count,mA0,mA1,raw2,measured_psi,target_psi,voltage,expected_psi
+
+Fields:
+- count: Sample number
 - mA0, mA1: Current readings in milliamps (4-20mA sensors)
-- raw2: Raw ADC value from pressure sensor (requires calibration)
-- voltage: Output voltage to regulator (0-10V)
+- raw2: Raw ADC value from pressure sensor
+- measured_psi: Actual pressure from sensor (calibrated on Arduino)
+- target_psi: Setpoint pressure
+- voltage: Control voltage sent to regulator (0-10V)
+- expected_psi: Expected pressure based on voltage mapping
 
-Converts raw ADC to PSI using linear interpolation with calibration table.
-Converts mA0, mA1 to PSI using standard 4-20mA to 0-200 PSI mapping.
+Arduino performs sensor calibration: PSI = 0.00228617 * raw_adc - 24.877300
 """
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -21,74 +27,26 @@ from typing import Optional
 class PressureData:
     """Container for parsed pressure sensor data."""
     count: int
-    mA0: float       # Channel 0 current (mA)
-    mA1: float       # Channel 1 current (mA)
-    psi0: float      # Channel 0 PSI (from 4-20mA)
-    psi1: float      # Channel 1 PSI (from 4-20mA)
-    raw_adc: int     # Raw ADC from pressure sensor (AI2)
-    psi2: float      # Channel 2 PSI (from raw ADC calibration)
-    voltage: float   # Output voltage to regulator
+    mA0: float           # Channel 0 current (mA)
+    mA1: float           # Channel 1 current (mA)
+    psi0: float          # Channel 0 PSI (from 4-20mA)
+    psi1: float          # Channel 1 PSI (from 4-20mA)
+    raw_adc: int         # Raw ADC from pressure sensor (AI2)
+    measured_psi: float  # Measured pressure from sensor (calibrated on Arduino)
+    target_psi: float    # Target setpoint pressure
+    voltage: float       # Control voltage to regulator
+    expected_psi: float  # Expected pressure from voltage mapping
 
 
 class PressureCalibration:
     """
-    Pressure sensor calibration using linear interpolation.
+    Pressure calibration utilities.
 
-    Converts raw ADC values to PSI using a calibration table.
-    Values outside the table range are clamped.
+    Sensor calibration (done on Arduino):
+        PSI = 0.00228617 * raw_adc - 24.877300
+
+    4-20mA to PSI conversion for AI0/AI1 (0-200 PSI range).
     """
-
-    # Calibration table: raw ADC -> PSI
-    CAL_N = 13
-    RAW_TABLE = [10969, 12536, 16311, 19824, 22713, 25821, 29063, 32171, 35217, 38179, 41147, 43818, 45516]
-    PSI_TABLE = [0.000, 5.800, 15.500, 22.520, 29.250, 36.890, 43.960, 51.100, 58.660, 66.060, 73.500, 79.100, 79.320]
-
-    # Saturation clamp
-    RAW_SAT = 45516
-    PSI_SAT = 79.500
-
-    # Minimum raw value (below this, clamp to 0 PSI)
-    RAW_MIN = 10969
-    PSI_MIN = 0.0
-
-    @classmethod
-    def raw_to_psi(cls, raw: int) -> float:
-        """
-        Convert raw ADC value to PSI using linear interpolation.
-
-        Args:
-            raw: Raw ADC value from pressure sensor
-
-        Returns:
-            Pressure in PSI
-        """
-        # Saturation clamp (high end)
-        if raw >= cls.RAW_SAT:
-            return cls.PSI_SAT
-
-        # Below minimum (low end)
-        if raw <= cls.RAW_MIN:
-            return cls.PSI_MIN
-
-        # Find the interpolation segment
-        for i in range(cls.CAL_N - 1):
-            raw_lo = cls.RAW_TABLE[i]
-            raw_hi = cls.RAW_TABLE[i + 1]
-
-            if raw_lo <= raw <= raw_hi:
-                # Linear interpolation
-                psi_lo = cls.PSI_TABLE[i]
-                psi_hi = cls.PSI_TABLE[i + 1]
-
-                # Avoid division by zero
-                if raw_hi == raw_lo:
-                    return psi_lo
-
-                fraction = (raw - raw_lo) / (raw_hi - raw_lo)
-                return psi_lo + fraction * (psi_hi - psi_lo)
-
-        # Fallback (shouldn't reach here with valid data)
-        return cls.PSI_SAT
 
     @staticmethod
     def mA_to_psi(mA: float) -> float:
@@ -112,19 +70,18 @@ class PressureStreamWorker(QThread):
     """
     Background worker for streaming pressure sensor data from Arduino.
 
-    Continuously reads serial data, parses the DATA format, performs
-    PSI calibration, and emits signals with converted values.
+    Parses the new 9-field DATA format and emits signals with pressure values.
 
     Signals:
-        data_signal(psi0, psi1, psi2, voltage): Emitted with all PSI values
-        raw_data_signal(mA0, mA1, raw_adc, psi2, voltage): Raw data with calibrated PSI
+        data_signal(psi0, psi1, measured_psi, voltage): PSI values for gauges
+        raw_data_signal(mA0, mA1, raw_adc, measured_psi, voltage): Raw data
         error_signal(str): Emitted on errors
     """
 
-    # Signal with all PSI values: psi0, psi1, psi2 (calibrated), voltage
+    # Signal with PSI values for gauges: psi0, psi1, measured_psi, voltage
     data_signal = pyqtSignal(float, float, float, float)
 
-    # Signal with raw values: mA0, mA1, raw_adc, psi2 (calibrated), voltage
+    # Signal with raw values: mA0, mA1, raw_adc, measured_psi, voltage
     raw_data_signal = pyqtSignal(float, float, int, float, float)
 
     # Error signal
@@ -152,17 +109,17 @@ class PressureStreamWorker(QThread):
 
     def get_current_values(self) -> Optional[tuple]:
         """
-        Get current sensor values with PSI conversion.
+        Get current sensor values.
 
         Returns:
-            Tuple of (psi0, psi1, psi2, voltage) or None if no data available
+            Tuple of (psi0, psi1, measured_psi, voltage) or None if no data
         """
         if self._latest_data is None:
             return None
         return (
             self._latest_data.psi0,
             self._latest_data.psi1,
-            self._latest_data.psi2,
+            self._latest_data.measured_psi,
             self._latest_data.voltage
         )
 
@@ -183,25 +140,28 @@ class PressureStreamWorker(QThread):
                     time.sleep(0.1)
                     continue
 
-                # Parse DATA format: DATA,count,mA0,mA1,raw2,voltage
+                # Parse DATA format:
+                # DATA,count,mA0,mA1,raw2,measured_psi,target_psi,voltage,expected_psi
                 if line.startswith("DATA,"):
                     try:
                         parts = line.split(",")
-                        if len(parts) >= 6:
-                            _, count_str, mA0_str, mA1_str, raw2_str, voltage_str = parts[:6]
+                        if len(parts) >= 9:
+                            (_, count_str, mA0_str, mA1_str, raw2_str,
+                             measured_psi_str, target_psi_str, voltage_str,
+                             expected_psi_str) = parts[:9]
 
                             count = int(count_str)
                             mA0 = float(mA0_str)
                             mA1 = float(mA1_str)
                             raw_adc = int(raw2_str)
+                            measured_psi = float(measured_psi_str)
+                            target_psi = float(target_psi_str)
                             voltage = float(voltage_str)
+                            expected_psi = float(expected_psi_str)
 
                             # Convert mA0, mA1 to PSI (4-20mA -> 0-200 PSI)
                             psi0 = PressureCalibration.mA_to_psi(mA0)
                             psi1 = PressureCalibration.mA_to_psi(mA1)
-
-                            # Convert raw ADC to PSI using calibration table
-                            psi2 = PressureCalibration.raw_to_psi(raw_adc)
 
                             # Store latest data
                             self._latest_data = PressureData(
@@ -211,13 +171,15 @@ class PressureStreamWorker(QThread):
                                 psi0=psi0,
                                 psi1=psi1,
                                 raw_adc=raw_adc,
-                                psi2=psi2,
-                                voltage=voltage
+                                measured_psi=measured_psi,
+                                target_psi=target_psi,
+                                voltage=voltage,
+                                expected_psi=expected_psi
                             )
 
-                            # Emit signals
-                            self.data_signal.emit(psi0, psi1, psi2, voltage)
-                            self.raw_data_signal.emit(mA0, mA1, raw_adc, psi2, voltage)
+                            # Emit signals (measured_psi is the calibrated sensor reading)
+                            self.data_signal.emit(psi0, psi1, measured_psi, voltage)
+                            self.raw_data_signal.emit(mA0, mA1, raw_adc, measured_psi, voltage)
 
                     except (ValueError, IndexError):
                         # Malformed line, skip it
@@ -235,20 +197,7 @@ class PressureStreamWorker(QThread):
         self.wait()
 
 
-# Standalone utility functions for use outside the worker
-def raw_adc_to_psi(raw: int) -> float:
-    """
-    Convert raw ADC value to PSI using calibration table.
-
-    Args:
-        raw: Raw ADC value from pressure sensor
-
-    Returns:
-        Pressure in PSI
-    """
-    return PressureCalibration.raw_to_psi(raw)
-
-
+# Standalone utility function
 def mA_to_psi(mA: float) -> float:
     """
     Convert 4-20mA current to PSI (0-200 PSI range).

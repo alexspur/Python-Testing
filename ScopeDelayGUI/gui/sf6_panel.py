@@ -41,12 +41,12 @@ class SF6Panel(QGroupBox):
 
         # Gauges side by side to minimize height
         # AI0, AI1: 4-20mA sensors (0-200 PSI range)
-        # AI2: Calibrated pressure sensor (0-80 PSI range)
+        # AI2: Calibrated pressure sensor (0-25 PSI range, matches Arduino clamp)
         gauges = QHBoxLayout()
         gauges.setSpacing(12)
         self.ai_ch0 = GaugeWidget(min_value=0, max_value=200, label="PSI", size=120)
         self.ai_ch1 = GaugeWidget(min_value=0, max_value=200, label="PSI", size=120)
-        self.ai_ch2 = GaugeWidget(min_value=0, max_value=80, label="PSI", size=120)  # Calibrated 0-80 PSI
+        self.ai_ch2 = GaugeWidget(min_value=0, max_value=25, label="PSI", size=120)  # Calibrated 0-25 PSI
         gauges.addWidget(self.ai_ch0)
         gauges.addWidget(self.ai_ch1)
         gauges.addWidget(self.ai_ch2)
