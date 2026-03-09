@@ -4,6 +4,7 @@ Numato 4-Channel USB Relay Module Controller
 Controls relays via serial commands over USB (CDC serial port).
 """
 import serial
+import threading
 import time
 
 
@@ -16,6 +17,7 @@ class NumatoRelayController:
     def __init__(self):
         self.ser: serial.Serial | None = None
         self.relay_states = [False] * self.NUM_CHANNELS
+        self._lock = threading.Lock()
 
     @property
     def is_connected(self) -> bool:
@@ -62,21 +64,39 @@ class NumatoRelayController:
         self.relay_states = [False] * self.NUM_CHANNELS
 
     def _send_command(self, cmd: str) -> bool:
-        """
-        Send a command string to the Numato module.
-
-        Args:
-            cmd: Command string to send
-
-        Returns:
-            True if command was sent successfully
-        """
+        """Send a command string to the Numato module."""
         if not self.is_connected:
             raise RuntimeError("Numato relay not connected")
 
-        self.ser.write(cmd.encode())
-        time.sleep(0.05)
+        with self._lock:
+            self.ser.write(cmd.encode())
+            time.sleep(0.05)
         return True
+
+    def _query(self, cmd: str) -> str:
+        """Send a command and read back the response."""
+        if not self.is_connected:
+            raise RuntimeError("Numato relay not connected")
+
+        with self._lock:
+            self.ser.flushInput()
+            self.ser.write(cmd.encode())
+            time.sleep(0.05)
+            response = self.ser.read(self.ser.in_waiting or 64).decode(errors="ignore")
+        return response.strip()
+
+    def gpio_read(self, gpio_pin: int) -> bool:
+        """
+        Read the state of a GPIO pin.
+
+        Args:
+            gpio_pin: GPIO pin number (0-5 on RL40001)
+
+        Returns:
+            True if pin is HIGH, False if LOW
+        """
+        resp = self._query(f"gpio read {gpio_pin}\r")
+        return "1" in resp
 
     def relay_on(self, channel: int) -> bool:
         """
