@@ -45,6 +45,11 @@ class NumatoRelayController:
             self.ser = serial.Serial(port, baudrate, timeout=1)
             time.sleep(0.1)  # Allow module to initialize
             self.relay_states = [False] * self.NUM_CHANNELS
+
+            # Force GPIO pins LOW so external pull-downs define input state
+            for pin in (0, 2, 3, 4, 5):
+                self._send_command(f"gpio clear {pin}\r")
+
             return True
         except Exception as e:
             self.ser = None
