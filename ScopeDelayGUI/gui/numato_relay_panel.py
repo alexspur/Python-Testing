@@ -23,10 +23,10 @@ class NumatoRelayPanel(QGroupBox):
 
     # Relay names - customize these as needed
     RELAY_NAMES = [
-        "Discharge Relay",
-        "Relay 1",
-        "Charging Relay",
-        "Relay 3"
+        "Discharging Relay 1",
+        "Charging Relay 1",
+        "Relay 3",
+        "Relay 4"
     ]
 
     def __init__(self, parent=None):
@@ -70,11 +70,15 @@ class NumatoRelayPanel(QGroupBox):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
 
+        # Visual position map: channel index → (row, col)
+        # CH1 (Charging Relay 1) shown top-left, CH0 (Discharging Relay 1) shown top-right
+        _pos = {0: (0, 1), 1: (0, 0), 2: (1, 0), 3: (1, 1)}
+
         self.switches = []
         for i, name in enumerate(self.RELAY_NAMES):
             knob = RotaryKnobSwitch(label=name, size=36)
             self.switches.append(knob)
-            grid.addWidget(knob, i // 2, i % 2)
+            grid.addWidget(knob, *_pos[i])
 
             # Connect switch state change to signal
             knob.stateChanged.connect(lambda on, ch=i: self._on_switch_changed(ch, on))

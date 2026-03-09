@@ -790,7 +790,7 @@ class ScopeDelayMainWindow(QMainWindow):
             return
         self.relay_polling = True
         self.relay_panel.set_polling_active(True)
-        self.log("[Relay] GPIO pushbutton polling started (GPIO 0, 4)")
+        self.log("[Relay] GPIO pushbutton polling started (GPIO 2, 3, 4, 5)")
         import threading
         self.relay_poll_thread = threading.Thread(
             target=self._relay_poll_loop, daemon=True)
@@ -808,36 +808,40 @@ class ScopeDelayMainWindow(QMainWindow):
     def _relay_poll_loop(self):
         """Background thread: poll GPIO pins for pushbutton presses.
 
-        button_map: (gpio_pin, channel, action)
-          GPIO 0 → CH0 ON
-          GPIO 4 → CH0 OFF
-          GPIO 2 → CH1 ON
-          GPIO 3 → CH1 OFF
+        button_map: (gpio_pin, relay_channel)
+          GPIO 2 → Relay 1 (CH0) toggle
+          GPIO 3 → Relay 2 (CH1) toggle
+          GPIO 4 → Relay 3 (CH2) toggle
+          GPIO 5 → Relay 4 (CH3) toggle
+        Rising-edge detection prevents re-firing while button is held.
         """
         import time
+        # (gpio_pin, relay_channel)
         button_map = [
-            (0, 0, "on"),   # GPIO 0 = CH0 green (ON)
-            (4, 0, "off"),  # GPIO 4 = CH0 red (OFF)
-            (2, 1, "on"),   # GPIO 2 = CH1 green (ON)
-            (3, 1, "off"),  # GPIO 3 = CH1 red (OFF)
+            (2, 1),  # GPIO 2 → CH1 (Charging Relay 1)
+            (3, 0),  # GPIO 3 → CH0 (Discharging Relay 1)
+            (4, 2),  # GPIO 4 → Relay 3
+            (5, 3),  # GPIO 5 → Relay 4
         ]
+        prev = {gpio: False for gpio, _ in button_map}
 
         while self.relay_polling and self.numato_relay.is_connected:
             try:
-                for gpio_pin, ch, action in button_map:
+                for gpio_pin, ch in button_map:
                     if not self.relay_polling:
                         break
-                    pressed = self.numato_relay.gpio_read(gpio_pin)
+                    current = self.numato_relay.gpio_read(gpio_pin)
                     time.sleep(0.02)
-                    if pressed:
-                        state = (action == "on")
-                        if state:
+                    # Rising edge only — toggle relay once per press
+                    if current and not prev[gpio_pin]:
+                        new_state = not self.numato_relay.relay_states[ch]
+                        if new_state:
                             self.numato_relay.relay_on(ch)
                         else:
                             self.numato_relay.relay_off(ch)
-                        self.numato_relay.relay_states[ch] = state
-                        time.sleep(0.05)
-                        self._relay_update_signal.emit(ch, state)
+                        self.numato_relay.relay_states[ch] = new_state
+                        self._relay_update_signal.emit(ch, new_state)
+                    prev[gpio_pin] = current
                 time.sleep(0.08)
             except Exception as e:
                 self._relay_log_signal.emit(f"[Relay Poll ERROR] {e}")
