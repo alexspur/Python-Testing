@@ -8,7 +8,6 @@ from PyQt6.QtGui import QFont
 from gui.sf6_panel import SF6Panel
 from gui.gauge_widget import GaugeWidget
 from gui.pressure_panel import PressureControlPanel
-from gui.numato_relay_panel import NumatoRelayPanel
 
 import pyqtgraph as pg
 
@@ -42,7 +41,7 @@ class SF6Window(QMainWindow):
         # -------------------------------------------
         # SECTION 1: SF6 Marx Generator Control + Relay Control (TOP)
         # -------------------------------------------
-        top_group = QGroupBox("SF6 Marx Generator Control + Relay Control")
+        top_group = QGroupBox("SF6 Marx Generator Control")
         top_group_font = QFont("Arial", 10)
         top_group_font.setBold(True)
         top_group.setFont(top_group_font)
@@ -63,11 +62,7 @@ class SF6Window(QMainWindow):
         self.pressure_panel = PressureControlPanel()
         sf6_layout.addWidget(self.pressure_panel)
 
-        top_layout.addWidget(sf6_container, stretch=2)
-
-        # Right side: Numato Relay Control
-        self.relay_panel = NumatoRelayPanel()
-        top_layout.addWidget(self.relay_panel, stretch=1)
+        top_layout.addWidget(sf6_container, stretch=1)
 
         vertical_splitter.addWidget(top_group)
 

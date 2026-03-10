@@ -2,7 +2,7 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMessageBox, QPushButton, QSizePolicy, QGridLayout,
 )
-from PyQt6.QtCore import QThread, Qt
+from PyQt6.QtCore import QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import QFileDialog, QProgressDialog, QMessageBox
 from PyQt6.QtCore import Qt
 import time
@@ -14,6 +14,7 @@ from gui.sf6_window import SF6Window
 from gui.wj_panel import WJPanel
 from gui.scope_plot_window import ScopePlotWindow
 from gui.wj_plot_window import WJPlotWindow
+from gui.numato_relay_panel import NumatoRelayPanel
 
 from utils.logger import LogPanel
 from utils.status_lamp import StatusLamp
@@ -33,6 +34,9 @@ from instruments.numato_relay import NumatoRelayController
 
 
 class ScopeDelayMainWindow(QMainWindow):
+    _relay_update_signal = pyqtSignal(int, bool)  # (channel, state) — safe cross-thread UI update
+    _relay_log_signal = pyqtSignal(str)            # log messages from poll thread
+
     def __init__(self):
         super().__init__()
 
@@ -72,6 +76,12 @@ class ScopeDelayMainWindow(QMainWindow):
 
         self.arduino = ArduinoController()
         self.numato_relay = NumatoRelayController()
+
+        # Relay polling state
+        self.relay_polling = False
+        self.relay_poll_thread = None
+        self._relay_update_signal.connect(self._relay_pushbutton_ui_update)
+        self._relay_log_signal.connect(self.log)
 
         self.rigol1_connected = False
         self.rigol2_connected = False
@@ -315,6 +325,11 @@ class ScopeDelayMainWindow(QMainWindow):
 
         layout.addLayout(left_column, 1)
 
+        # Right column: Numato Relay Control
+        self.relay_panel = NumatoRelayPanel()
+        self.relay_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        layout.addWidget(self.relay_panel)
+
         # Add the layout to the main window
         main_layout.addLayout(layout)
 
@@ -508,11 +523,11 @@ class ScopeDelayMainWindow(QMainWindow):
             relay_port = self.conn.get("RELAY_COM", None)
             if relay_port:
                 self.numato_relay.connect(relay_port)
-                self.sf6_window.relay_panel.set_connected(True, relay_port)
+                self.relay_panel.set_connected(True, relay_port)
                 self.log(f"[Relay] Connected on {relay_port}")
         except Exception as e:
             self.log(f"[Relay] NOT CONNECTED: {e}")
-            self.sf6_window.relay_panel.set_connected(False)
+            self.relay_panel.set_connected(False)
 
         # ------------------------------
         # WJ HIGH VOLTAGE SUPPLIES
@@ -659,7 +674,7 @@ class ScopeDelayMainWindow(QMainWindow):
 
     def connect_relay_panel(self):
         """Connect signals from Numato Relay panel to handlers"""
-        relay_panel = self.sf6_window.relay_panel
+        relay_panel = self.relay_panel
 
         # Populate COM ports
         self.refresh_relay_ports()
@@ -673,6 +688,7 @@ class ScopeDelayMainWindow(QMainWindow):
         relay_panel.relay_state_changed.connect(self.on_relay_state_changed)
         relay_panel.all_on_requested.connect(self.on_relay_all_on)
         relay_panel.all_off_requested.connect(self.on_relay_all_off)
+        relay_panel.polling_toggle_requested.connect(self.on_relay_polling_toggle)
 
     def refresh_relay_ports(self):
         """Populate COM port list for relay panel"""
@@ -680,7 +696,7 @@ class ScopeDelayMainWindow(QMainWindow):
         if not ports:
             ports = ["No COM ports"]
 
-        relay_panel = self.sf6_window.relay_panel
+        relay_panel = self.relay_panel
         relay_panel.port_combo.clear()
         relay_panel.port_combo.addItems(ports)
 
@@ -691,7 +707,7 @@ class ScopeDelayMainWindow(QMainWindow):
 
     def on_relay_connect(self):
         """Connect to Numato relay module"""
-        relay_panel = self.sf6_window.relay_panel
+        relay_panel = self.relay_panel
         port = relay_panel.port_combo.currentText()
 
         if not port or port == "No COM ports":
@@ -713,7 +729,11 @@ class ScopeDelayMainWindow(QMainWindow):
 
     def on_relay_disconnect(self):
         """Disconnect from Numato relay module"""
-        relay_panel = self.sf6_window.relay_panel
+        relay_panel = self.relay_panel
+
+        # Stop polling first
+        if self.relay_polling:
+            self._stop_relay_polling()
 
         try:
             self.numato_relay.close()
@@ -737,7 +757,7 @@ class ScopeDelayMainWindow(QMainWindow):
         """Turn all relays ON"""
         try:
             self.numato_relay.all_on()
-            self.sf6_window.relay_panel.update_all_states([True, True, True, True])
+            self.relay_panel.update_all_states([True, True, True, True])
             self.log("[Relay] All channels ON")
         except Exception as e:
             self.log(f"[Relay ERROR] {e}")
@@ -747,11 +767,91 @@ class ScopeDelayMainWindow(QMainWindow):
         """Turn all relays OFF"""
         try:
             self.numato_relay.all_off()
-            self.sf6_window.relay_panel.update_all_states([False, False, False, False])
+            self.relay_panel.update_all_states([False, False, False, False])
             self.log("[Relay] All channels OFF")
         except Exception as e:
             self.log(f"[Relay ERROR] {e}")
             self.error_popup("Relay Error", str(e))
+
+    # ── GPIO Pushbutton Polling ────────────────────────────────────────
+
+    def on_relay_polling_toggle(self, start: bool):
+        """Start or stop GPIO pushbutton polling."""
+        if start:
+            self._start_relay_polling()
+        else:
+            self._stop_relay_polling()
+
+    def _start_relay_polling(self):
+        """Start background GPIO polling thread."""
+        if not self.numato_relay.is_connected:
+            self.log("[Relay] Cannot start polling — not connected")
+            self.relay_panel.set_polling_active(False)
+            return
+        self.relay_polling = True
+        self.relay_panel.set_polling_active(True)
+        self.log("[Relay] GPIO pushbutton polling started (GPIO 2, 3, 4, 5)")
+        import threading
+        self.relay_poll_thread = threading.Thread(
+            target=self._relay_poll_loop, daemon=True)
+        self.relay_poll_thread.start()
+
+    def _stop_relay_polling(self):
+        """Stop the GPIO polling thread."""
+        self.relay_polling = False
+        self.relay_panel.set_polling_active(False)
+        if self.relay_poll_thread:
+            self.relay_poll_thread.join(timeout=1)
+            self.relay_poll_thread = None
+        self.log("[Relay] GPIO pushbutton polling stopped")
+
+    def _relay_poll_loop(self):
+        """Background thread: poll GPIO pins for pushbutton presses.
+
+        button_map: (gpio_pin, relay_channel)
+          GPIO 2 → Relay 1 (CH0) toggle
+          GPIO 3 → Relay 2 (CH1) toggle
+          GPIO 4 → Relay 3 (CH2) toggle
+          GPIO 5 → Relay 4 (CH3) toggle
+        Rising-edge detection prevents re-firing while button is held.
+        """
+        import time
+        # (gpio_pin, relay_channel)
+        button_map = [
+            (2, 1),  # GPIO 2 → CH1 (Charging Relay 1)
+            (3, 0),  # GPIO 3 → CH0 (Discharging Relay 1)
+            (4, 2),  # GPIO 4 → Relay 3
+            (5, 3),  # GPIO 5 → Relay 4
+        ]
+        prev = {gpio: False for gpio, _ in button_map}
+
+        while self.relay_polling and self.numato_relay.is_connected:
+            try:
+                for gpio_pin, ch in button_map:
+                    if not self.relay_polling:
+                        break
+                    current = self.numato_relay.gpio_read(gpio_pin)
+                    time.sleep(0.02)
+                    # Rising edge only — toggle relay once per press
+                    if current and not prev[gpio_pin]:
+                        new_state = not self.numato_relay.relay_states[ch]
+                        if new_state:
+                            self.numato_relay.relay_on(ch)
+                        else:
+                            self.numato_relay.relay_off(ch)
+                        self.numato_relay.relay_states[ch] = new_state
+                        self._relay_update_signal.emit(ch, new_state)
+                    prev[gpio_pin] = current
+                time.sleep(0.08)
+            except Exception as e:
+                self._relay_log_signal.emit(f"[Relay Poll ERROR] {e}")
+                time.sleep(0.5)
+
+    def _relay_pushbutton_ui_update(self, ch: int, state: bool):
+        """Called on main thread after a pushbutton press updates relay state."""
+        label = "ON" if state else "OFF"
+        self.log(f"[Relay] GPIO button: CH{ch} → {label}")
+        self.relay_panel.update_relay_state(ch, state)
 
     def on_set_pressure(self):
         """Handle pressure setpoint change"""

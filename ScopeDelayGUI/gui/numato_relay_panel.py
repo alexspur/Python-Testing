@@ -19,13 +19,14 @@ class NumatoRelayPanel(QGroupBox):
     relay_state_changed = pyqtSignal(int, bool)  # channel, state
     all_on_requested = pyqtSignal()
     all_off_requested = pyqtSignal()
+    polling_toggle_requested = pyqtSignal(bool)  # True = start, False = stop
 
     # Relay names - customize these as needed
     RELAY_NAMES = [
-        "Discharge Relay",
-        "Relay 1",
-        "Charging Relay",
-        "Relay 3"
+        "Discharging Relay 1",
+        "Charging Relay 1",
+        "Relay 3",
+        "Relay 4"
     ]
 
     def __init__(self, parent=None):
@@ -69,11 +70,15 @@ class NumatoRelayPanel(QGroupBox):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
 
+        # Visual position map: channel index → (row, col)
+        # CH1 (Charging Relay 1) shown top-left, CH0 (Discharging Relay 1) shown top-right
+        _pos = {0: (0, 1), 1: (0, 0), 2: (1, 0), 3: (1, 1)}
+
         self.switches = []
         for i, name in enumerate(self.RELAY_NAMES):
             knob = RotaryKnobSwitch(label=name, size=36)
             self.switches.append(knob)
-            grid.addWidget(knob, i // 2, i % 2)
+            grid.addWidget(knob, *_pos[i])
 
             # Connect switch state change to signal
             knob.stateChanged.connect(lambda on, ch=i: self._on_switch_changed(ch, on))
@@ -94,6 +99,21 @@ class NumatoRelayPanel(QGroupBox):
         all_row.addWidget(self.btn_all_off)
         layout.addLayout(all_row)
 
+        # Pushbutton polling row
+        poll_row = QHBoxLayout()
+        poll_row.setSpacing(6)
+
+        self.btn_polling = QPushButton("Start Polling")
+        self.btn_polling.clicked.connect(self._on_polling_toggle)
+        poll_row.addWidget(self.btn_polling)
+
+        self.poll_status_label = QLabel("GPIO polling: OFF")
+        poll_row.addWidget(self.poll_status_label)
+
+        layout.addLayout(poll_row)
+
+        self._polling_active = False
+
         layout.addStretch(1)
 
     def _on_switch_changed(self, channel: int, on: bool):
@@ -111,6 +131,21 @@ class NumatoRelayPanel(QGroupBox):
         for switch in self.switches:
             switch.set_on(False)
         self.all_off_requested.emit()
+
+    def _on_polling_toggle(self):
+        """Toggle GPIO polling on/off."""
+        self._polling_active = not self._polling_active
+        self.polling_toggle_requested.emit(self._polling_active)
+
+    def set_polling_active(self, active: bool):
+        """Update the polling button/label to reflect current state."""
+        self._polling_active = active
+        if active:
+            self.btn_polling.setText("Stop Polling")
+            self.poll_status_label.setText("GPIO polling: ON")
+        else:
+            self.btn_polling.setText("Start Polling")
+            self.poll_status_label.setText("GPIO polling: OFF")
 
     def update_relay_state(self, channel: int, is_on: bool):
         """Update the display for a specific relay (called from main window)."""
