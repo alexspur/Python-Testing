@@ -452,7 +452,7 @@ class ScopeDelayMainWindow(QMainWindow):
         # Arduino / SF6
         # ------------------------------
         try:
-            port = self.conn.get("Arduino_COM", "COM8")
+            port = self.conn.get("Arduino_COM", "COM9")
             self.arduino.connect(port)
             save_memory("Arduino_COM", port)
             self.log(f"[Arduino] Connected on {port}")
@@ -469,8 +469,8 @@ class ScopeDelayMainWindow(QMainWindow):
             try:
                 self.arduino.set_digital_output(0, 1)  # Marx1 Supply ON (closed)
                 self.arduino.set_digital_output(4, 1)  # Marx1 Return ON (closed)
-                self.sf6_window.sf6_panel.switches[0].setChecked(True)
-                self.sf6_window.sf6_panel.switches[1].setChecked(True)
+                self.sf6_window.sf6_panel.switches[0].set_on(True)
+                self.sf6_window.sf6_panel.switches[1].set_on(True)
                 self.log("[Arduino] Auto-closed Marx1 Supply and Marx1 Return")
             except Exception as e:
                 self.log(f"[Arduino] Failed to auto-close Marx1 valves: {e}")
@@ -497,7 +497,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self.log(f"[Arduino] NOT CONNECTED: {e}")
             self.sf6_window.sf6_panel.lamp.set_status("red", "Not Connected")
         # try:
-        #     port = self.conn.get("Arduino_COM", "COM8")
+        #     port = self.conn.get("Arduino_COM", "COM9")
         #     self.arduino.connect(port)
         #     save_memory("Arduino_COM", port)
         #     self.log(f"[Arduino] Connected on {port}")
@@ -749,6 +749,11 @@ class ScopeDelayMainWindow(QMainWindow):
             self.numato_relay.set_relay(channel, state)
             state_str = "ON" if state else "OFF"
             self.log(f"[Relay] Channel {channel} {state_str}")
+
+            # Interlock: turning ON Charging Relay (CH1) also energizes Discharging Relay (CH0)
+            if channel == self._RELAY_CHARGING and state:
+                self._relay_set(self._RELAY_DISCHARGING, True)
+
         except Exception as e:
             self.log(f"[Relay ERROR] {e}")
             self.error_popup("Relay Error", str(e))
@@ -852,6 +857,22 @@ class ScopeDelayMainWindow(QMainWindow):
         label = "ON" if state else "OFF"
         self.log(f"[Relay] GPIO button: CH{ch} → {label}")
         self.relay_panel.update_relay_state(ch, state)
+
+    # ── Relay channel constants ────────────────────────────────────────
+    _RELAY_CHARGING    = 1  # CH1 — Charging Relay 1  (NO)
+    _RELAY_DISCHARGING = 0  # CH0 — Discharging Relay 1 (NC)
+
+    def _relay_set(self, ch: int, state: bool):
+        """Set a relay and update the GUI panel. Safe to call from main thread only."""
+        if not self.numato_relay.is_connected:
+            self.log(f"[Relay] Not connected — cannot set CH{ch}")
+            return
+        try:
+            self.numato_relay.set_relay(ch, state)
+            self.relay_panel.update_relay_state(ch, state)
+            self.log(f"[Relay] CH{ch} → {'ON' if state else 'OFF'}")
+        except Exception as e:
+            self.log(f"[Relay ERROR] CH{ch}: {e}")
 
     def on_set_pressure(self):
         """Handle pressure setpoint change"""
@@ -1670,8 +1691,8 @@ class ScopeDelayMainWindow(QMainWindow):
             try:
                 self.arduino.set_digital_output(0, 1)  # Marx1 Supply ON (closed)
                 self.arduino.set_digital_output(4, 1)  # Marx1 Return ON (closed)
-                sf6_panel.switches[0].setChecked(True)  # Update GUI switch
-                sf6_panel.switches[1].setChecked(True)  # Update GUI switch
+                sf6_panel.switches[0].set_on(True)
+                sf6_panel.switches[1].set_on(True)
                 self.log("[Arduino] Auto-closed Marx1 Supply and Marx1 Return")
             except Exception as e:
                 self.log(f"[Arduino] Failed to auto-close Marx1 valves: {e}")
@@ -1833,6 +1854,10 @@ class ScopeDelayMainWindow(QMainWindow):
 
 
     def on_wj_hv_on(self):
+        # Interlock: energize charging relay (NO→closed) and discharging relay (NC→open)
+        self._relay_set(self._RELAY_CHARGING,    True)
+        self._relay_set(self._RELAY_DISCHARGING, True)
+
         for i, wj in enumerate(self.wj_units):
             try:
                 resp = wj.hv_on_pulse()
@@ -1843,6 +1868,9 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.data_logger.log_error(f"WJ{i+1}", str(e))
 
     def on_wj_hv_off(self):
+        # Interlock: de-energize charging relay (NO→open), keep discharging relay energized (NC stays open)
+        self._relay_set(self._RELAY_CHARGING, False)
+
         for i, wj in enumerate(self.wj_units):
             try:
                 resp = wj.hv_off_pulse()

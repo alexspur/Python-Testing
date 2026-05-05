@@ -1,0 +1,104 @@
+{
+  "points": [
+    {
+      "cmd_v": 0,
+      "cmd_kv": 0.0,
+      "vmon_pin_v": 0.0,
+      "vmon_terminal_v": 0.0,
+      "imon_pin_v": 0.0,
+      "imon_terminal_v": 0.0
+    },
+    {
+      "cmd_v": 1,
+      "cmd_kv": 12.5,
+      "vmon_pin_v": 0.0,
+      "vmon_terminal_v": 0.672,
+      "imon_pin_v": 0.0,
+      "imon_terminal_v": 0.0
+    },
+    {
+      "cmd_v": 2,
+      "cmd_kv": 25.0,
+      "vmon_pin_v": 0.0,
+      "vmon_terminal_v": 1.336,
+      "imon_pin_v": 0.0,
+      "imon_terminal_v": 0.0
+    },
+    {
+      "cmd_v": 3,
+      "cmd_kv": 37.5,
+      "vmon_pin_v": 0.0,
+      "vmon_terminal_v": 1.999,
+      "imon_pin_v": 0.0,
+      "imon_terminal_v": 0.0
+    },
+    {
+      "cmd_v": 4,
+      "cmd_kv": 50.0,
+      "vmon_pin_v": 0.0,
+      "vmon_terminal_v": 2.665,
+      "imon_pin_v": 0.0,
+      "imon_terminal_v": 0.0
+    },
+    {
+      "cmd_v": 5,
+      "cmd_kv": 62.5,
+      "vmon_pin_v": 0.0,
+      "vmon_terminal_v": 3.3295,
+      "imon_pin_v": 0.0,
+      "imon_terminal_v": 0.0
+    },
+    {
+      "cmd_v": 6,
+      "cmd_kv": 75.0,
+      "vmon_pin_v": 0.0,
+      "vmon_terminal_v": 3.995,
+      "imon_pin_v": 0.0,
+      "imon_terminal_v": 0.0
+    },
+    {
+      "cmd_v": 7,
+      "cmd_kv": 87.5,
+      "vmon_pin_v": 0.0,
+      "vmon_terminal_v": 4.659,
+      "imon_pin_v": 0.0,
+      "imon_terminal_v": 0.0
+    },
+    {
+      "cmd_v": 8,
+      "cmd_kv": 100.0,
+      "vmon_pin_v": 0.0,
+      "vmon_terminal_v": 5.322,
+      "imon_pin_v": 0.0,
+      "imon_terminal_v": 0.0
+    },
+    {
+      "cmd_v": 9,
+      "cmd_kv": 112.5,
+      "vmon_pin_v": 0.0,
+      "vmon_terminal_v": 5.987,
+      "imon_pin_v": 0.0,
+      "imon_terminal_v": 0.0
+    },
+    {
+      "cmd_v": 10,
+      "cmd_kv": 125.0,
+      "vmon_pin_v": 0.0,
+      "vmon_terminal_v": 6.65,
+      "imon_pin_v": 0.0,
+      "imon_terminal_v": 0.0
+    }
+  ],
+  "vmon": {
+    "divider_ratio_slope": 0.0,
+    "intercept": 0.0,
+    "r_squared": 0.0,
+    "full_scale_terminal_v_at_5v_pin": 0.0
+  },
+  "imon": {
+    "divider_ratio_slope": 0.0,
+    "intercept": 0.0,
+    "r_squared": 0.0,
+    "full_scale_terminal_v_at_5v_pin": 0.0
+  }
+}

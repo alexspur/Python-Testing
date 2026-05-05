@@ -50,6 +50,10 @@ class NumatoRelayController:
             for pin in (0, 2, 3, 4, 5):
                 self._send_command(f"gpio clear {pin}\r")
 
+            # Ensure all relays start OFF
+            for ch in range(self.NUM_CHANNELS):
+                self._send_command(f"relay off {ch}\r")
+
             return True
         except Exception as e:
             self.ser = None

@@ -1,0 +1,12 @@
+timestamp_sec,datetime,event_type,source,param1,param2,param3,param4,notes
+5.288476,2026-03-10 17:30:41.069,INFO,SYSTEM,,,,,GUI started successfully
+65.012081,2026-03-10 17:31:40.792,ARDUINO_SWITCH,Arduino,0,1,,,DO00 ON
+65.401223,2026-03-10 17:31:41.182,ARDUINO_SWITCH,Arduino,0,0,,,DO00 OFF
+65.970952,2026-03-10 17:31:41.751,ARDUINO_SWITCH,Arduino,0,1,,,DO00 ON
+66.473899,2026-03-10 17:31:42.254,ARDUINO_SWITCH,Arduino,0,0,,,DO00 OFF
+87.802339,2026-03-10 17:32:03.583,ERROR,WJ1,,,,,WJPowerSupply not connected
+87.803660,2026-03-10 17:32:03.584,ERROR,WJ2,,,,,WJPowerSupply not connected
+88.845069,2026-03-10 17:32:04.625,ERROR,WJ1,,,,,WJPowerSupply not connected
+88.846483,2026-03-10 17:32:04.627,ERROR,WJ2,,,,,WJPowerSupply not connected
+91.031389,2026-03-10 17:32:06.812,ERROR,WJ1,,,,,WJPowerSupply not connected
+91.033038,2026-03-10 17:32:06.813,ERROR,WJ2,,,,,WJPowerSupply not connected

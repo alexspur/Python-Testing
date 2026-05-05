@@ -1,0 +1,4 @@
+timestamp_sec,datetime,event_type,source,param1,param2,param3,param4,notes
+3.694815,2026-03-10 17:21:10.568,INFO,SYSTEM,,,,,GUI started successfully
+193.333176,2026-03-10 17:24:20.206,ERROR,Arduino,,,,,Arduino not connected
+223.114582,2026-03-10 17:24:49.988,ERROR,Arduino,,,,,Arduino not connected
