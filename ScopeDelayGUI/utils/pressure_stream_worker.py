@@ -132,28 +132,33 @@ class PressureStreamWorker(QThread):
                     time.sleep(0.05)
                     continue
 
-                # Read a line from serial
+                # Read a line from serial via the controller's thread-safe
+                # readline so we share the lock with set_pressure_voltage /
+                # set_digital_output / glassman_send_portenta. Otherwise the
+                # GUI thread's write+read can race with this thread's read
+                # and one of them ends up with a sliced response.
                 try:
-                    line = self.arduino.serial.readline().decode(errors="ignore").strip()
+                    line = self.arduino.readline()
                 except Exception as e:
                     self.error_signal.emit(f"Serial read error: {e}")
                     time.sleep(0.1)
                     continue
 
-                # Parse DATA format:
-                # DATA,count,mA0,mA1,raw2,measured_psi,target_psi,voltage,expected_psi
+                # Parse DATA format (firmware after 2026-05-27 AI2 → 0-10 V switch):
+                # DATA,count,mA0,mA1,ai2_v,measured_psi,target_psi,voltage,expected_psi,...
+                # Field 4 is now a FLOAT (AI2 voltage) instead of an INT (raw ADC).
                 if line.startswith("DATA,"):
                     try:
                         parts = line.split(",")
                         if len(parts) >= 9:
-                            (_, count_str, mA0_str, mA1_str, raw2_str,
+                            (_, count_str, mA0_str, mA1_str, ai2_v_str,
                              measured_psi_str, target_psi_str, voltage_str,
                              expected_psi_str) = parts[:9]
 
                             count = int(count_str)
                             mA0 = float(mA0_str)
                             mA1 = float(mA1_str)
-                            raw_adc = int(raw2_str)
+                            ai2_v = float(ai2_v_str)               # was int(raw2)
                             measured_psi = float(measured_psi_str)
                             target_psi = float(target_psi_str)
                             voltage = float(voltage_str)
@@ -163,14 +168,16 @@ class PressureStreamWorker(QThread):
                             psi0 = PressureCalibration.mA_to_psi(mA0)
                             psi1 = PressureCalibration.mA_to_psi(mA1)
 
-                            # Store latest data
+                            # Store latest data. raw_adc field is now the AI2
+                            # voltage rounded to an int for backwards compat
+                            # with consumers that read raw_adc (none currently).
                             self._latest_data = PressureData(
                                 count=count,
                                 mA0=mA0,
                                 mA1=mA1,
                                 psi0=psi0,
                                 psi1=psi1,
-                                raw_adc=raw_adc,
+                                raw_adc=int(ai2_v * 1000),
                                 measured_psi=measured_psi,
                                 target_psi=target_psi,
                                 voltage=voltage,
@@ -179,7 +186,7 @@ class PressureStreamWorker(QThread):
 
                             # Emit signals (measured_psi is the calibrated sensor reading)
                             self.data_signal.emit(psi0, psi1, measured_psi, voltage)
-                            self.raw_data_signal.emit(mA0, mA1, raw_adc, measured_psi, voltage)
+                            self.raw_data_signal.emit(mA0, mA1, int(ai2_v * 1000), measured_psi, voltage)
 
                     except (ValueError, IndexError):
                         # Malformed line, skip it

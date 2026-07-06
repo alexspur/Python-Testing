@@ -278,56 +278,84 @@ class RigolScope:
         
         return time_array, voltage
         
-    def _read_channel_data_raw(self, channel: int, start: int = 1, stop: int = None) -> tuple:
+    def _get_memory_depth(self) -> int:
+        """Return the acquisition memory depth (total RAW points available).
+
+        Falls back to the preamble's point count if :ACQuire:MDEPth? is 'AUTO'
+        or unparseable."""
+        try:
+            resp = self._query(':ACQuire:MDEPth?')
+            return int(float(resp))
+        except Exception:
+            try:
+                return int(self._get_waveform_preamble()['points'])
+            except Exception:
+                return 0
+
+    def _read_channel_data_raw(self, channel: int, chunk_size: int = 250000) -> tuple:
         """
-        Read waveform data from internal memory (RAW mode).
-        
-        Note: Oscilloscope must be stopped before reading RAW data.
-        
+        Read the full internal memory for a channel (RAW mode), in chunks.
+
+        Rigol scopes cap how many points a single :WAVeform:DATA? returns, and a
+        too-large single transfer times out mid-read and yields TRUNCATED data
+        (e.g. 552950/143350 points instead of 1,000,000). So we walk the memory
+        with explicit STARt/STOP windows and concatenate until every point is in.
+
+        Note: the oscilloscope must be stopped before reading RAW data.
+
         Args:
             channel: Channel number (1-4)
-            start: Start point (1-based index)
-            stop: Stop point (if None, reads all available)
-            
+            chunk_size: Points to request per transfer (Rigol BYTE-mode safe max)
+
         Returns:
             Tuple of (time_array, voltage_array) as numpy arrays
         """
-        # Set waveform source to the specified channel
+        # Set waveform source, RAW mode (internal memory), BYTE format.
         self._write(f':WAVeform:SOURce CHANnel{channel}')
-        
-        # Set to RAW mode (read internal memory)
         self._write(':WAVeform:MODE RAW')
-        
-        # Set byte format for data transfer
         self._write(':WAVeform:FORMat BYTE')
-        
-        # Set start and stop points if specified
-        self._write(f':WAVeform:STARt {start}')
-        if stop is not None:
-            self._write(f':WAVeform:STOP {stop}')
-            
-        # Get the preamble with scaling factors
+
+        # Total points to read out of memory.
+        total = self._get_memory_depth()
+        if total <= 0:
+            return np.array([]), np.array([])
+
+        # Read the scaling preamble once (yinc/xinc are constant across chunks).
+        self._write(':WAVeform:STARt 1')
+        self._write(f':WAVeform:STOP {min(chunk_size, total)}')
         preamble = self._get_waveform_preamble()
-        
-        # Read the waveform data
-        raw_data = self._query_binary(':WAVeform:DATA?')
-        
-        # Convert bytes to numpy array
-        raw_values = np.frombuffer(raw_data, dtype=np.uint8)
-        
-        # Convert to voltage using preamble parameters
+
+        # Walk the memory in chunks. Advance by the number of points actually
+        # returned so a short read can't desync the window.
+        chunks = []
+        start = 1
+        while start <= total:
+            stop = min(start + chunk_size - 1, total)
+            self._write(f':WAVeform:STARt {start}')
+            self._write(f':WAVeform:STOP {stop}')
+            raw = self._query_binary(':WAVeform:DATA?')
+            vals = np.frombuffer(raw, dtype=np.uint8)
+            if vals.size == 0:
+                break  # nothing came back — avoid an infinite loop
+            chunks.append(vals)
+            start += vals.size
+
+        if chunks:
+            raw_values = np.concatenate(chunks)
+        else:
+            raw_values = np.array([], dtype=np.uint8)
+
+        # Convert ADC counts to voltage using preamble parameters.
         yinc = preamble['yincrement']
         yorig = preamble['yorigin']
         yref = preamble['yreference']
-        
         voltage = (raw_values.astype(float) - yref - yorig) * yinc
-        
-        # Generate time array
+
+        # Generate the time array from the timebase.
         xinc = preamble['xincrement']
         xorig = preamble['xorigin']
-        
         time_array = xorig + np.arange(len(voltage)) * xinc
-        
+
         return time_array, voltage
         
     def capture_two_channels(self, ch1: int = 1, ch2: int = 2) -> tuple:

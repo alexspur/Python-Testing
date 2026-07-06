@@ -1,0 +1,12 @@
+﻿logs/
+*.csv
+*.mat
+*.fig
+*.zip
+*.7z
+*.mp4
+*.avi
+*.tdms
+__pycache__/
+*.pyc
+.venv/

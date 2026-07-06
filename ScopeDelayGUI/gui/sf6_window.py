@@ -14,7 +14,8 @@ import pyqtgraph as pg
 
 
 class SF6Window(QMainWindow):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, pressure_gauge_min=0, pressure_gauge_max=100,
+                 pressure_control_max=120.0, pressure_presets=None):
         super().__init__(parent)
         self.setWindowTitle("SF6 Marx Generator Control + WJ Power Supplies")
 
@@ -56,10 +57,12 @@ class SF6Window(QMainWindow):
         sf6_layout.setContentsMargins(0, 0, 0, 0)
         sf6_container.setLayout(sf6_layout)
 
-        self.sf6_panel = SF6Panel()
+        self.sf6_panel = SF6Panel(pressure_min=pressure_gauge_min,
+                                  pressure_max=pressure_gauge_max)
         sf6_layout.addWidget(self.sf6_panel)
 
-        self.pressure_panel = PressureControlPanel()
+        self.pressure_panel = PressureControlPanel(max_psi=pressure_control_max,
+                                                   presets=pressure_presets)
         sf6_layout.addWidget(self.pressure_panel)
 
         top_layout.addWidget(sf6_container, stretch=1)
@@ -88,14 +91,15 @@ class SF6Window(QMainWindow):
         self.kv1_gauge = GaugeWidget(min_value=0, max_value=100, label="kV", size=120)
         self.ma1_gauge = GaugeWidget(min_value=0, max_value=6, label="mA", size=120)
 
-        # WJ2 gauges
-        self.kv2_gauge = GaugeWidget(min_value=0, max_value=100, label="kV", size=120)
-        self.ma2_gauge = GaugeWidget(min_value=0, max_value=6, label="mA", size=120)
+        # "Positive" gauges now show the Glassman (Mega) output instead of
+        # the unused positive WJ supply: 0-125 kV, 0-2 mA full scale.
+        self.kv2_gauge = GaugeWidget(min_value=0, max_value=125, label="kV", size=120)
+        self.ma2_gauge = GaugeWidget(min_value=0, max_value=2, label="mA", size=120)
 
         gauges_layout.addWidget(QLabel("Negative:"), 0, 0)
         gauges_layout.addWidget(self.kv1_gauge, 0, 1)
         gauges_layout.addWidget(self.ma1_gauge, 0, 2)
-        gauges_layout.addWidget(QLabel("Positive:"), 1, 0)
+        gauges_layout.addWidget(QLabel("Positive (Glassman):"), 1, 0)
         gauges_layout.addWidget(self.kv2_gauge, 1, 1)
         gauges_layout.addWidget(self.ma2_gauge, 1, 2)
         wj_layout.addLayout(gauges_layout)
@@ -107,7 +111,7 @@ class SF6Window(QMainWindow):
         self.program_voltage = QDoubleSpinBox()
         self.program_voltage.setRange(0, 100)
         self.program_voltage.setDecimals(2)
-        self.program_voltage.setValue(50.0)
+        self.program_voltage.setValue(60.0)   # default 60 kV (both supplies on startup)
         program_row.addWidget(self.program_voltage)
 
         program_row.addWidget(QLabel("Current (mA):"))
@@ -214,6 +218,12 @@ class SF6Window(QMainWindow):
         self.ma1_curve = self.wj_plot_widget.plot(pen=pg.mkPen('c', width=5), name="WJ1 mA")
         self.kv2_curve = self.wj_plot_widget.plot(pen=pg.mkPen('r', width=5), name="WJ2 kV")
         self.ma2_curve = self.wj_plot_widget.plot(pen=pg.mkPen('m', width=5), name="WJ2 mA")
+        # Glassman live readback from the Mega
+        self.kv_gm_curve = self.wj_plot_widget.plot(pen=pg.mkPen('g', width=5), name="Glassman kV")
+        self.ma_gm_curve = self.wj_plot_widget.plot(pen=pg.mkPen((255, 165, 0), width=5), name="Glassman mA")
+        # Marx rail charge monitors from the Mega (A10/A11, 0-100 kV)
+        self.marx_pos_curve = self.wj_plot_widget.plot(pen=pg.mkPen((30, 100, 200), width=3, style=Qt.PenStyle.DashLine), name="Marx+ kV")
+        self.marx_neg_curve = self.wj_plot_widget.plot(pen=pg.mkPen((200, 30, 100), width=3, style=Qt.PenStyle.DashLine), name="Marx- kV")
 
         # Style legend with bold black font
         legend = self.wj_plot_widget.plotItem.legend

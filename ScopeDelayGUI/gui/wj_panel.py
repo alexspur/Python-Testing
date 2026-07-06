@@ -106,7 +106,7 @@
 from PyQt6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QDoubleSpinBox, QFormLayout,
-    QComboBox
+    QComboBox, QCheckBox
 )
 
 # from PyQt6.QtWidgets import (
@@ -133,7 +133,7 @@ class WJPanel(QGroupBox):
         self.voltage = QDoubleSpinBox()
         self.voltage.setRange(0, 100)
         self.voltage.setDecimals(2)
-        self.voltage.setValue(50.0)   # default 50 kV
+        self.voltage.setValue(60.0)   # default 60 kV (both supplies on startup)
         prog_row.addWidget(self.voltage)
 
         prog_row.addWidget(QLabel("Set Current (mA):"))
@@ -164,6 +164,13 @@ class WJPanel(QGroupBox):
 
         layout.addLayout(ctrl_row)
 
+        # When checked, HV ON first raises the dome to the HV-on pressure and
+        # waits for it to settle before enabling HV. Uncheck to skip that and
+        # enable HV immediately (e.g. when the dome is already pressurized).
+        self.chk_prepressurize = QCheckBox("Pre-pressurize dome on HV ON")
+        self.chk_prepressurize.setChecked(True)
+        layout.addWidget(self.chk_prepressurize)
+
         # ─────────────────────────────────────────────
         # INDIVIDUAL WJ UNIT ROWS
         # ─────────────────────────────────────────────
@@ -181,6 +188,85 @@ class WJPanel(QGroupBox):
             grid.addWidget(row.label_status, i, 5)
 
         layout.addLayout(grid)
+
+        # ─────────────────────────────────────────────
+        # GLASSMAN MEGA (HV monitor + HV ENABLE relay)
+        # Portenta is the same as the SF6 Arduino, no UI here.
+        # ─────────────────────────────────────────────
+        gm_row = QHBoxLayout()
+        gm_row.addWidget(QLabel("Glassman Mega:"))
+        self.glassman_mega_port_combo = QComboBox()
+        self.glassman_mega_port_combo.setMinimumWidth(100)
+        gm_row.addWidget(self.glassman_mega_port_combo)
+        self.btn_glassman_mega_connect = QPushButton("Connect")
+        gm_row.addWidget(self.btn_glassman_mega_connect)
+        self.btn_glassman_mega_disconnect = QPushButton("Disconnect")
+        gm_row.addWidget(self.btn_glassman_mega_disconnect)
+        self.glassman_mega_lamp = StatusLamp(size=14)
+        gm_row.addWidget(self.glassman_mega_lamp)
+        self.glassman_mega_status = QLabel("Not Connected")
+        gm_row.addWidget(self.glassman_mega_status)
+        gm_row.addStretch()
+        layout.addLayout(gm_row)
+
+        # Glassman live readback (populated by the Mega reader thread)
+        mon_row = QHBoxLayout()
+        mon_row.addWidget(QLabel("Glassman Out:"))
+        self.lbl_gm_kv = QLabel("- kV")
+        self.lbl_gm_kv.setStyleSheet("font-weight:bold;color:#1565C0;")
+        mon_row.addWidget(self.lbl_gm_kv)
+        self.lbl_gm_ma = QLabel("- mA")
+        self.lbl_gm_ma.setStyleSheet("font-weight:bold;color:#C62828;")
+        mon_row.addWidget(self.lbl_gm_ma)
+        mon_row.addSpacing(12)
+        mon_row.addWidget(QLabel("V_MON:"))
+        self.lbl_gm_vmon = QLabel("- V")
+        mon_row.addWidget(self.lbl_gm_vmon)
+        mon_row.addWidget(QLabel("I_MON:"))
+        self.lbl_gm_imon = QLabel("- V")
+        mon_row.addWidget(self.lbl_gm_imon)
+        mon_row.addSpacing(12)
+        self.lbl_gm_hv = QLabel("HV: -")
+        self.lbl_gm_hv.setStyleSheet("font-weight:bold;")
+        mon_row.addWidget(self.lbl_gm_hv)
+        self.btn_glassman_calibrate = QPushButton("Calibrate V/I")
+        self.btn_glassman_calibrate.setStyleSheet("background-color:#FF9800;color:white;font-weight:bold;padding:2px 8px;")
+        mon_row.addWidget(self.btn_glassman_calibrate)
+        mon_row.addStretch()
+        layout.addLayout(mon_row)
+
+        pin_row = QHBoxLayout()
+        pin_row.addWidget(QLabel("V_MON pin:"))
+        self.lbl_gm_vmon_pin = QLabel("- V")
+        pin_row.addWidget(self.lbl_gm_vmon_pin)
+        pin_row.addSpacing(12)
+        pin_row.addWidget(QLabel("I_MON pin:"))
+        self.lbl_gm_imon_pin = QLabel("- V")
+        pin_row.addWidget(self.lbl_gm_imon_pin)
+        pin_row.addStretch()
+        layout.addLayout(pin_row)
+
+        # Marx rail charge monitors (Mega A10/A11, 0-5 V pin → 0-100 kV)
+        marx_row = QHBoxLayout()
+        marx_row.addWidget(QLabel("Marx Charge:"))
+        marx_row.addWidget(QLabel("Marx+:"))
+        self.lbl_gm_marx_pos = QLabel("- kV")
+        self.lbl_gm_marx_pos.setStyleSheet("font-weight:bold;color:#1565C0;")
+        marx_row.addWidget(self.lbl_gm_marx_pos)
+        self.lbl_gm_marx_pos_pin = QLabel("(- V)")
+        self.lbl_gm_marx_pos_pin.setStyleSheet("color:#888;")
+        marx_row.addWidget(self.lbl_gm_marx_pos_pin)
+        marx_row.addSpacing(12)
+        marx_row.addWidget(QLabel("Marx-:"))
+        self.lbl_gm_marx_neg = QLabel("- kV")
+        self.lbl_gm_marx_neg.setStyleSheet("font-weight:bold;color:#C62828;")
+        marx_row.addWidget(self.lbl_gm_marx_neg)
+        self.lbl_gm_marx_neg_pin = QLabel("(- V)")
+        self.lbl_gm_marx_neg_pin.setStyleSheet("color:#888;")
+        marx_row.addWidget(self.lbl_gm_marx_neg_pin)
+        marx_row.addStretch()
+        layout.addLayout(marx_row)
+
         # ─────────────────────────────────────────────
         # OPTIONAL: Live plot button
         # ─────────────────────────────────────────────

@@ -38,58 +38,59 @@ class CSVExportWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
     
+    @staticmethod
+    def _common_time_axis(time_arrays):
+        """All channels on one scope share a single timebase, so emit ONE time
+        column instead of one per channel. Use the longest non-empty time array
+        as the axis (a disabled/empty channel has none of its own)."""
+        non_empty = [np.asarray(t) for t in time_arrays if len(t) > 0]
+        if not non_empty:
+            return np.array([])
+        return max(non_empty, key=len)
+
+    @staticmethod
+    def _pad_to(arr, length):
+        arr = np.asarray(arr, dtype=float)
+        if len(arr) < length:
+            return np.pad(arr, (0, length - len(arr)), constant_values=np.nan)
+        return arr
+
     def _export_two_channel(self):
         (t1, v1), (t2, v2) = self.data
         self.progress.emit(10)
-        
-        max_len = max(len(t1), len(t2))
-        
-        t1 = np.pad(t1, (0, max_len - len(t1)), constant_values=np.nan)
-        v1 = np.pad(v1, (0, max_len - len(v1)), constant_values=np.nan)
-        t2 = np.pad(t2, (0, max_len - len(t2)), constant_values=np.nan)
-        v2 = np.pad(v2, (0, max_len - len(v2)), constant_values=np.nan)
-        
+
+        time_axis = self._common_time_axis([t1, t2])
+        n = len(time_axis)
+
         self.progress.emit(30)
-        
+
         df = pd.DataFrame({
-            'Time_CH1 (s)': t1,
-            'Voltage_CH1 (V)': v1,
-            'Time_CH2 (s)': t2,
-            'Voltage_CH2 (V)': v2
+            'Time (s)': time_axis,
+            'Voltage_CH1 (V)': self._pad_to(v1, n),
+            'Voltage_CH2 (V)': self._pad_to(v2, n),
         })
-        
+
         self.progress.emit(50)
         df.to_csv(self.filename, index=False, float_format='%.9e')
         self.progress.emit(95)
-        
+
     def _export_four_channel(self):
         (t1, v1), (t2, v2), (t3, v3), (t4, v4) = self.data
         self.progress.emit(10)
-        
-        max_len = max(len(t1), len(t2), len(t3), len(t4))
-        
-        t1 = np.pad(t1, (0, max_len - len(t1)), constant_values=np.nan)
-        v1 = np.pad(v1, (0, max_len - len(v1)), constant_values=np.nan)
-        t2 = np.pad(t2, (0, max_len - len(t2)), constant_values=np.nan)
-        v2 = np.pad(v2, (0, max_len - len(v2)), constant_values=np.nan)
-        t3 = np.pad(t3, (0, max_len - len(t3)), constant_values=np.nan)
-        v3 = np.pad(v3, (0, max_len - len(v3)), constant_values=np.nan)
-        t4 = np.pad(t4, (0, max_len - len(t4)), constant_values=np.nan)
-        v4 = np.pad(v4, (0, max_len - len(v4)), constant_values=np.nan)
-        
+
+        time_axis = self._common_time_axis([t1, t2, t3, t4])
+        n = len(time_axis)
+
         self.progress.emit(35)
-        
+
         df = pd.DataFrame({
-            'Time_CH1 (s)': t1,
-            'Voltage_CH1 (V)': v1,
-            'Time_CH2 (s)': t2,
-            'Voltage_CH2 (V)': v2,
-            'Time_CH3 (s)': t3,
-            'Voltage_CH3 (V)': v3,
-            'Time_CH4 (s)': t4,
-            'Voltage_CH4 (V)': v4
+            'Time (s)': time_axis,
+            'Voltage_CH1 (V)': self._pad_to(v1, n),
+            'Voltage_CH2 (V)': self._pad_to(v2, n),
+            'Voltage_CH3 (V)': self._pad_to(v3, n),
+            'Voltage_CH4 (V)': self._pad_to(v4, n),
         })
-        
+
         self.progress.emit(60)
         df.to_csv(self.filename, index=False, float_format='%.9e')
         self.progress.emit(95)

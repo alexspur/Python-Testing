@@ -1,4 +1,0 @@
-timestamp_sec,datetime,event_type,source,param1,param2,param3,param4,notes
-3.018129,2026-02-19 15:25:50.062,INFO,SYSTEM,,,,,GUI started successfully
-128.243857,2026-02-19 15:27:55.288,ERROR,Arduino,,,,,Arduino not connected
-130.895604,2026-02-19 15:27:57.940,ERROR,Arduino,,,,,Arduino not connected
