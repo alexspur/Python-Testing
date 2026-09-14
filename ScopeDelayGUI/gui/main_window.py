@@ -16,23 +16,22 @@ from gui.wj_panel import WJPanel
 from gui.scope_plot_window import ScopePlotWindow
 from gui.wj_plot_window import WJPlotWindow
 from gui.numato_relay_panel import NumatoRelayPanel
-from gui.glassman_panel import GlassmanMegaReader, GlassmanCalibrationDialog
 from gui.laser_panel import LaserPanel
 
 from utils.logger import LogPanel
 from utils.status_lamp import StatusLamp
 from utils.serial_tools import list_serial_ports
 from utils.capture_single_worker import CaptureSingleWorker, CaptureFourChannelWorker
-from utils.connect_memory import load_memory, save_memory
+from utils.connect_memory import load_memory, save_memory, DEVICE_SIGNATURES
 from utils.data_logger import DataLogger
 from utils.csv_export_worker import CSVExportWorker
+from utils.pressure_worker import PressureWorker
 
 from instruments.dg535 import DG535Controller
 from instruments.bnc575 import BNC575Controller, SystemMode, TriggerMode, TriggerEdge
 from instruments.rigol import RigolScope
 from instruments.wj import WJPowerSupply
 from instruments.numato_relay import NumatoRelayController
-from instruments.glassman import GlassmanSerial
 
 
 class ScopeDelayMainWindow(QMainWindow):
@@ -45,7 +44,7 @@ class ScopeDelayMainWindow(QMainWindow):
     DEFAULT_AUTO_CONNECT = {
         "dg535":  True,
         "bnc575": True,
-        "mega":   True,   # Glassman / Marx Mega
+        "opta":   True,   # Opta pressure monitor (Modbus TCP)
         "relay":  True,   # Numato relay module
         "wj1":    True,   # negative WJ supply
         "wj2":    True,   # positive WJ supply
@@ -55,27 +54,20 @@ class ScopeDelayMainWindow(QMainWindow):
         "laser":  True,   # Quantel CFR laser (RS-232 over USB)
     }
 
-    def __init__(self, auto_connect=None, startup_pressure_psi=20.0,
-                 hv_on_pressure_psi=20.0, hv_on_delay_sec=3.0,
-                 auto_save_delay_sec=10.0, prepressurize_on_hv_on=True,
+    def __init__(self, auto_connect=None, auto_save_delay_sec=10.0,
                  pressure_gauge_min=0.0, pressure_gauge_max=100.0,
-                 pressure_control_max=120.0, pressure_presets=None,
-                 startup_charge_kv=60.0):
+                 startup_charge_kv=60.0, opta_host="192.168.10.20",
+                 opta_port=502, opta_poll_ms=200):
         super().__init__()
 
         # Startup "Set Voltage" (kV) preloaded into both supplies' voltage boxes
-        # (main WJ panel + SF6 window). HV ON sends this kV to both the WJ
-        # supplies and the Glassman. Configurable from main.py.
+        # (main WJ panel + SF6 window). HV ON sends this kV to the WJ supplies.
+        # Configurable from main.py.
         self.startup_charge_kv = startup_charge_kv
 
-        # Default state of the "Pre-pressurize dome on HV ON" checkbox, the dome
-        # pressure gauge range (PSI), the pressure setpoint max, and the quick
-        # preset values. All configurable from main.py.
-        self._prepressurize_default = bool(prepressurize_on_hv_on)
+        # Dome pressure gauge range (PSI), configurable from main.py.
         self.pressure_gauge_min = pressure_gauge_min
         self.pressure_gauge_max = pressure_gauge_max
-        self.pressure_control_max = pressure_control_max
-        self.pressure_presets = pressure_presets
 
         # Merge any caller overrides over the defaults, coercing to bool so
         # 1/0/"on" style values behave.
@@ -83,16 +75,6 @@ class ScopeDelayMainWindow(QMainWindow):
         if auto_connect:
             for k, v in auto_connect.items():
                 self.auto_connect_flags[k] = bool(v)
-
-        # Pressure the Mega is commanded to on startup (None disables it).
-        self.startup_pressure_psi = startup_pressure_psi
-
-        # On HV ON: raise the dome to hv_on_pressure_psi, wait hv_on_delay_sec
-        # for it to settle, THEN actually enable HV. _hv_on_pending guards the
-        # countdown so a repeat press is ignored and an HV-off press cancels it.
-        self.hv_on_pressure_psi = hv_on_pressure_psi
-        self.hv_on_delay_sec = hv_on_delay_sec
-        self._hv_on_pending = False
 
         self.setWindowTitle("Scope + Delay + SF6 Control")
         self.setGeometry(100, 100, 1700, 900)
@@ -122,8 +104,6 @@ class ScopeDelayMainWindow(QMainWindow):
 
         # Panel now supports 2 units
         self.wj_panel = WJPanel(num_units=2)
-        # Apply the configured default for the HV-ON pre-pressurize toggle.
-        self.wj_panel.chk_prepressurize.setChecked(self._prepressurize_default)
         # Preload the configured startup charge voltage.
         self.wj_panel.voltage.setValue(self.startup_charge_kv)
 
@@ -134,14 +114,16 @@ class ScopeDelayMainWindow(QMainWindow):
 
         self.numato_relay = NumatoRelayController()
 
-        # The Mega owns everything now (Glassman monitor/HV/setpoints, SF6
-        # dome pressure on A5, Parker regulator on DAC CH1, Marx rail
-        # monitors). The old Portenta (self.arduino) is gone.
-        self.glassman_mega = GlassmanSerial()
-        self.glassman_mega_reader: GlassmanMegaReader | None = None
-        self.glassman_vmon_pin = 0.0
-        self.glassman_imon_pin = 0.0
-        self.glassman_hv_on = False  # last HV state from the Mega, for logging
+        # SF6 dome pressure comes from the Opta over Modbus TCP. All Modbus
+        # calls run on PressureWorker's QThread (see _start_pressure_worker).
+        self.opta_host = opta_host
+        self.opta_port = opta_port
+        self.opta_poll_ms = opta_poll_ms
+        self.pressure_thread: QThread | None = None
+        self.pressure_worker: PressureWorker | None = None
+        self._opta_link_up = False
+        self._opta_fault = None   # None = no reading yet, "" = sensor in range
+        self._latest_psi = None   # last in-range psi; None when not trustworthy
 
         # Relay polling state
         self.relay_polling = False
@@ -171,8 +153,6 @@ class ScopeDelayMainWindow(QMainWindow):
         self.sf6_window = SF6Window(
             pressure_gauge_min=self.pressure_gauge_min,
             pressure_gauge_max=self.pressure_gauge_max,
-            pressure_control_max=self.pressure_control_max,
-            pressure_presets=self.pressure_presets,
         )
         # Keep the SF6 window's voltage box in sync with the configured default.
         self.sf6_window.program_voltage.setValue(self.startup_charge_kv)
@@ -195,6 +175,9 @@ class ScopeDelayMainWindow(QMainWindow):
 
         # Start WJ reader threads and connect to SF6 window plot
         self.start_wj_readers()
+
+        # Opta pressure worker thread (idles until auto-connect or Connect)
+        self._start_pressure_worker()
 
         # Position and show all windows on startup
         self.position_and_show_windows()
@@ -253,178 +236,138 @@ class ScopeDelayMainWindow(QMainWindow):
                     combo.setCurrentText(last_port)
                 combo.blockSignals(False)
 
-        # Glassman Mega COM combo (Portenta is the shared SF6 Arduino — no combo here)
-        gm_combo = self.wj_panel.glassman_mega_port_combo
-        prev = gm_combo.currentText()
-        gm_combo.clear()
-        gm_combo.addItems(ports)
-        last_mega = self.conn.get("Glassman_Mega_COM", None)
-        if prev in ports:
-            gm_combo.setCurrentText(prev)
-        elif last_mega and last_mega in ports:
-            gm_combo.setCurrentText(last_mega)
-
     # ------------------------------------------------------------------
-    #  Glassman / Mega helper (the Mega is the only controller now)
+    #  Opta pressure monitor (Modbus TCP, polled on its own QThread)
     # ------------------------------------------------------------------
-    def glassman_send_mega(self, cmd: str):
-        if not self.glassman_mega.is_connected:
-            self.log("[Glassman] Mega not connected")
+    def _start_pressure_worker(self):
+        """Create the Opta worker and park it on its own QThread. The thread
+        idles until request_connect; every Modbus call runs there."""
+        self.pressure_thread = QThread(self)
+        self.pressure_worker = PressureWorker(
+            self.opta_host, port=self.opta_port, poll_ms=self.opta_poll_ms)
+        self.pressure_worker.moveToThread(self.pressure_thread)
+
+        w = self.pressure_worker
+        w.data_ready.connect(self._on_pressure_data)
+        w.link_up.connect(self._on_pressure_link_up)
+        w.link_lost.connect(self._on_pressure_link_lost)
+        w.calibration_ready.connect(self._on_pressure_calibration)
+        w.command_done.connect(self._on_pressure_command_done)
+        w.command_failed.connect(self._on_pressure_command_failed)
+        self.pressure_thread.finished.connect(w.deleteLater)
+        self.pressure_thread.start()
+
+        panel = self.sf6_window.sf6_panel
+        panel.set_host(f"{self.opta_host}:{self.opta_port}")
+        panel.btn_connect.clicked.connect(self.on_pressure_connect)
+        panel.btn_disconnect.clicked.connect(self.on_pressure_disconnect)
+        panel.btn_set_full_scale.clicked.connect(self.on_pressure_set_full_scale)
+        panel.btn_zero_here.clicked.connect(self.on_pressure_zero_here)
+
+    def on_pressure_connect(self):
+        # Also serves as Reconnect: the worker closes any old socket first.
+        self._opta_link_up = False
+        self._invalidate_pressure()
+        self.sf6_window.sf6_panel.set_link_state("connecting")
+        self.log(f"[Opta] Connecting to {self.opta_host}:{self.opta_port}...")
+        self.pressure_worker.request_connect.emit()
+
+    def on_pressure_disconnect(self):
+        self._opta_link_up = False
+        self._invalidate_pressure()
+        self.pressure_worker.request_disconnect.emit()
+        self.sf6_window.sf6_panel.set_link_state("down")
+        self.log("[Opta] Disconnected")
+
+    def _invalidate_pressure(self):
+        """Forget the last reading so nothing (interlock, logs) trusts it."""
+        self._latest_psi = None
+        self._opta_fault = None
+
+    def _on_pressure_link_up(self, where):
+        self._opta_link_up = True
+        self.sf6_window.sf6_panel.set_link_state("up")
+        self.set_status("green", "Opta pressure connected")
+        self.log(f"[Opta] Connected to {where}")
+        self.data_logger.log_info("Opta", f"connected to {where}")
+
+    def _on_pressure_link_lost(self, reason):
+        self._opta_link_up = False
+        self._invalidate_pressure()
+        self.sf6_window.sf6_panel.set_link_state("lost", reason)
+        self.set_status("red", "Opta pressure link lost")
+        self.log(f"[Opta] LINK LOST: {reason}")
+        self.data_logger.log_error("Opta", f"link lost: {reason}")
+
+    def _on_pressure_data(self, d: dict):
+        # Drop a snapshot that was already queued when the link went down.
+        if not self._opta_link_up:
             return
-        try:
-            self.glassman_mega.send(cmd)
-            self.log(f"[Glassman->MEGA] {cmd}")
-        except Exception as e:
-            self.log(f"[Glassman] Mega send error: {e}")
+        self.sf6_window.sf6_panel.show_snapshot(d)
 
-    def on_glassman_mega_connect(self):
-        port = self.wj_panel.glassman_mega_port_combo.currentText()
-        if not port or port == "No COM ports":
-            self.log("[Glassman] No port selected for Mega")
+        if d["under_range"]:
+            fault = "under range"
+        elif d["over_range"]:
+            fault = "over range"
+        else:
+            fault = ""
+        if fault != self._opta_fault:
+            if fault:
+                self.log(f"[Opta] SENSOR FAULT: input {fault} (I1 = {d['volts']:.3f} V)")
+                self.data_logger.log_error("Opta", f"sensor {fault} at {d['volts']:.3f} V")
+            elif self._opta_fault:
+                self.log(f"[Opta] Sensor back in range ({d['psi']:.2f} psi)")
+            self._opta_fault = fault
+
+        # A dead or over-range sensor must not pass for a real pressure.
+        self._latest_psi = None if fault else d["psi"]
+        self.data_logger.log_opta_pressure(
+            d["psi"], d["volts"], d["counts"], d["under_range"], d["over_range"])
+
+    def _on_pressure_calibration(self, cal: dict):
+        self.sf6_window.sf6_panel.show_calibration(cal)
+        self.log(f"[Opta] Calibration loaded: full scale {cal['full_scale_psi']:.1f} psi, "
+                 f"zero offset {cal['zero_offset_mv']} mV, averaging {cal['avg_samples']}")
+
+    def _on_pressure_command_done(self, msg):
+        self.log(f"[Opta] {msg}")
+        self.data_logger.log_info("Opta", msg)
+
+    def _on_pressure_command_failed(self, msg):
+        self.log(f"[Opta ERROR] {msg}")
+        self.data_logger.log_error("Opta", msg)
+        self.error_popup("Opta Calibration Error", msg)
+
+    def on_pressure_set_full_scale(self):
+        if not self._opta_link_up:
+            self.error_popup("Opta", "Not connected.")
             return
-        try:
-            self.glassman_mega.connect(port)
-            self.wj_panel.glassman_mega_lamp.set_status("green", "Connected")
-            self.wj_panel.glassman_mega_status.setText(f"Mega on {port}")
-            save_memory("Glassman_Mega_COM", port)
-            self.log(f"[Glassman] Mega connected on {port}")
-            self._start_glassman_mega_reader()
-        except Exception as e:
-            self.wj_panel.glassman_mega_lamp.set_status("red", "Not Connected")
-            self.wj_panel.glassman_mega_status.setText("Connect failed")
-            self.log(f"[Glassman] Mega connect failed: {e}")
+        psi = self.sf6_window.sf6_panel.spin_full_scale.value()
+        self.log(f"[Opta] Setting full scale to {psi:.1f} psi...")
+        self.pressure_worker.request_full_scale.emit(psi)
 
-    def on_glassman_mega_disconnect(self):
-        self._stop_glassman_mega_reader()
-        self.glassman_mega.close()
-        self.wj_panel.glassman_mega_lamp.set_status("red", "Disconnected")
-        self.wj_panel.glassman_mega_status.setText("Not Connected")
-        self.log("[Glassman] Mega disconnected")
-
-    def _start_glassman_mega_reader(self):
-        if self.glassman_mega_reader is not None:
+    def on_pressure_zero_here(self):
+        if not self._opta_link_up:
+            self.error_popup("Opta", "Not connected.")
             return
-        self.glassman_mega_reader = GlassmanMegaReader(self.glassman_mega)
-        self.glassman_mega_reader.parsed.connect(self._on_glassman_mega_parsed)
-        self.glassman_mega_reader.raw_line.connect(lambda s: self.log(f"[Glassman MEGA] {s}"))
-        self.glassman_mega_reader.start()
-
-    def _stop_glassman_mega_reader(self):
-        if self.glassman_mega_reader is not None:
-            self.glassman_mega_reader.stop()
-            self.glassman_mega_reader = None
-
-    def _on_glassman_mega_parsed(self, d: dict):
-        if "vmon_pin" in d:
-            self.glassman_vmon_pin = d["vmon_pin"]
-            self.wj_panel.lbl_gm_vmon_pin.setText(f"{d['vmon_pin']:.4f} V")
-        if "imon_pin" in d:
-            self.glassman_imon_pin = d["imon_pin"]
-            self.wj_panel.lbl_gm_imon_pin.setText(f"{d['imon_pin']:.4f} V")
-        if "vmon" in d:
-            self.wj_panel.lbl_gm_vmon.setText(f"{d['vmon']:.3f} V")
-        if "imon" in d:
-            self.wj_panel.lbl_gm_imon.setText(f"{d['imon']:.3f} V")
-        if "marx_pos_kv" in d:
-            self.wj_panel.lbl_gm_marx_pos.setText(f"{d['marx_pos_kv']:.2f} kV")
-        if "marx_pos_pin" in d:
-            self.wj_panel.lbl_gm_marx_pos_pin.setText(f"({d['marx_pos_pin']:.4f} V)")
-        if "marx_neg_kv" in d:
-            self.wj_panel.lbl_gm_marx_neg.setText(f"{d['marx_neg_kv']:.2f} kV")
-        if "marx_neg_pin" in d:
-            self.wj_panel.lbl_gm_marx_neg_pin.setText(f"({d['marx_neg_pin']:.4f} V)")
-        if "kv" in d:
-            self.wj_panel.lbl_gm_kv.setText(f"{d['kv']:.2f} kV")
-            # The "Positive" gauge in the WJ controls now shows the Glassman
-            # (Mega) output instead of the unused positive WJ supply.
-            try:
-                self.sf6_window.kv2_gauge.update_value(d["kv"])
-            except Exception:
-                pass
-        if "ma" in d:
-            self.wj_panel.lbl_gm_ma.setText(f"{d['ma']:.4f} mA")
-            try:
-                self.sf6_window.ma2_gauge.update_value(d["ma"])
-            except Exception:
-                pass
-        if "hv_on" in d:
-            self.glassman_hv_on = d["hv_on"]
-            if d["hv_on"]:
-                self.wj_panel.lbl_gm_hv.setText("HV: ON")
-                self.wj_panel.lbl_gm_hv.setStyleSheet("font-weight:bold;color:green;")
-            else:
-                self.wj_panel.lbl_gm_hv.setText("HV: OFF")
-                self.wj_panel.lbl_gm_hv.setStyleSheet("font-weight:bold;color:red;")
-
-        # Persist Glassman readback + Marx charge to the experiment CSV. The
-        # Mega prints a full line ~2 Hz, so this logs at that cadence (same
-        # idea as the WJ reader's log_wj_voltage).
-        if "kv" in d or "ma" in d:
-            try:
-                self.data_logger.log_glassman_voltage(
-                    d.get("kv", 0.0), d.get("ma", 0.0), self.glassman_hv_on
-                )
-            except Exception as e:
-                self.log(f"[DataLogger ERROR] Glassman: {e}")
-        if "marx_pos_kv" in d or "marx_neg_kv" in d:
-            try:
-                self.data_logger.log_marx_charge(
-                    d.get("marx_pos_kv", 0.0), d.get("marx_neg_kv", 0.0)
-                )
-            except Exception as e:
-                self.log(f"[DataLogger ERROR] Marx: {e}")
-
-        # Pressure: the Mega's A5 reading is the sole source for the SF6
-        # dome pressure gauge now that the Portenta is gone.
-        if "psi" in d:
-            try:
-                self._latest_psi = float(d["psi"])
-            except (TypeError, ValueError):
-                pass
-            try:
-                self.sf6_window.sf6_panel.ai_ch2.update_value(d["psi"])
-            except Exception:
-                pass
-
-        # Append to plot buffers if this parsed line carried kv or mA.
-        if ("kv" in d or "ma" in d) and hasattr(self, "wj_start_time"):
-            import time as _t
-            t = _t.time() - self.wj_start_time
-            self.wj_t_gm_buf.append(t)
-            self.wj_kv_gm_buf.append(d.get("kv", self.wj_kv_gm_buf[-1] if self.wj_kv_gm_buf else 0.0))
-            self.wj_ma_gm_buf.append(d.get("ma", self.wj_ma_gm_buf[-1] if self.wj_ma_gm_buf else 0.0))
-            if len(self.wj_t_gm_buf) > self.wj_max_points:
-                self.wj_t_gm_buf = self.wj_t_gm_buf[-self.wj_max_points:]
-                self.wj_kv_gm_buf = self.wj_kv_gm_buf[-self.wj_max_points:]
-                self.wj_ma_gm_buf = self.wj_ma_gm_buf[-self.wj_max_points:]
-            try:
-                self.sf6_window.kv_gm_curve.setData(self.wj_t_gm_buf, self.wj_kv_gm_buf)
-                self.sf6_window.ma_gm_curve.setData(self.wj_t_gm_buf, self.wj_ma_gm_buf)
-                self.sf6_window.update_wj_scroll(t)
-            except Exception:
-                pass
-
-        # Append to Marx plot buffers if this parsed line carried Marx rail kV.
-        if ("marx_pos_kv" in d or "marx_neg_kv" in d) and hasattr(self, "wj_start_time"):
-            import time as _t
-            t = _t.time() - self.wj_start_time
-            self.wj_t_marx_buf.append(t)
-            self.wj_marx_pos_buf.append(d.get("marx_pos_kv", self.wj_marx_pos_buf[-1] if self.wj_marx_pos_buf else 0.0))
-            self.wj_marx_neg_buf.append(d.get("marx_neg_kv", self.wj_marx_neg_buf[-1] if self.wj_marx_neg_buf else 0.0))
-            if len(self.wj_t_marx_buf) > self.wj_max_points:
-                self.wj_t_marx_buf = self.wj_t_marx_buf[-self.wj_max_points:]
-                self.wj_marx_pos_buf = self.wj_marx_pos_buf[-self.wj_max_points:]
-                self.wj_marx_neg_buf = self.wj_marx_neg_buf[-self.wj_max_points:]
-            try:
-                self.sf6_window.marx_pos_curve.setData(self.wj_t_marx_buf, self.wj_marx_pos_buf)
-                self.sf6_window.marx_neg_curve.setData(self.wj_t_marx_buf, self.wj_marx_neg_buf)
-                self.sf6_window.update_wj_scroll(t)
-            except Exception:
-                pass
-
-    def on_glassman_calibrate(self):
-        dlg = GlassmanCalibrationDialog(self)
-        dlg.show()
+        if self._opta_fault is None:
+            self.error_popup("Opta Zero", "No pressure reading yet.")
+            return
+        if self._opta_fault:
+            self.error_popup("Opta Zero",
+                             f"Sensor input is {self._opta_fault}. Fix the sensor before zeroing.")
+            return
+        reply = QMessageBox.question(
+            self, "Zero Pressure",
+            "Take the present transducer output as 0 psi?\n\n"
+            "Vent the line to atmosphere first.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.log("[Opta] Zeroing at present input...")
+        self.pressure_worker.request_zero_here.emit()
 
 
     def start_wj_readers(self):
@@ -439,14 +382,6 @@ class ScopeDelayMainWindow(QMainWindow):
         self.wj_ma1_buf = []
         self.wj_kv2_buf = []
         self.wj_ma2_buf = []
-        # Glassman buffers (fed by the Mega reader thread)
-        self.wj_t_gm_buf = []
-        self.wj_kv_gm_buf = []
-        self.wj_ma_gm_buf = []
-        # Marx rail charge buffers (fed by the Mega reader thread)
-        self.wj_t_marx_buf = []
-        self.wj_marx_pos_buf = []
-        self.wj_marx_neg_buf = []
         self.wj_max_points = 3000  # Store ~5 minutes of history at ~10 Hz
 
         for idx, wj in enumerate(self.wj_units):
@@ -468,9 +403,9 @@ class ScopeDelayMainWindow(QMainWindow):
                 if unit_index == 0:
                     self.sf6_window.kv1_gauge.update_value(kv)
                     self.sf6_window.ma1_gauge.update_value(ma)
-                # unit_index == 1 (positive WJ supply) no longer drives the
-                # kv2/ma2 gauges — those now show the Glassman Mega output,
-                # updated from _on_glassman_mega_parsed.
+                elif unit_index == 1:
+                    self.sf6_window.kv2_gauge.update_value(kv)
+                    self.sf6_window.ma2_gauge.update_value(ma)
             except Exception:
                 pass
 
@@ -723,11 +658,6 @@ class ScopeDelayMainWindow(QMainWindow):
             row.connect.clicked.connect(lambda _, i=idx: self.on_wj_connect(i))
             row.disconnect.clicked.connect(lambda _, i=idx: self.on_wj_disconnect(i))
 
-        # Glassman Mega connect/disconnect + calibration (Portenta is the SF6 Arduino)
-        self.wj_panel.btn_glassman_mega_connect.clicked.connect(self.on_glassman_mega_connect)
-        self.wj_panel.btn_glassman_mega_disconnect.clicked.connect(self.on_glassman_mega_disconnect)
-        self.wj_panel.btn_glassman_calibrate.clicked.connect(self.on_glassman_calibrate)
-
 
     def auto_connect_all(self):
         self.log("=== Auto-connect starting ===")
@@ -776,35 +706,11 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.bnc_panel.set_connected(False)
 
         # ------------------------------
-        # SF6 dome pressure now comes from the Mega (A5), and the Parker
-        # regulator setpoint is the Mega's DAC CH1 (PSI command). The old
-        # Portenta auto-connect / pressure stream / Marx valve relays were
-        # removed when the Mega took over everything.
+        # Opta pressure monitor (Modbus TCP). The connect itself runs on the
+        # worker thread; the result comes back as link_up or link_lost.
         # ------------------------------
-
-        # ------------------------------
-        # Glassman / Marx Mega (owns HV monitor, setpoints, pressure, Marx)
-        # ------------------------------
-        if flags.get("mega", True):
-            try:
-                mega_port = self.conn.get("Glassman_Mega_COM", None)
-                if mega_port:
-                    self.glassman_mega.connect(mega_port)
-                    self.wj_panel.glassman_mega_port_combo.setCurrentText(mega_port)
-                    self.wj_panel.glassman_mega_lamp.set_status("green", "Connected")
-                    self.wj_panel.glassman_mega_status.setText(f"Mega on {mega_port}")
-                    save_memory("Glassman_Mega_COM", mega_port)
-                    self._start_glassman_mega_reader()
-                    self.log(f"[Glassman] Mega connected on {mega_port}")
-                    # The Parker regulator is on the Mega's DAC CH1, so the
-                    # startup pressure can only be commanded now.
-                    self._apply_startup_pressure()
-                else:
-                    self.log("[Glassman] No saved Mega port to auto-connect")
-            except Exception as e:
-                self.wj_panel.glassman_mega_lamp.set_status("red", "Not Connected")
-                self.wj_panel.glassman_mega_status.setText("Connect failed")
-                self.log(f"[Glassman] Mega NOT CONNECTED: {e}")
+        if flags.get("opta", True):
+            self.on_pressure_connect()
 
         # ------------------------------
         # Numato Relay Module (connect BEFORE WJ supplies to avoid port conflict)
@@ -822,24 +728,32 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.relay_panel.set_connected(False)
 
         # ------------------------------
-        # WJ HIGH VOLTAGE SUPPLIES
+        # WJ HIGH VOLTAGE SUPPLIES (both on USB-serial)
         # ------------------------------
-        default_wj_ports = ["COM11", "COM13"]  # Changed defaults to avoid relay port
+        # Identical USB-serial adapters can resolve to the same COM number, so
+        # never open a port the relay or the other supply already owns.
+        claimed_ports = {relay_port} if relay_port else set()
         for i, wj in enumerate(self.wj_units):
             if not flags.get(f"wj{i+1}", True):
                 continue
+            row = self.wj_panel.rows[i]
+            port = self.conn.get(f"WJ{i+1}_COM")
+            if not port:
+                self.log(f"[WJ{i+1}] No saved port to auto-connect")
+                row.lamp.set_status("red", "Not Connected")
+                continue
+            if port in claimed_ports:
+                self.log(f"[WJ{i+1}] Skipping {port} (already used by another device)")
+                row.lamp.set_status("red", "Not Connected")
+                continue
             try:
-                port = self.conn.get(f"WJ{i+1}_COM", default_wj_ports[i])
-                # Skip if this port is already used by relay
-                if port == relay_port:
-                    self.log(f"[WJ{i+1}] Skipping {port} (used by relay)")
-                    self.wj_panel.rows[i].lamp.set_status("red", "Not Connected")
-                    continue
+                fw = self._identify_wj_port(i, port)
                 wj.connect(port)
-                self.wj_panel.rows[i].lamp.set_status("green", "Connected")
-                self.log(f"[WJ{i+1}] Connected on {port}")
+                claimed_ports.add(port)
+                row.lamp.set_status("green", "Connected")
+                self.log(f"[WJ{i+1}] Connected on {port}, firmware {fw}")
             except Exception as e:
-                self.wj_panel.rows[i].lamp.set_status("red", "Not Connected")
+                row.lamp.set_status("red", "Not Connected")
                 self.log(f"[WJ{i+1}] NOT CONNECTED: {e}")
 
         # ------------------------------
@@ -949,9 +863,6 @@ class ScopeDelayMainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def connect_sf6_window(self):
         """Connect signals from SF6 window to main window handlers"""
-        # The SF6 panel is now just a live dome-pressure monitor (Mega A5);
-        # it has no connect buttons or Marx switches anymore.
-
         # Duplicate WJ controls under the plot
         sw = self.sf6_window
         sw.btn_apply_program.clicked.connect(
@@ -969,9 +880,6 @@ class ScopeDelayMainWindow(QMainWindow):
             sw.btn_wj_disconnect[i].clicked.connect(
                 lambda _, idx=i: self.on_wj_disconnect(idx)
             )
-
-        if hasattr(self.sf6_window, 'pressure_panel'):
-            self.sf6_window.pressure_panel.btn_apply.clicked.connect(self.on_set_pressure)
 
         # Connect Numato Relay panel
         self.connect_relay_panel()
@@ -1181,48 +1089,6 @@ class ScopeDelayMainWindow(QMainWindow):
             self.log(f"[Relay] CH{ch} → {'ON' if state else 'OFF'}")
         except Exception as e:
             self.log(f"[Relay ERROR] CH{ch}: {e}")
-
-    def on_set_pressure(self):
-        """Handle pressure setpoint change"""
-        try:
-            psi = self.sf6_window.pressure_panel.get_psi()
-
-            # The Parker regulator is driven by the Mega's DAC CH1. Send the raw
-            # PSI setpoint and let the Mega apply its regulator calibration
-            # (PSI->DAC volts) and clamp out-of-range values.
-            self.glassman_send_mega(f"PSI {psi:.2f}")
-
-            self.sf6_window.pressure_panel.update_output_display(psi)
-            self.data_logger.log_glassman_command("PSI", f"{psi:.2f}psi")
-            self.log(f"[Pressure] Set {psi:.2f} PSI -> Mega DAC CH1")
-
-        except Exception as e:
-            self.log(f"[Pressure ERROR] {e}")
-            self.error_popup("Pressure Control Error", str(e))
-
-    def _command_pressure(self, psi):
-        """Send a PSI setpoint to the Mega (DAC CH1) and sync the pressure
-        panel UI. Returns the clamped/float psi."""
-        psi = float(psi)
-        self.glassman_send_mega(f"PSI {psi:.2f}")
-        self.data_logger.log_glassman_command("PSI", f"{psi:.2f}psi")
-        pp = getattr(self.sf6_window, "pressure_panel", None)
-        if pp is not None:
-            pp.combo_unit.setCurrentText("PSI")
-            pp.spin_value.setValue(psi)
-            pp.update_output_display(psi)
-        return psi
-
-    def _apply_startup_pressure(self):
-        """Command the configured startup pressure to the Mega (DAC CH1) and
-        sync the pressure panel UI. Called once the Mega is connected."""
-        if self.startup_pressure_psi is None:
-            return
-        try:
-            psi = self._command_pressure(self.startup_pressure_psi)
-            self.log(f"[Pressure] Startup pressure set to {psi:.1f} PSI")
-        except Exception as e:
-            self.log(f"[Pressure] Startup set failed: {e}")
 
     def on_export_csv(self):
         """Manual export (toolbar/button): export every captured scope to its
@@ -1531,7 +1397,7 @@ class ScopeDelayMainWindow(QMainWindow):
             elif self._check_lasers_armed():
                 self._mark_interlock(1, "both lasers armed")
 
-        # Step 4 - dome pressure above 50 psi (cached Mega reading).
+        # Step 4 - dome pressure above 50 psi (latest in-range Opta reading).
         if not self.interlock_passed.get(4):
             if self.interlock_manual[4].isChecked():
                 self._mark_interlock(4, "manual")
@@ -2312,6 +2178,32 @@ class ScopeDelayMainWindow(QMainWindow):
         self.log("[SAFETY] All WJ supplies confirmed HV OFF - safe to fire")
         return True
 
+    def _identify_wj_port(self, index, port):
+        """Confirm the supply on `port` is WJ{index+1} before connecting.
+
+        The WJ protocol has no ID query and both USB bridges report the same
+        useless serial, so the firmware version from the read-only V command
+        is the identity (wj_firmware in DEVICE_SIGNATURES). Asked on a
+        separate short-lived handle so the WJ reader thread can't steal the
+        reply. Returns the firmware version; raises IOError when nothing
+        answers or the port holds the other supply.
+        """
+        self.wj_units[index].close()   # release the port if this unit already holds it
+        probe = WJPowerSupply()
+        try:
+            probe.connect(port)
+            ver = probe.get_version()
+        finally:
+            probe.close()
+        if ver.get("type") != "B":
+            raise IOError(f"no WJ reply on {port} (got {ver.get('raw')!r})")
+        expected = DEVICE_SIGNATURES.get(f"WJ{index+1}_COM", {}).get("wj_firmware")
+        if expected and ver["version"] != expected:
+            raise IOError(
+                f"{port} answers as WJ firmware {ver['version']}, but WJ{index+1} is "
+                f"firmware {expected}; that is the other supply")
+        return ver["version"]
+
     def on_wj_connect(self, index, port_override=None):
         row = self.wj_panel.rows[index]
         port = port_override or row.port_combo.currentText()
@@ -2326,49 +2218,17 @@ class ScopeDelayMainWindow(QMainWindow):
 
         try:
             self.log(f"[WJ{index+1}] Connecting on {port}...")
+            fw = self._identify_wj_port(index, port)
             self.wj_units[index].connect(port)
             save_memory(f"WJ{index+1}_COM", port)
             row.lamp.set_status("green", "Connected")
+            self.log(f"[WJ{index+1}] Connected on {port}, firmware {fw}")
         except Exception as e:
             self.log(f"[WJ{index+1} ERROR] {e}")
             row.lamp.set_status("red", "Error")
 
 
     def on_wj_hv_on(self):
-        # Pre-pressurize sequence: raise the dome to the HV-on pressure first,
-        # wait for it to settle, THEN actually enable HV (see _do_wj_hv_on).
-        if self._hv_on_pending:
-            self.log("[HV] HV-on already pending — ignoring repeat press")
-            return
-
-        # The "Pre-pressurize dome on HV ON" checkbox lets the operator skip the
-        # auto pressure-raise + settle delay (e.g. when the dome is already at
-        # pressure) and enable HV immediately.
-        prepressurize = self.wj_panel.chk_prepressurize.isChecked()
-        if not prepressurize:
-            self.log("[HV] Pre-pressurize disabled — enabling HV immediately")
-            self._hv_on_pending = True
-            self._do_wj_hv_on()
-            return
-
-        try:
-            psi = self._command_pressure(self.hv_on_pressure_psi)
-            self.log(f"[Pressure] Raising to {psi:.1f} PSI before HV on")
-        except Exception as e:
-            self.log(f"[Pressure ERROR] {e}")
-
-        delay = float(self.hv_on_delay_sec)
-        self._hv_on_pending = True
-        self.log(f"[HV] Waiting {delay:.1f}s for pressure to settle before HV on...")
-        QTimer.singleShot(int(delay * 1000), self._do_wj_hv_on)
-
-    def _do_wj_hv_on(self):
-        # If HV-off was pressed during the countdown, abort the enable.
-        if not self._hv_on_pending:
-            self.log("[HV] HV-on cancelled before it fired")
-            return
-        self._hv_on_pending = False
-
         # Interlock: energize charging relay (NO→closed) and discharging relay (NC→open)
         self._relay_set(self._RELAY_CHARGING,    True)
         self._relay_set(self._RELAY_DISCHARGING, True)
@@ -2389,19 +2249,7 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.log(f"[WJ{i+1} ERROR] {e}")
                 self.data_logger.log_error(f"WJ{i+1}", str(e))
 
-        # Glassman: program the V-PROGRAM DAC to the same kV *before* closing
-        # the HV ENABLE relay, so the supply ramps to the right setpoint
-        # instead of starting at whatever the DAC was last commanded to.
-        self.glassman_send_mega(f"KV {float(kv):.2f}")
-        self.glassman_send_mega("ON")
-        self.data_logger.log_glassman_command("HV_ON", f"{float(kv):.2f}kV")
-
     def on_wj_hv_off(self):
-        # Cancel any in-flight pre-pressurize HV-on countdown.
-        if self._hv_on_pending:
-            self._hv_on_pending = False
-            self.log("[HV] Pending HV-on cancelled by HV OFF")
-
         # Interlock: de-energize charging relay (NO→open), keep discharging relay energized (NC stays open)
         self._relay_set(self._RELAY_CHARGING, False)
 
@@ -2414,10 +2262,6 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.log(f"[WJ{i+1} ERROR] {e}")
                 self.data_logger.log_error(f"WJ{i+1}", str(e))
 
-        # Glassman HV disable
-        self.glassman_send_mega("OFF")
-        self.data_logger.log_glassman_command("HV_OFF")
-
 
     def on_wj_reset(self):
         for i, wj in enumerate(self.wj_units):
@@ -2429,18 +2273,11 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.log(f"[WJ{i+1} ERROR] {e}")
                 self.data_logger.log_error(f"WJ{i+1}", str(e))
 
-        # Zero the Glassman V-PROGRAM via the Mega's DAC. (No I-PROGRAM
-        # control anymore — Mega only has the GP8413 channel 0 wired to
-        # V-PROGRAM.)
-        self.glassman_send_mega("ZERO")
-
     def on_wj_set_voltage(self, kv=None, ma=None):
         if kv is None:
             kv = self.wj_panel.voltage.value()
         # Current is always commanded to each WJ supply's maximum on Apply
-        # Program — user wants every supply opened wide. The Glassman's
-        # I-PROGRAM is no longer driven from the GUI (the Mega only has a
-        # V-PROGRAM DAC via GP8413); current limit is set on the supply.
+        # Program — user wants every supply opened wide.
 
         for i, wj in enumerate(self.wj_units):
             try:
@@ -2451,11 +2288,6 @@ class ScopeDelayMainWindow(QMainWindow):
             except Exception as e:
                 self.log(f"[WJ{i+1} ERROR] {e}")
                 self.data_logger.log_error(f"WJ{i+1}", str(e))
-
-        # Glassman voltage now comes from the Mega's I2C DAC via "KV <kv>".
-        # The Mega clamps to 0..125 kV internally, so pass the spinbox value
-        # straight through.
-        self.glassman_send_mega(f"KV {float(kv):.2f}")
 
 
     def on_wj_disconnect(self, index):
@@ -2555,11 +2387,12 @@ class ScopeDelayMainWindow(QMainWindow):
                 if worker.isRunning():
                     worker.stop()
 
-        try:
-            self._stop_glassman_mega_reader()
-            self.glassman_mega.close()
-        except Exception as e:
-            self.log(f"[Glassman] shutdown error: {e}")
+        if self.pressure_thread is not None:
+            # Close the Modbus socket on the worker thread, then let it exit.
+            self.pressure_worker.request_shutdown.emit()
+            if not self.pressure_thread.wait(3000):
+                self.log("[Opta] worker thread did not stop within 3 s")
+            self.pressure_thread = None   # worker is deleteLater'd with the thread
 
         if hasattr(self, 'scope_window') and self.scope_window:
             self.scope_window.close()

@@ -1,0 +1,7 @@
+PyQt6
+pyqtgraph
+pyserial
+pyvisa
+numpy
+pandas
+pymodbus>=3.6,<4

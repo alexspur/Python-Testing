@@ -4,7 +4,23 @@
       "Bash(find:*)",
       "Bash(python -m py_compile:*)",
       "Bash(powershell -Command \"Get-WMIObject Win32_SerialPort | Select-Object DeviceID, Description, Name | Format-Table -AutoSize\")",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "PowerShell(& \"C:/Program Files/Python313/python.exe\" \"c:/Users/ESpurbeck.P3E-HIGHBAY-01/Desktop/LANL Project/GUI/Python Testing/ScopeDelayGUI/main.py\" 2>&1)",
+      "Bash(timeout 8 python main.py)",
+      "Read(//c/Users/ESPURB~1.P3E/AppData/Local/Temp/claude/c--Users-ESpurbeck-P3E-HIGHBAY-01-Desktop-LANL-Project-GUI-Python-Testing/af86d1b4-70ab-49fd-809f-f5fce7d03295/tasks/**)",
+      "Read(//c/Users/ESPURB~1.P3E/**)",
+      "Bash(git checkout *)",
+      "Bash(rm -f \"ScopeDelayGUI/gui/glassman_panel.py\" \"ScopeDelayGUI/instruments/glassman.py\" \"ScopeDelayGUI/gui/__pycache__/glassman_panel.cpython-313.pyc\" \"ScopeDelayGUI/instruments/__pycache__/glassman.cpython-313.pyc\" \"ScopeDelayGUI/connection_memory.json\" 2>&1 ; echo done)",
+      "Bash(python -c \"import serial.tools.list_ports as lp; [print\\(repr\\(p.device\\), '|', 'VID:PID=%04X:%04X'%\\(p.vid,p.pid\\) if p.vid else 'no-vid', '|', 'SER=',p.serial_number, '|', 'MFG=',p.manufacturer, '|', 'PROD=',p.product, '|', 'HWID=',p.hwid\\) for p in lp.comports\\(\\)]\")",
+      "Bash(python -c \"from utils.connect_memory import load_memory; import json; m=load_memory\\(\\); print\\(json.dumps\\({k:v for k,v in m.items\\(\\) if k.endswith\\('_COM'\\)}, indent=2\\)\\)\")",
+      "Bash(python -c \"import ast,sys; [ast.parse\\(open\\(f,encoding='utf-8'\\).read\\(\\), f\\) for f in ['gui/main_window.py','gui/sf6_panel.py']]; print\\('AST parse OK'\\)\")",
+      "Bash(python -c \"import gui.sf6_panel; print\\('sf6_panel import OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast,inspect; from utils.status_lamp import StatusLamp; print\\('set_status' in dir\\(StatusLamp\\)\\); import inspect; print\\(inspect.signature\\(StatusLamp.set_status\\)\\); print\\(inspect.signature\\(StatusLamp.__init__\\)\\)\")",
+      "Bash(python -c \"from gui.laser_panel import LaserPanel; from instruments.cfr_laser import CFRLaserController; print\\('IMPORT_OK'\\)\")"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\ESpurbeck.P3E-HIGHBAY-01\\Desktop\\LANL Project\\GUI\\Python Testing\\ScopeDelayGUI\\gui"
     ]
   }
 }

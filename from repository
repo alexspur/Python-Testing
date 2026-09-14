@@ -1,0 +1,284 @@
+ .gitignore                                         |    12 [32m+[m
+ .../gui/__pycache__/__init__.cpython-313.pyc       |   Bin [31m200[m -> [32m0[m bytes
+ .../gui/__pycache__/__init__.cpython-314.pyc       |   Bin [31m187[m -> [32m0[m bytes
+ .../gui/__pycache__/analog_display.cpython-313.pyc |   Bin [31m2292[m -> [32m0[m bytes
+ .../gui/__pycache__/bnc575_panel.cpython-313.pyc   |   Bin [31m46796[m -> [32m0[m bytes
+ .../gui/__pycache__/bnc575_panel.cpython-314.pyc   |   Bin [31m52357[m -> [32m0[m bytes
+ .../gui/__pycache__/dg535_panel.cpython-313.pyc    |   Bin [31m28357[m -> [32m0[m bytes
+ .../gui/__pycache__/dg535_panel.cpython-314.pyc    |   Bin [31m31001[m -> [32m0[m bytes
+ .../gui/__pycache__/gauge_widget.cpython-313.pyc   |   Bin [31m3669[m -> [32m0[m bytes
+ .../gui/__pycache__/gauge_widget.cpython-314.pyc   |   Bin [31m3716[m -> [32m0[m bytes
+ .../gui/__pycache__/main_window.cpython-313.pyc    |   Bin [31m115140[m -> [32m0[m bytes
+ .../gui/__pycache__/main_window.cpython-314.pyc    |   Bin [31m111167[m -> [32m0[m bytes
+ .../__pycache__/numato_relay_panel.cpython-313.pyc |   Bin [31m9421[m -> [32m0[m bytes
+ .../__pycache__/numato_relay_panel.cpython-314.pyc |   Bin [31m8349[m -> [32m0[m bytes
+ .../gui/__pycache__/pressure_panel.cpython-313.pyc |   Bin [31m9659[m -> [32m0[m bytes
+ .../gui/__pycache__/pressure_panel.cpython-314.pyc |   Bin [31m10825[m -> [32m0[m bytes
+ .../gui/__pycache__/rigol_panel.cpython-313.pyc    |   Bin [31m4089[m -> [32m0[m bytes
+ .../gui/__pycache__/rigol_panel.cpython-314.pyc    |   Bin [31m4106[m -> [32m0[m bytes
+ .../__pycache__/scope_plot_panel.cpython-313.pyc   |   Bin [31m1824[m -> [32m0[m bytes
+ .../__pycache__/scope_plot_window.cpython-313.pyc  |   Bin [31m21274[m -> [32m0[m bytes
+ .../__pycache__/scope_plot_window.cpython-314.pyc  |   Bin [31m21565[m -> [32m0[m bytes
+ .../gui/__pycache__/sf6_panel.cpython-313.pyc      |   Bin [31m3897[m -> [32m0[m bytes
+ .../gui/__pycache__/sf6_panel.cpython-314.pyc      |   Bin [31m3914[m -> [32m0[m bytes
+ .../gui/__pycache__/sf6_window.cpython-313.pyc     |   Bin [31m14863[m -> [32m0[m bytes
+ .../gui/__pycache__/sf6_window.cpython-314.pyc     |   Bin [31m15237[m -> [32m0[m bytes
+ .../__pycache__/wj_debug_window.cpython-313.pyc    |   Bin [31m14057[m -> [32m0[m bytes
+ .../gui/__pycache__/wj_panel.cpython-313.pyc       |   Bin [31m5048[m -> [32m0[m bytes
+ .../gui/__pycache__/wj_panel.cpython-314.pyc       |   Bin [31m5073[m -> [32m0[m bytes
+ .../gui/__pycache__/wj_plot_window.cpython-313.pyc |   Bin [31m9947[m -> [32m0[m bytes
+ .../gui/__pycache__/wj_plot_window.cpython-314.pyc |   Bin [31m10131[m -> [32m0[m bytes
+ .../gui/__pycache__/wj_supply.cpython-313.pyc      |   Bin [31m3547[m -> [32m0[m bytes
+ ScopeDelayGUI/gui/cfr_laser_gui.py                 |  1093 [32m+[m
+ ScopeDelayGUI/gui/dg535_panel.py                   |   526 [32m+[m[31m-[m
+ ScopeDelayGUI/gui/glassman_panel.py                |   571 [32m+[m
+ ScopeDelayGUI/gui/laser_panel.py                   |   394 [32m+[m
+ ScopeDelayGUI/gui/main_window.py                   |  1306 [32m+[m[31m-[m
+ ScopeDelayGUI/gui/pressure_panel.py                |   136 [32m+[m[31m-[m
+ ScopeDelayGUI/gui/sf6_panel.py                     |    67 [32m+[m[31m-[m
+ ScopeDelayGUI/gui/sf6_window.py                    |    26 [32m+[m[31m-[m
+ ScopeDelayGUI/gui/wj_panel.py                      |    90 [32m+[m[31m-[m
+ .../__pycache__/__init__.cpython-313.pyc           |   Bin [31m208[m -> [32m0[m bytes
+ .../__pycache__/__init__.cpython-314.pyc           |   Bin [31m195[m -> [32m0[m bytes
+ .../__pycache__/arduino.cpython-313.pyc            |   Bin [31m4611[m -> [32m0[m bytes
+ .../__pycache__/arduino.cpython-314.pyc            |   Bin [31m5500[m -> [32m0[m bytes
+ .../instruments/__pycache__/bnc575.cpython-313.pyc |   Bin [31m39932[m -> [32m0[m bytes
+ .../instruments/__pycache__/bnc575.cpython-314.pyc |   Bin [31m52149[m -> [32m0[m bytes
+ .../instruments/__pycache__/dg535.cpython-313.pyc  |   Bin [31m34714[m -> [32m0[m bytes
+ .../instruments/__pycache__/dg535.cpython-314.pyc  |   Bin [31m42181[m -> [32m0[m bytes
+ .../__pycache__/numato_relay.cpython-313.pyc       |   Bin [31m8802[m -> [32m0[m bytes
+ .../__pycache__/numato_relay.cpython-314.pyc       |   Bin [31m8529[m -> [32m0[m bytes
+ .../instruments/__pycache__/rigol.cpython-313.pyc  |   Bin [31m19054[m -> [32m0[m bytes
+ .../instruments/__pycache__/rigol.cpython-314.pyc  |   Bin [31m22315[m -> [32m0[m bytes
+ .../instruments/__pycache__/wj.cpython-313.pyc     |   Bin [31m11419[m -> [32m0[m bytes
+ .../instruments/__pycache__/wj.cpython-314.pyc     |   Bin [31m14105[m -> [32m0[m bytes
+ ScopeDelayGUI/instruments/arduino.py               |    99 [32m+[m[31m-[m
+ ScopeDelayGUI/instruments/cfr_laser.py             |   200 [32m+[m
+ ScopeDelayGUI/instruments/glassman.py              |    60 [32m+[m
+ ScopeDelayGUI/instruments/rigol.py                 |    94 [32m+[m[31m-[m
+ ScopeDelayGUI/main.py                              |    69 [32m+[m[31m-[m
+ .../utils/__pycache__/__init__.cpython-313.pyc     |   Bin [31m202[m -> [32m0[m bytes
+ .../utils/__pycache__/__init__.cpython-314.pyc     |   Bin [31m189[m -> [32m0[m bytes
+ .../arduino_stream_worker.cpython-313.pyc          |   Bin [31m2746[m -> [32m0[m bytes
+ .../arduino_stream_worker.cpython-314.pyc          |   Bin [31m2779[m -> [32m0[m bytes
+ .../capture_single_worker.cpython-313.pyc          |   Bin [31m8683[m -> [32m0[m bytes
+ .../capture_single_worker.cpython-314.pyc          |   Bin [31m9394[m -> [32m0[m bytes
+ .../__pycache__/capture_worker.cpython-313.pyc     |   Bin [31m2976[m -> [32m0[m bytes
+ .../__pycache__/connect_memory.cpython-313.pyc     |   Bin [31m1660[m -> [32m0[m bytes
+ .../__pycache__/connect_memory.cpython-314.pyc     |   Bin [31m1732[m -> [32m0[m bytes
+ .../__pycache__/csv_export_worker.cpython-313.pyc  |   Bin [31m5682[m -> [32m0[m bytes
+ .../__pycache__/csv_export_worker.cpython-314.pyc  |   Bin [31m6069[m -> [32m0[m bytes
+ .../utils/__pycache__/data_logger.cpython-313.pyc  |   Bin [31m9940[m -> [32m0[m bytes
+ .../utils/__pycache__/data_logger.cpython-314.pyc  |   Bin [31m10225[m -> [32m0[m bytes
+ .../utils/__pycache__/logger.cpython-313.pyc       |   Bin [31m1511[m -> [32m0[m bytes
+ .../utils/__pycache__/logger.cpython-314.pyc       |   Bin [31m1544[m -> [32m0[m bytes
+ .../pressure_stream_worker.cpython-313.pyc         |   Bin [31m7708[m -> [32m0[m bytes
+ .../pressure_stream_worker.cpython-314.pyc         |   Bin [31m8667[m -> [32m0[m bytes
+ .../utils/__pycache__/rotary_knob.cpython-313.pyc  |   Bin [31m3276[m -> [32m0[m bytes
+ .../utils/__pycache__/rotary_knob.cpython-314.pyc  |   Bin [31m3625[m -> [32m0[m bytes
+ .../utils/__pycache__/serial_tools.cpython-313.pyc |   Bin [31m652[m -> [32m0[m bytes
+ .../utils/__pycache__/serial_tools.cpython-314.pyc |   Bin [31m788[m -> [32m0[m bytes
+ .../utils/__pycache__/status_lamp.cpython-313.pyc  |   Bin [31m2705[m -> [32m0[m bytes
+ .../utils/__pycache__/status_lamp.cpython-314.pyc  |   Bin [31m2761[m -> [32m0[m bytes
+ ScopeDelayGUI/utils/connect_memory.py              |   127 [32m+[m[31m-[m
+ ScopeDelayGUI/utils/csv_export_worker.py           |    75 [32m+[m[31m-[m
+ ScopeDelayGUI/utils/data_logger.py                 |    78 [32m+[m[31m-[m
+ ScopeDelayGUI/utils/pressure_stream_worker.py      |    25 [32m+[m[31m-[m
+ logs/experiment_log_20251209_103206.csv            |     1 [31m-[m
+ logs/experiment_log_20251209_103356.csv            |     1 [31m-[m
+ logs/experiment_log_20251209_104318.csv            |     1 [31m-[m
+ logs/experiment_log_20251209_105632.csv            |     1 [31m-[m
+ logs/experiment_log_20251209_105807.csv            |     1 [31m-[m
+ logs/experiment_log_20251209_110010.csv            |     1 [31m-[m
+ logs/experiment_log_20251209_110141.csv            |     1 [31m-[m
+ logs/experiment_log_20251209_110527.csv            |     1 [31m-[m
+ logs/experiment_log_20251209_110721.csv            |     8 [31m-[m
+ logs/experiment_log_20251209_110819.csv            |     2 [31m-[m
+ logs/experiment_log_20251209_111040.csv            |   441 [31m-[m
+ logs/experiment_log_20251209_111337.csv            |   428 [31m-[m
+ logs/experiment_log_20251209_112850.csv            |   418 [31m-[m
+ logs/experiment_log_20251209_112930.csv            |   252 [31m-[m
+ logs/experiment_log_20251209_113100.csv            |   732 [31m-[m
+ logs/experiment_log_20251209_113208.csv            |   196 [31m-[m
+ logs/experiment_log_20251209_113355.csv            |   403 [31m-[m
+ logs/experiment_log_20251209_113713.csv            |   622 [31m-[m
+ logs/experiment_log_20251209_114047.csv            |  1288 [31m-[m
+ logs/experiment_log_20251209_115154.csv            |  2098 [31m--[m
+ logs/experiment_log_20251209_120324.csv            |     1 [31m-[m
+ logs/experiment_log_20251209_120346.csv            |  2402 [31m--[m
+ logs/experiment_log_20251209_120702.csv            |  1190 [31m-[m
+ logs/experiment_log_20251209_121152.csv            |  2022 [31m--[m
+ logs/experiment_log_20251209_121426.csv            |   802 [31m-[m
+ logs/experiment_log_20251209_121556.csv            |   455 [31m-[m
+ logs/experiment_log_20251209_121637.csv            |   160 [31m-[m
+ logs/experiment_log_20251209_123525.csv            |  3271 [31m--[m
+ logs/experiment_log_20251209_124255.csv            | 30813 [31m-------------------[m
+ logs/experiment_log_20251209_132056.csv            |  1142 [31m-[m
+ logs/experiment_log_20251209_132307.csv            |   108 [31m-[m
+ logs/experiment_log_20251209_132320.csv            |  1665 [31m-[m
+ logs/experiment_log_20251209_132525.csv            |  1279 [31m-[m
+ logs/experiment_log_20251209_132808.csv            |   488 [31m-[m
+ logs/experiment_log_20251209_133823.csv            |  2766 [31m--[m
+ logs/experiment_log_20251209_134146.csv            |  1348 [31m-[m
+ logs/experiment_log_20251209_134326.csv            |  5148 [31m----[m
+ logs/experiment_log_20251209_135048.csv            |  2023 [31m--[m
+ logs/experiment_log_20251209_135412.csv            |  2290 [31m--[m
+ logs/experiment_log_20251209_135815.csv            |   432 [31m-[m
+ logs/experiment_log_20251209_140156.csv            |   546 [31m-[m
+ logs/experiment_log_20251209_140313.csv            |  1323 [31m-[m
+ logs/experiment_log_20251209_140913.csv            |   721 [31m-[m
+ logs/experiment_log_20251209_141225.csv            |   142 [31m-[m
+ logs/experiment_log_20251209_141247.csv            |   282 [31m-[m
+ logs/experiment_log_20251209_141818.csv            |   547 [31m-[m
+ logs/experiment_log_20251209_142353.csv            |  1163 [31m-[m
+ logs/experiment_log_20251209_142723.csv            |  1075 [31m-[m
+ logs/experiment_log_20251209_154745.csv            |     5 [31m-[m
+ logs/experiment_log_20251209_155412.csv            |    16 [31m-[m
+ logs/experiment_log_20251210_092223.csv            |     2 [31m-[m
+ logs/experiment_log_20251210_163553.csv            |  1565 [31m-[m
+ logs/experiment_log_20251210_163906.csv            |   141 [31m-[m
+ logs/experiment_log_20251210_164029.csv            |   679 [31m-[m
+ logs/experiment_log_20251210_164717.csv            |   904 [31m-[m
+ logs/experiment_log_20251210_164951.csv            |   395 [31m-[m
+ logs/experiment_log_20251210_165419.csv            |     4 [31m-[m
+ logs/experiment_log_20251210_170116.csv            |     3 [31m-[m
+ logs/experiment_log_20251210_170531.csv            |     4 [31m-[m
+ logs/experiment_log_20251210_170806.csv            |     4 [31m-[m
+ logs/experiment_log_20251210_171257.csv            |     3 [31m-[m
+ logs/experiment_log_20251210_173402.csv            |     1 [31m-[m
+ logs/experiment_log_20251210_173527.csv            |     1 [31m-[m
+ logs/experiment_log_20251210_173536.csv            |     1 [31m-[m
+ logs/experiment_log_20251210_173631.csv            |    66 [31m-[m
+ logs/experiment_log_20251210_173717.csv            |   163 [31m-[m
+ logs/experiment_log_20251210_173856.csv            |    54 [31m-[m
+ logs/experiment_log_20251210_173922.csv            |   481 [31m-[m
+ logs/experiment_log_20251210_174234.csv            | 15768 [31m----------[m
+ logs/experiment_log_20251210_180329.csv            |  5589 [31m----[m
+ logs/experiment_log_20251210_181155.csv            |  3510 [31m---[m
+ logs/experiment_log_20251210_181656.csv            |  1608 [31m-[m
+ logs/experiment_log_20251210_181903.csv            |  3665 [31m---[m
+ logs/experiment_log_20251210_182429.csv            |  3304 [31m--[m
+ logs/experiment_log_20251210_182905.csv            |  2925 [31m--[m
+ logs/experiment_log_20251210_183303.csv            |  5151 [31m----[m
+ logs/experiment_log_20251210_183924.csv            |   179 [31m-[m
+ logs/experiment_log_20251210_184045.csv            |  1338 [31m-[m
+ logs/experiment_log_20251210_184240.csv            |  3402 [31m--[m
+ logs/experiment_log_20251210_184656.csv            |  1319 [31m-[m
+ logs/experiment_log_20251210_184836.csv            |  3068 [31m--[m
+ logs/experiment_log_20251210_185243.csv            |  8740 [31m------[m
+ logs/experiment_log_20251210_190638.csv            |  1525 [31m-[m
+ logs/experiment_log_20251210_190901.csv            |  5653 [31m----[m
+ logs/experiment_log_20251211_094256.csv            |     1 [31m-[m
+ logs/experiment_log_20251211_094315.csv            |     2 [31m-[m
+ logs/experiment_log_20251211_094349.csv            |     2 [31m-[m
+ logs/experiment_log_20251211_094452.csv            |  1517 [31m-[m
+ logs/experiment_log_20251211_094717.csv            |   520 [31m-[m
+ logs/experiment_log_20251211_094838.csv            |   876 [31m-[m
+ logs/experiment_log_20251211_094947.csv            |  1608 [31m-[m
+ logs/experiment_log_20251211_095148.csv            |  2439 [31m--[m
+ logs/experiment_log_20251211_095449.csv            |  1582 [31m-[m
+ logs/experiment_log_20251211_095649.csv            |  2054 [31m--[m
+ logs/experiment_log_20251211_095923.csv            |  3766 [31m---[m
+ logs/experiment_log_20251211_100409.csv            |  2908 [31m--[m
+ logs/experiment_log_20251211_100818.csv            |   961 [31m-[m
+ logs/experiment_log_20251211_101015.csv            |   165 [31m-[m
+ logs/experiment_log_20251211_101034.csv            |  2972 [31m--[m
+ logs/experiment_log_20251211_101507.csv            |  3852 [31m---[m
+ logs/experiment_log_20251211_102008.csv            |  2205 [31m--[m
+ logs/experiment_log_20251211_102252.csv            |  3155 [31m--[m
+ logs/experiment_log_20251211_102707.csv            |  1181 [31m-[m
+ logs/experiment_log_20251211_102905.csv            |  2340 [31m--[m
+ logs/experiment_log_20251211_103542.csv            |  1923 [31m--[m
+ logs/experiment_log_20251211_103806.csv            |  1607 [31m-[m
+ logs/experiment_log_20251211_104010.csv            |   893 [31m-[m
+ logs/experiment_log_20251211_104122.csv            |   777 [31m-[m
+ logs/experiment_log_20251211_104230.csv            |  2136 [31m--[m
+ logs/experiment_log_20251211_104516.csv            |  1661 [31m-[m
+ logs/experiment_log_20251211_104723.csv            |  3850 [31m---[m
+ logs/experiment_log_20251211_105237.csv            |  5295 [31m----[m
+ logs/experiment_log_20251211_105911.csv            |  2292 [31m--[m
+ logs/experiment_log_20251211_110201.csv            |  5982 [31m----[m
+ logs/experiment_log_20251211_155356.csv            |     2 [31m-[m
+ logs/experiment_log_20251211_155415.csv            |     3 [31m-[m
+ logs/experiment_log_20251212_142639.csv            |  3784 [31m---[m
+ logs/experiment_log_20251212_143120.csv            |  2730 [31m--[m
+ logs/experiment_log_20251212_143443.csv            |  2149 [31m--[m
+ logs/experiment_log_20251212_143744.csv            |  3020 [31m--[m
+ logs/experiment_log_20251212_144131.csv            | 10783 [31m-------[m
+ logs/experiment_log_20251214_155800.csv            |   192 [31m-[m
+ logs/experiment_log_20251214_155859.csv            |   284 [31m-[m
+ logs/experiment_log_20251214_160019.csv            |  3233 [31m--[m
+ logs/experiment_log_20251214_160428.csv            |  2594 [31m--[m
+ logs/experiment_log_20251214_160744.csv            |  1575 [31m-[m
+ logs/experiment_log_20251214_160946.csv            |  2325 [31m--[m
+ logs/experiment_log_20251214_171952.csv            |     9 [31m-[m
+ logs/experiment_log_20251215_174616.csv            |   858 [31m-[m
+ logs/experiment_log_20251215_174830.csv            |   982 [31m-[m
+ logs/experiment_log_20251215_175012.csv            |  1668 [31m-[m
+ logs/experiment_log_20251215_175237.csv            |   259 [31m-[m
+ logs/experiment_log_20251215_175545.csv            |     1 [31m-[m
+ logs/experiment_log_20251215_175626.csv            |     1 [31m-[m
+ logs/experiment_log_20251216_070914.csv            |     2 [31m-[m
+ logs/experiment_log_20251216_070927.csv            |     2 [31m-[m
+ logs/experiment_log_20251216_105626.csv            | 10722 [31m-------[m
+ logs/experiment_log_20251216_111134.csv            | 14090 [31m---------[m
+ logs/experiment_log_20260106_102407.csv            |     2 [31m-[m
+ logs/experiment_log_20260107_135840.csv            |  1286 [31m-[m
+ logs/experiment_log_20260107_140208.csv            |    77 [31m-[m
+ logs/experiment_log_20260107_140359.csv            |  3266 [31m--[m
+ logs/experiment_log_20260107_142226.csv            | 22130 [31m-------------[m
+ logs/experiment_log_20260107_150027.csv            | 10132 [31m------[m
+ logs/experiment_log_20260107_151816.csv            |  5329 [31m----[m
+ logs/experiment_log_20260107_152845.csv            |  9034 [31m------[m
+ logs/experiment_log_20260108_115359.csv            |  5892 [31m----[m
+ logs/experiment_log_20260108_142208.csv            |  1592 [31m-[m
+ logs/experiment_log_20260109_135511.csv            | 11942 [31m-------[m
+ logs/experiment_log_20260112_115941.csv            |     2 [31m-[m
+ logs/experiment_log_20260112_120025.csv            |     2 [31m-[m
+ logs/experiment_log_20260112_120052.csv            |     2 [31m-[m
+ logs/experiment_log_20260112_120722.csv            |  1022 [31m-[m
+ logs/experiment_log_20260112_132427.csv            |     2 [31m-[m
+ logs/experiment_log_20260113_134429.csv            |   516 [31m-[m
+ logs/experiment_log_20260113_135126.csv            |  1120 [31m-[m
+ logs/experiment_log_20260219_152108.csv            |     2 [31m-[m
+ logs/experiment_log_20260219_152436.csv            |     2 [31m-[m
+ logs/experiment_log_20260219_152547.csv            |     4 [31m-[m
+ logs/experiment_log_20260219_152934.csv            |     2 [31m-[m
+ logs/experiment_log_20260224_122751.csv            |     2 [31m-[m
+ logs/experiment_log_20260224_122827.csv            |     2 [31m-[m
+ logs/experiment_log_20260224_122849.csv            |     2 [31m-[m
+ logs/experiment_log_20260304_152148.csv            |     2 [31m-[m
+ logs/experiment_log_20260304_161200.csv            |     2 [31m-[m
+ logs/experiment_log_20260304_161539.csv            |     2 [31m-[m
+ logs/experiment_log_20260304_161958.csv            |     2 [31m-[m
+ logs/experiment_log_20260309_114550.csv            |     2 [31m-[m
+ logs/experiment_log_20260309_115219.csv            |     2 [31m-[m
+ logs/experiment_log_20260309_120140.csv            |     2 [31m-[m
+ logs/experiment_log_20260309_120733.csv            |     2 [31m-[m
+ logs/experiment_log_20260309_121246.csv            |     2 [31m-[m
+ logs/experiment_log_20260309_121629.csv            |     2 [31m-[m
+ logs/experiment_log_20260309_121844.csv            |     2 [31m-[m
+ logs/experiment_log_20260309_122017.csv            |     2 [31m-[m
+ logs/experiment_log_20260309_123826.csv            |     2 [31m-[m
+ logs/experiment_log_20260309_124325.csv            |     2 [31m-[m
+ logs/experiment_log_20260310_171200.csv            |     2 [31m-[m
+ logs/experiment_log_20260310_171346.csv            |     2 [31m-[m
+ logs/experiment_log_20260310_172106.csv            |     4 [31m-[m
+ logs/experiment_log_20260310_173035.csv            |    12 [31m-[m
+ logs/experiment_log_20260310_173519.csv            |     6 [31m-[m
+ logs/experiment_log_20260310_173622.csv            |    14 [31m-[m
+ logs/experiment_log_20260310_173728.csv            |    18 [31m-[m
+ logs/experiment_log_20260310_174240.csv            |  8894 [31m------[m
+ logs/experiment_log_20260310_175716.csv            |  8675 [31m------[m
+ logs/experiment_log_20260310_180839.csv            |   183 [31m-[m
+ logs/experiment_log_20260310_180931.csv            |    61 [31m-[m
+ logs/experiment_log_20260310_181030.csv            |   127 [31m-[m
+ logs/experiment_log_20260310_181119.csv            |   198 [31m-[m
+ logs/experiment_log_20260310_181300.csv            |    58 [31m-[m
+ logs/experiment_log_20260310_181445.csv            |    40 [31m-[m
+ logs/experiment_log_20260310_181628.csv            |    36 [31m-[m
+ logs/experiment_log_20260310_181908.csv            |  8127 [31m-----[m
+ logs/experiment_log_20260310_182919.csv            |   591 [31m-[m
+ logs/experiment_log_20260316_162751.csv            |  8146 [31m-----[m
+ logs/experiment_log_20260316_164135.csv            | 10064 [31m------[m
+ 283 files changed, 3955 insertions(+), 385269 deletions(-)

@@ -16,14 +16,24 @@ const int GLASSMAN_VOLTAGE_AO_CHANNEL = 0;
 const int GLASSMAN_CURRENT_AO_CHANNEL = 1;
 const int PRESSURE_AO_CHANNEL         = 2;
 
+// // =========================
+// // ANALOG INPUT CHANNEL MAP
+// // =========================
+// // Existing pressure system inputs
+// const int CURRENT_AI_0    = 0;
+// const int CURRENT_AI_1    = 1;
+// const int PRESSURE_AI_2   = 2;
+
+
 // =========================
 // ANALOG INPUT CHANNEL MAP
 // =========================
-// Existing pressure system inputs
+// AI0 -> 4-20 mA current loop
+// AI1 -> 4-20 mA current loop
+// AI2 -> 0-10 V pressure sensor feedback
 const int CURRENT_AI_0    = 0;
 const int CURRENT_AI_1    = 1;
 const int PRESSURE_AI_2   = 2;
-
 // =========================
 // ANALOG OUTPUT TIMING
 // =========================

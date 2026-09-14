@@ -28,6 +28,12 @@ class GaugeWidget(QWidget):
         self.text_label.setText(f"{self.value:.1f} {self.label}")
         self.repaint()
 
+    def show_text(self, text):
+        """Empty the arc and show text instead of a number (fault, no data)."""
+        self.value = self.min_value
+        self.text_label.setText(text)
+        self.repaint()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)

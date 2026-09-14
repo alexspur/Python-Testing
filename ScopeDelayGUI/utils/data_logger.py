@@ -16,9 +16,8 @@ class DataLogger:
     Event Types:
     - ARDUINO_PSI: Arduino pressure readings (param1=ch0, param2=ch1, param3=ch2)
     - WJ_VOLTAGE: WJ power supply (param1=unit_id, param2=kV, param3=mA, param4=hv_on)
-    - GLASSMAN_VOLTAGE: Glassman WR125 readback (param1=kV, param2=mA, param3=hv_on)
-    - GLASSMAN_COMMAND: Glassman command (param1=command, param2=value)
-    - MARX_CHARGE: Marx rail monitors (param1=Marx+ kV, param2=Marx- kV)
+    - OPTA_PSI: Opta dome pressure (param1=psi, param2=input V, param3=raw counts,
+      param4=OK/UNDER_RANGE/OVER_RANGE)
     - DG535_PULSE: DG535 pulse fired (param1=delay, param2=width)
     - BNC575_PULSE: BNC575 pulse fired (param1=mode, notes=settings)
     - BNC575_ARM: BNC575 armed (param1=trigger_level)
@@ -152,40 +151,24 @@ class DataLogger:
         )
 
     # ================================================================
-    # Glassman WR125 Logging (readback + commands come via the Mega)
+    # Opta Pressure Monitor Logging (Modbus TCP)
     # ================================================================
-    def log_glassman_voltage(self, kv, ma, hv_on=False):
-        """Log Glassman WR125 readback (param1=kV, param2=mA, param3=hv_on)"""
+    def log_opta_pressure(self, psi, volts, counts, under_range=False, over_range=False):
+        """Log an Opta dome pressure snapshot. param4 carries the sensor state so
+        a dead transducer's 0.00 psi row can't be mistaken for a real reading."""
+        if under_range:
+            state = 'UNDER_RANGE'
+        elif over_range:
+            state = 'OVER_RANGE'
+        else:
+            state = 'OK'
         self._log_event(
-            event_type='GLASSMAN_VOLTAGE',
-            source='Glassman',
-            param1=f"{kv:.3f}",
-            param2=f"{ma:.4f}",
-            param3='1' if hv_on else '0',
-            notes=f"HV={'ON' if hv_on else 'OFF'}"
-        )
-
-    def log_glassman_command(self, command, value=''):
-        """Log Glassman command sent to the Mega (HV ON/OFF, KV setpoint, ZERO)"""
-        self._log_event(
-            event_type='GLASSMAN_COMMAND',
-            source='Glassman',
-            param1=command,
-            param2=value,
-            notes=f"{command} {value}".strip()
-        )
-
-    # ================================================================
-    # Marx Rail Charge Logging (Mega A10/A11, 0-100 kV)
-    # ================================================================
-    def log_marx_charge(self, pos_kv, neg_kv):
-        """Log Marx rail charge monitors (param1=Marx+ kV, param2=Marx- kV)"""
-        self._log_event(
-            event_type='MARX_CHARGE',
-            source='Marx',
-            param1=f"{pos_kv:.3f}",
-            param2=f"{neg_kv:.3f}",
-            notes=f"Marx+={pos_kv:.2f}kV, Marx-={neg_kv:.2f}kV"
+            event_type='OPTA_PSI',
+            source='Opta',
+            param1=f"{psi:.2f}",
+            param2=f"{volts:.3f}",
+            param3=counts,
+            param4=state
         )
 
     # ================================================================
