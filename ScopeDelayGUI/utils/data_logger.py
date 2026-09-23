@@ -1,5 +1,6 @@
 # utils/data_logger.py
 import csv
+import os
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +16,7 @@ class DataLogger:
 
     Event Types:
     - ARDUINO_PSI: Arduino pressure readings (param1=ch0, param2=ch1, param3=ch2)
-    - WJ_VOLTAGE: WJ power supply (param1=unit_id, param2=kV, param3=mA, param4=hv_on)
+    - WJ_VOLTAGE: WJ power supply (param1=kV, param2=mA, param3=hv_on, param4=fault)
     - OPTA_PSI: Opta dome pressure (param1=psi, param2=input V, param3=raw counts,
       param4=OK/UNDER_RANGE/OVER_RANGE)
     - DG535_PULSE: DG535 pulse fired (param1=delay, param2=width)
@@ -23,6 +24,15 @@ class DataLogger:
     - BNC575_ARM: BNC575 armed (param1=trigger_level)
     - SCOPE_CAPTURE: Scope capture (param1=scope_id)
     - SCOPE_ALL: All scopes captured
+    - RELAY_COMMAND / RELAY_STATE: relay switching (param1=name, param2=requested,
+      param3=confirmed or UNKNOWN, param4=ok/failed)
+    - LASER_ARM / LASER_DISARM / LASER_FIRE / LASER_INTERLOCK / LASER_ERROR
+    - INTERLOCK_CHECK / INTERLOCK_PASS / INTERLOCK_FAIL / FIRE_BLOCKED
+    - SHOT: one row per real shot (param1=shot number), mirroring shot_log CSV
+    - SESSION_START / SESSION_END
+
+    Also owns the plain-text mirror of the on-screen GUI log,
+    gui_log_<session ts>.txt, in the same session folder.
     """
 
     def __init__(self, log_dir="logs"):
@@ -42,16 +52,19 @@ class DataLogger:
         self.session_name = f"experiment_log_{self.session_timestamp}"
 
         # Per-launch folder named after the experiment log, inside the day
-        # folder. Scope exports (rigol<N>_<timestamp>.csv) also land here.
+        # folder. Scope exports (rigol<N>_<timestamp>.csv), the shot log and
+        # the GUI text log also land here.
         self.session_dir = self.day_dir / self.session_name
         self.session_dir.mkdir(exist_ok=True)
 
         # Kept for backwards-compatibility with code that references log_dir.
         self.log_dir = self.session_dir
         self.log_file = self.session_dir / f"{self.session_name}.csv"
+        self.gui_log_file = self.session_dir / f"gui_log_{self.session_timestamp}.txt"
 
         # Thread lock for safe concurrent logging
         self.lock = threading.Lock()
+        self._gui_lock = threading.Lock()
 
         # Start time for relative timestamps
         self.start_time = now
@@ -103,6 +116,26 @@ class DataLogger:
                 ])
 
     # ================================================================
+    # On-screen GUI log mirror (gui_log_<session ts>.txt)
+    # ================================================================
+    def append_gui_line(self, text):
+        """Mirror one on-screen log line to the session's text log.
+
+        Flushed and fsynced per line: the GUI is usually closed within seconds
+        of a shot, so buffered lines would be lost.
+        """
+        stamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        try:
+            with self._gui_lock:
+                with open(self.gui_log_file, 'a', encoding='utf-8') as f:
+                    f.write(f"[{stamp}] {text}\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+        except Exception:
+            # Never let logging break the GUI.
+            pass
+
+    # ================================================================
     # Arduino / SF6 Logging
     # ================================================================
     def log_arduino_psi(self, ch0_psi, ch1_psi, ch2_psi):
@@ -128,8 +161,13 @@ class DataLogger:
     # ================================================================
     # WJ Power Supply Logging
     # ================================================================
-    def log_wj_voltage(self, unit_id, kv, ma, hv_on=False, fault=False):
-        """Log WJ power supply readback"""
+    def log_wj_voltage(self, unit_id, kv, ma, hv_on=False, fault=False, state_source='readback'):
+        """Log WJ power supply readback.
+
+        hv_on / fault come from the supply's own Q reply (byte 11). Pass
+        state_source='unknown' when the caller has no confirmed state so the
+        row cannot be mistaken for a verified reading.
+        """
         self._log_event(
             event_type='WJ_VOLTAGE',
             source=f'WJ{unit_id}',
@@ -137,7 +175,8 @@ class DataLogger:
             param2=f"{ma:.3f}",
             param3='1' if hv_on else '0',
             param4='1' if fault else '0',
-            notes=f"HV={'ON' if hv_on else 'OFF'}, Fault={'YES' if fault else 'NO'}"
+            notes=(f"HV={'ON' if hv_on else 'OFF'}, Fault={'YES' if fault else 'NO'}, "
+                   f"source={state_source}")
         )
 
     def log_wj_command(self, unit_id, command, value=''):
@@ -194,6 +233,19 @@ class DataLogger:
             notes=f"Configured: Delay={delay_a:.3e}s, Width={width_a:.3e}s"
         )
 
+    def log_dg535_readback(self, channels, trigger_mode, source='DG535_laser'):
+        """Log a full DG535 configuration readback (connect time / after apply).
+
+        channels: {"A": (ref_name, delay_seconds), ...}
+        """
+        parts = [f"{ch}={ref}+{delay * 1e6:.6f}us" for ch, (ref, delay) in sorted(channels.items())]
+        self._log_event(
+            event_type='DG535_READBACK',
+            source=source,
+            param1=trigger_mode,
+            notes=" ".join(parts)
+        )
+
     # ================================================================
     # BNC575 Delay Generator Logging
     # ================================================================
@@ -229,9 +281,115 @@ class DataLogger:
         )
 
     # ================================================================
+    # Relay Logging (Numato)
+    # ================================================================
+    def log_relay_command(self, name, channel, requested, ok=True, confirmed=None):
+        """Log a relay switch command.
+
+        confirmed is None whenever the hardware gives no usable feedback: the
+        Numato driver's get_state() returns the software's own cache, not a
+        hardware read, so a commanded state is never reported as confirmed.
+        """
+        self._log_event(
+            event_type='RELAY_COMMAND',
+            source=f'Relay_CH{channel}',
+            param1=name,
+            param2='ON' if requested else 'OFF',
+            param3='UNKNOWN' if confirmed is None else ('ON' if confirmed else 'OFF'),
+            param4='ok' if ok else 'failed',
+            notes=f"{name} (CH{channel}) commanded {'ON' if requested else 'OFF'}"
+                  + ("" if ok else " - COMMAND FAILED")
+        )
+
+    def log_relay_state(self, states, source='commanded'):
+        """Log the full relay picture. states: {name: True/False/None}"""
+        rendered = ", ".join(
+            f"{n}={'ON' if v else 'OFF' if v is not None else 'UNKNOWN'}"
+            for n, v in states.items()
+        )
+        self._log_event(
+            event_type='RELAY_STATE',
+            source='Relay',
+            param1=source,
+            notes=rendered
+        )
+
+    # ================================================================
+    # Laser Logging (CFR / ICE450)
+    # ================================================================
+    def log_laser_event(self, laser_tag, event, state='', detail=''):
+        """Log a laser event: ARM, DISARM, FIRE, INTERLOCK, ERROR, PREP, STOP."""
+        event_map = {
+            'ARM': 'LASER_ARM',
+            'DISARM': 'LASER_DISARM',
+            'FIRE': 'LASER_FIRE',
+            'INTERLOCK': 'LASER_INTERLOCK',
+            'ERROR': 'LASER_ERROR',
+        }
+        self._log_event(
+            event_type=event_map.get(event, f'LASER_{event}'),
+            source=laser_tag,
+            param1=event,
+            param2=state,
+            notes=detail
+        )
+
+    # ================================================================
+    # Interlock Logging
+    # ================================================================
+    def log_interlock(self, event, step='', detail='', passed=None):
+        """Log INTERLOCK_CHECK / INTERLOCK_PASS / INTERLOCK_FAIL."""
+        self._log_event(
+            event_type=f'INTERLOCK_{event}',
+            source='Interlock',
+            param1=step,
+            param2='' if passed is None else ('pass' if passed else 'fail'),
+            notes=detail
+        )
+
+    def log_fire_blocked(self, reason, detail=''):
+        """A fire attempt that never reached the hardware. Consumes no shot number."""
+        self._log_event(
+            event_type='FIRE_BLOCKED',
+            source='Shot',
+            param1=reason,
+            notes=detail
+        )
+
+    # ================================================================
+    # Shot + session Logging
+    # ================================================================
+    def log_shot(self, shot_number, session_shot_index, notes=''):
+        """Mirror a shot into the event log, so the timeline shows the trigger."""
+        self._log_event(
+            event_type='SHOT',
+            source='Shot',
+            param1=shot_number,
+            param2=session_shot_index,
+            notes=notes
+        )
+
+    def log_session_start(self, next_shot_number, gui_version, notes=''):
+        self._log_event(
+            event_type='SESSION_START',
+            source='SYSTEM',
+            param1=next_shot_number,
+            param2=gui_version,
+            notes=notes
+        )
+
+    def log_session_end(self, shots_this_session=0, notes=''):
+        self._log_event(
+            event_type='SESSION_END',
+            source='SYSTEM',
+            param1=shots_this_session,
+            notes=notes
+        )
+
+    # ================================================================
     # Oscilloscope Logging
     # ================================================================
-    def log_scope_capture(self, scope_id, num_points_ch1=0, num_points_ch2=0):
+    def log_scope_capture(self, scope_id, num_points_ch1=0, num_points_ch2=0, shot_number=''):
         """Log individual scope capture"""
         self._log_event(
             event_type='SCOPE_CAPTURE',
@@ -239,7 +397,9 @@ class DataLogger:
             param1=scope_id,
             param2=num_points_ch1,
             param3=num_points_ch2,
+            param4=shot_number,
             notes=f"Rigol #{scope_id} captured (CH1:{num_points_ch1} pts, CH2:{num_points_ch2} pts)"
+                  + (f" for shot {shot_number}" if shot_number != '' else "")
         )
 
     def log_scope_all_capture(self):
@@ -301,10 +461,27 @@ class DataLogger:
         """Return the per-launch session folder (where exports should go)."""
         return str(self.session_dir)
 
-    def scope_export_path(self, scope_id):
-        """Build the export path for a scope, e.g. rigol1_20260616_171252.csv,
-        inside this launch's session folder."""
-        return str(self.session_dir / f"rigol{scope_id}_{self.session_timestamp}.csv")
+    def get_logs_root(self):
+        """Return the logs/ root that holds the day folders, the shot counter
+        and the cumulative master shot log."""
+        return str(self.base_dir)
+
+    def scope_export_path(self, scope_id, shot_index=None):
+        r"""Build the export path for a scope inside this launch's folder.
+
+        The first shot of a session keeps the historic name
+        rigol<N>_<session ts>.csv, because Post Test Analysis/parse_test_log.py
+        finds waveform files with re.findall(r"(rigol\d_\d{8}_\d{6}\.csv)").
+
+        A second or later shot in the same session would overwrite those
+        files, so it gets rigol<N>_<session ts>_shot<NN>.csv. That name is not
+        matched by the analysis regex (".csv" no longer follows the 6-digit
+        time), so the old tooling ignores it instead of mis-parsing it.
+        """
+        stem = f"rigol{scope_id}_{self.session_timestamp}"
+        if shot_index and shot_index > 1:
+            stem += f"_shot{int(shot_index):02d}"
+        return str(self.session_dir / f"{stem}.csv")
 
     def close(self):
         """Close logger (placeholder for future cleanup if needed)"""

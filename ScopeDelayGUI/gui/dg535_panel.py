@@ -57,6 +57,10 @@ class DG535Panel(QGroupBox):
         self.btn_connect = QPushButton("Connect DG535")
         self.btn_disconnect = QPushButton("Disconnect")
         self.btn_clear = QPushButton("Clear/Reset")
+        # CL resets the delays AND the trigger mode on the instrument.
+        self.btn_clear.setEnabled(False)
+        self.btn_clear.setToolTip(
+            "Disabled: CL would reset the delays and the trigger mode.")
         conn_row.addWidget(self.btn_connect)
         conn_row.addWidget(self.btn_disconnect)
         conn_row.addWidget(self.btn_clear)
@@ -67,6 +71,13 @@ class DG535Panel(QGroupBox):
         # Modest minimum so the tab area stays usable; overflow scrolls.
         self.tabs.setMinimumHeight(230)
         layout.addWidget(self.tabs)
+
+        # Edit tracking. A channel counts as changed only when the operator
+        # edits it after a readback - never by comparing the spin box to the
+        # readback, because the instrument reports more digits than the box
+        # displays and that would make every channel look dirty.
+        self._dirty_channels = set()
+        self._loading_readback = False
 
         # Create individual tabs
         self._create_trigger_tab()
@@ -79,6 +90,9 @@ class DG535Panel(QGroupBox):
         self.btn_fire = QPushButton("🔥 Fire Single Shot")
         self.btn_fire.setStyleSheet("font-size: 14px; font-weight: bold; padding: 8px;")
         self.btn_apply_all = QPushButton("Apply All Settings")
+        self.btn_apply_all.setEnabled(False)
+        self.btn_apply_all.setToolTip(
+            "Disabled: use Apply Changed Delays, which writes only edited channels.")
         self.btn_read_all = QPushButton("Read All Settings")
         action_row.addWidget(self.btn_fire)
         action_row.addWidget(self.btn_apply_all)
@@ -239,8 +253,18 @@ class DG535Panel(QGroupBox):
         burst_layout.addRow("Periods/Burst:", self.burst_period)
         layout.addWidget(burst_group)
 
+        # The laser DG535 is externally triggered by BNC575 channel B. The
+        # GUI must never send TM (trigger mode) or SS (fire), so every control
+        # on this tab is disabled: the mode is set on the front panel and only
+        # displayed here (read-only label on the Delays tab).
         self.btn_apply_trigger = QPushButton("Apply Trigger Settings")
+        self.btn_apply_trigger.setEnabled(False)
+        self.btn_apply_trigger.setToolTip(
+            "Disabled: the GUI never changes the DG535 trigger mode.")
         layout.addWidget(self.btn_apply_trigger)
+        for _btn in self.trig_mode_buttons.values():
+            _btn.setEnabled(False)
+            _btn.setToolTip("Trigger mode is set on the DG535 front panel.")
         layout.addStretch()
 
         self._add_scroll_tab(tab, "Trigger")
@@ -249,6 +273,16 @@ class DG535Panel(QGroupBox):
         tab = QWidget()
         layout = QVBoxLayout()
         tab.setLayout(layout)
+
+        # Read-only: the laser DG535 is externally triggered by BNC575
+        # channel B and the GUI never changes its trigger mode.
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("<b>Trigger mode (read-only):</b>"))
+        self.trigger_mode_label = QLabel("---")
+        self.trigger_mode_label.setStyleSheet("font-weight:bold; color:#1565C0;")
+        mode_row.addWidget(self.trigger_mode_label)
+        mode_row.addStretch()
+        layout.addLayout(mode_row)
 
         ref_options = ["T0", "A", "B", "C", "D"]
         self.delay_widgets = {}
@@ -287,9 +321,41 @@ class DG535Panel(QGroupBox):
                 "width": width_spin,
                 "width_combo": width_combo,
             }
+
+            # Any operator edit marks this channel dirty. Programmatic fills
+            # from a readback do not (see set_delay_with_reference).
+            delay_spin.valueChanged.connect(
+                lambda _v, n=ch_name: self._mark_channel_dirty(n))
+            delay_combo.currentIndexChanged.connect(
+                lambda _i, n=ch_name: self._mark_channel_dirty(n))
+            ref_combo.currentIndexChanged.connect(
+                lambda _i, n=ch_name: self._mark_channel_dirty(n))
+
+            # The GUI writes delays and references only. Width is not sent to
+            # the DG535, so it must not look editable.
+            width_spin.setEnabled(False)
+            width_combo.setEnabled(False)
+            width_spin.setToolTip("Not written by the GUI.")
+
+            # Delays are always microseconds. The unit is locked because the
+            # panel multiplies the spin box by whatever unit is selected when
+            # the value is read: switching it would silently change the delay
+            # that Apply writes, without the number on screen changing.
+            _us_index = delay_combo.findData(1e-6)
+            if _us_index >= 0:
+                delay_combo.setCurrentIndex(_us_index)
+            delay_combo.setEnabled(False)
+            delay_combo.setToolTip("Delays are always entered in microseconds.")
+
             layout.addWidget(group)
 
-        self.btn_apply_delays = QPushButton("Apply All Delays")
+        # Enabled only once a readback has filled the fields, so "changed"
+        # is always measured against the instrument, not the panel defaults.
+        self.btn_apply_delays = QPushButton("Apply Changed Delays to DG535")
+        self.btn_apply_delays.setEnabled(False)
+        self.btn_apply_delays.setToolTip(
+            "Read the DG535 back first. Only channels whose delay or "
+            "reference differs from that readback are written.")
         layout.addWidget(self.btn_apply_delays)
         layout.addStretch()
 
@@ -350,7 +416,10 @@ class DG535Panel(QGroupBox):
             }
 
         layout.addLayout(grid)
+        # Output configuration is not written by the GUI.
         self.btn_apply_outputs = QPushButton("Apply All Output Settings")
+        self.btn_apply_outputs.setEnabled(False)
+        self.btn_apply_outputs.setToolTip("Disabled: the GUI does not write outputs.")
         layout.addWidget(self.btn_apply_outputs)
         layout.addStretch()
 
@@ -370,6 +439,8 @@ class DG535Panel(QGroupBox):
         store_layout.addWidget(QLabel("Location (1-9):"))
         store_layout.addWidget(self.store_location)
         self.btn_store = QPushButton("Store")
+        self.btn_store.setEnabled(False)
+        self.btn_store.setToolTip("Disabled: the GUI does not write instrument memory.")
         store_layout.addWidget(self.btn_store)
         layout.addWidget(store_group)
 
@@ -382,6 +453,9 @@ class DG535Panel(QGroupBox):
         recall_layout.addWidget(QLabel("Location (0=defaults, 1-9):"))
         recall_layout.addWidget(self.recall_location)
         self.btn_recall = QPushButton("Recall")
+        self.btn_recall.setEnabled(False)
+        self.btn_recall.setToolTip(
+            "Disabled: a recall would overwrite the delays and the trigger mode.")
         recall_layout.addWidget(self.btn_recall)
         layout.addWidget(recall_group)
 
@@ -389,6 +463,9 @@ class DG535Panel(QGroupBox):
         defaults_layout = QVBoxLayout()
         defaults_group.setLayout(defaults_layout)
         self.btn_recall_defaults = QPushButton("Recall Factory Defaults (Location 0)")
+        self.btn_recall_defaults.setEnabled(False)
+        self.btn_recall_defaults.setToolTip(
+            "Disabled: RC 0 would reset the delays and the trigger mode.")
         defaults_layout.addWidget(self.btn_recall_defaults)
         layout.addWidget(defaults_group)
 
@@ -396,6 +473,8 @@ class DG535Panel(QGroupBox):
         status_layout = QVBoxLayout()
         status_group.setLayout(status_layout)
         self.btn_read_status = QPushButton("Read Status")
+        self.btn_read_status.setEnabled(False)
+        self.btn_read_status.setToolTip("Not wired up.")
         status_layout.addWidget(self.btn_read_status)
         self.error_status_label = QLabel("Error Status: ---")
         self.inst_status_label = QLabel("Instrument Status: ---")
@@ -478,6 +557,51 @@ class DG535Panel(QGroupBox):
 
     def set_status(self, text: str):
         self.status_label.setText(f"Status: {text}")
+
+    # =========================================================================
+    # Readback helpers (filled from the instrument, not typed by the operator)
+    # =========================================================================
+    def set_trigger_mode_text(self, text: str):
+        """Show the trigger mode read back from the instrument."""
+        self.trigger_mode_label.setText(str(text))
+
+    def set_delay_with_reference(self, channel: str, reference: str, delay_seconds: float):
+        """Fill one channel's reference and delay from a readback.
+
+        Shown in microseconds (6 decimals = 1 ps, finer than the DG535's 5 ps
+        step). Filling never marks the channel dirty: only operator edits do.
+        """
+        w = self.delay_widgets.get(channel)
+        if not w:
+            return
+        self._loading_readback = True
+        try:
+            idx = w["reference"].findText(str(reference))
+            if idx >= 0:
+                w["reference"].setCurrentIndex(idx)
+            unit_idx = w["delay_combo"].findData(1e-6)      # microseconds
+            if unit_idx >= 0:
+                w["delay_combo"].setCurrentIndex(unit_idx)
+            w["delay"].setValue(float(delay_seconds) * 1e6)
+        finally:
+            self._loading_readback = False
+        self._dirty_channels.discard(channel)
+
+    def _mark_channel_dirty(self, channel: str):
+        """An operator edit on this channel. Ignored while loading a readback."""
+        if not self._loading_readback:
+            self._dirty_channels.add(channel)
+
+    def dirty_channels(self):
+        """Channels edited since the last readback, in A-D order."""
+        return [c for c in ("A", "B", "C", "D") if c in self._dirty_channels]
+
+    def clear_dirty(self):
+        self._dirty_channels.clear()
+
+    def set_apply_enabled(self, enabled: bool):
+        """Apply stays disabled until a readback has filled the fields."""
+        self.btn_apply_delays.setEnabled(bool(enabled))
 
     def set_error_status(self, value: int):
         bits = []

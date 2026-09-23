@@ -6,7 +6,10 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QThread, Qt, pyqtSignal, QTimer
 from PyQt6.QtWidgets import QFileDialog, QProgressDialog, QMessageBox
 from PyQt6.QtCore import Qt
+import atexit
 import time
+from datetime import datetime
+from pathlib import Path
 
 from gui.dg535_panel import DG535Panel
 from gui.bnc575_panel import BNC575Panel
@@ -14,7 +17,6 @@ from gui.rigol_panel import RigolPanel
 from gui.sf6_window import SF6Window
 from gui.wj_panel import WJPanel
 from gui.scope_plot_window import ScopePlotWindow
-from gui.wj_plot_window import WJPlotWindow
 from gui.numato_relay_panel import NumatoRelayPanel
 from gui.laser_panel import LaserPanel
 
@@ -22,12 +24,26 @@ from utils.logger import LogPanel
 from utils.status_lamp import StatusLamp
 from utils.serial_tools import list_serial_ports
 from utils.capture_single_worker import CaptureSingleWorker, CaptureFourChannelWorker
-from utils.connect_memory import load_memory, save_memory, DEVICE_SIGNATURES
+from utils.connect_memory import load_memory, save_memory
 from utils.data_logger import DataLogger
 from utils.csv_export_worker import CSVExportWorker
 from utils.pressure_worker import PressureWorker
+from utils.system_state import (
+    SystemState, SOURCE_READBACK, SOURCE_COMMANDED, UNKNOWN,
+)
+from utils.shot_logger import ShotLogger
+from utils.shot_snapshot import (
+    build_shot_row, channel_name, resolve_absolute_delays,
+)
+
+from serial.tools import list_ports
 
 from instruments.dg535 import DG535Controller
+from instruments.glassman_id import (
+    SUPPLIES as WJ_SUPPLIES,
+    matches as wj_matches,
+    read_version as wj_read_version,
+)
 from instruments.bnc575 import BNC575Controller, SystemMode, TriggerMode, TriggerEdge
 from instruments.rigol import RigolScope
 from instruments.wj import WJPowerSupply
@@ -80,10 +96,26 @@ class ScopeDelayMainWindow(QMainWindow):
         self.setGeometry(100, 100, 1700, 900)
         self.setMinimumSize(800, 600)
         self.conn = load_memory()
-        self.wj_plot_window = None
 
         # Initialize data logger
         self.data_logger = DataLogger()
+
+        # One central record of what every device is doing, frozen into a row
+        # at each shot, plus the per-shot logger that owns the global shot
+        # counter. Both are created before the UI strips so the next shot
+        # number can be shown. _deferred_log buffers until log_panel exists.
+        self._early_log_buffer = []
+        self.system_state = SystemState()
+        self.shot_logger = ShotLogger(
+            session_dir=self.data_logger.get_session_dir(),
+            session_timestamp=self.data_logger.session_timestamp,
+            logs_root=self.data_logger.get_logs_root(),
+            experiment_log_file=Path(self.data_logger.get_log_file_path()).name,
+            log_func=self._deferred_log,
+            repo_dir=Path(__file__).resolve().parent.parent,
+        )
+        self._current_shot_number = None
+        atexit.register(self._atexit_cleanup)
 
         # --- instruments ---
         self.dg = DG535Controller()
@@ -149,6 +181,11 @@ class ScopeDelayMainWindow(QMainWindow):
         # Remove tabs - just use main layout for Scope + Delay controls
         self.build_scope_controls(main_layout)
 
+        # The log panel exists now: flush anything logged during startup.
+        for _msg in self._early_log_buffer:
+            self.log(_msg)
+        self._early_log_buffer.clear()
+
         # Create SF6 window as separate top-level window (now includes WJ plots)
         self.sf6_window = SF6Window(
             pressure_gauge_min=self.pressure_gauge_min,
@@ -187,6 +224,26 @@ class ScopeDelayMainWindow(QMainWindow):
 
         # Write a test log entry to verify logging is working
         self.data_logger.log_info("SYSTEM", "GUI started successfully")
+
+        # SESSION_START carries the shot number this launch would fire next
+        # and the code version that would fire it.
+        self.data_logger.log_session_start(
+            self.shot_logger.peek_next_shot_number(),
+            self.shot_logger.gui_version,
+            notes="" if self.shot_logger.counter_available
+                  else f"shot counter NOT owned: {self.shot_logger.counter.lock_message}",
+        )
+        self.log(f"[SHOT] Next shot number: {self.shot_logger.peek_next_shot_number()} "
+                 f"(gui {self.shot_logger.gui_version})")
+        if not self.shot_logger.counter_available:
+            # Two GUIs open at once would otherwise claim the same number.
+            self.log(f"[SHOT] WARNING: {self.shot_logger.counter.lock_message}")
+            self.set_status("red", "Shot counter locked by another GUI")
+            QTimer.singleShot(400, lambda: self.error_popup(
+                "Shot counter locked",
+                f"{self.shot_logger.counter.lock_message}.\n\n"
+                "This GUI will not claim shot numbers. Close the other instance "
+                "and restart this one before firing."))
         self.current_data = None
         # Captured waveform data per scope id (1/2/3). Each capture stores its
         # data here so export can write rigol<N>_<timestamp>.csv for every scope,
@@ -283,6 +340,7 @@ class ScopeDelayMainWindow(QMainWindow):
         """Forget the last reading so nothing (interlock, logs) trusts it."""
         self._latest_psi = None
         self._opta_fault = None
+        self.system_state.clear("pressure")
 
     def _on_pressure_link_up(self, where):
         self._opta_link_up = True
@@ -321,6 +379,18 @@ class ScopeDelayMainWindow(QMainWindow):
 
         # A dead or over-range sensor must not pass for a real pressure.
         self._latest_psi = None if fault else d["psi"]
+
+        # Cache for the shot snapshot. The Opta is polled continuously and is
+        # never queried inside the fire path; the row records how old this
+        # sample was at t0 instead.
+        self.system_state.update("pressure", {
+            "psi": d["psi"],
+            "volts": d["volts"],
+            "counts": d["counts"],
+            "status": ("UNDER_RANGE" if d["under_range"]
+                       else "OVER_RANGE" if d["over_range"] else "OK"),
+            "sample_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        }, source=SOURCE_READBACK)
         self.data_logger.log_opta_pressure(
             d["psi"], d["volts"], d["counts"], d["under_range"], d["over_range"])
 
@@ -387,6 +457,8 @@ class ScopeDelayMainWindow(QMainWindow):
         for idx, wj in enumerate(self.wj_units):
             worker = WJReaderThread(wj)
             worker.new_data.connect(lambda t, kv, ma, i=idx: self.handle_wj_plot_data(i, t, kv, ma))
+            # Full Q reply (kV, mA, HV state, fault) for the state cache + log.
+            worker.new_packet.connect(lambda pkt, i=idx: self.on_wj_packet(i, pkt))
             worker.start()
             self.wj_workers.append(worker)
 
@@ -409,11 +481,9 @@ class ScopeDelayMainWindow(QMainWindow):
             except Exception:
                 pass
 
-        # Log WJ data
-        try:
-            self.data_logger.log_wj_voltage(unit_index + 1, kv, ma, hv_on=False, fault=False)
-        except Exception as e:
-            self.log(f"[DataLogger ERROR] Failed to log WJ{unit_index+1} plot data: {e}")
+        # WJ_VOLTAGE rows are written by on_wj_packet, which has the supply's
+        # real HV and fault bits. This path only plots; it used to log
+        # hv_on=False/fault=False as constants.
 
         # Store data with separate time arrays for each unit
         # Unit 1
@@ -514,13 +584,15 @@ class ScopeDelayMainWindow(QMainWindow):
         self.laser_panel = LaserPanel(
             log_func=self.log, save_func=save_memory,
             default_port="COM16", title="CFR Laser 1",
-            save_key="CFR_LASER_COM", log_tag="Laser1")
+            save_key="CFR_LASER_COM", log_tag="Laser1",
+            event_func=self._on_laser_event)
         self.laser_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         self.laser_panel2 = LaserPanel(
             log_func=self.log, save_func=save_memory,
             default_port="COM11", title="CFR Laser 2",
-            save_key="CFR_LASER2_COM", log_tag="Laser2")
+            save_key="CFR_LASER2_COM", log_tag="Laser2",
+            event_func=self._on_laser_event)
         self.laser_panel2.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         # --------------------------------
@@ -588,7 +660,16 @@ class ScopeDelayMainWindow(QMainWindow):
         # Connect buttons
         # --------------------------------
         self.dg_panel.btn_connect.clicked.connect(self.on_dg_connect)
-        self.dg_panel.btn_fire.clicked.connect(self.on_dg_fire)
+        # The laser DG535 is read back and (deliberately) written only through
+        # these two buttons. The GUI never changes its trigger mode and never
+        # sends SS: it stays externally triggered by BNC575 channel B.
+        self.dg_panel.btn_fire.setText("Read Back DG535")
+        self.dg_panel.btn_fire.setToolTip(
+            "Read the laser DG535's four delays, their reference channels and "
+            "the trigger mode, and fill the panel with them.")
+        self.dg_panel.btn_fire.clicked.connect(self.on_dg_readback)
+        self.dg_panel.btn_apply_delays.clicked.connect(self.on_dg_apply_delays)
+        self.dg_panel.btn_read_all.clicked.connect(self.on_dg_readback)
 
         # BNC575 connections
         self.bnc_panel.btn_connect.clicked.connect(self.on_bnc_connect)
@@ -676,6 +757,7 @@ class ScopeDelayMainWindow(QMainWindow):
                 save_memory("DG535_COM", port)
                 self.log(f"[DG535] Connected on {port}")
                 self.dg_panel.lamp.set_status("green", "Connected")
+                self._dg_read_all_settings()
                 self.dg_panel.set_status(f"Connected on {port}")
             except Exception as e:
                 self.log(f"[DG535] NOT CONNECTED: {e}")
@@ -826,7 +908,12 @@ class ScopeDelayMainWindow(QMainWindow):
 
 
     def _bnc_read_all_settings(self):
-        """Read all BNC575 settings and update panel"""
+        """Read the full BNC575 configuration back and cache it.
+
+        Runs at connect and after every apply, never in the fire path. The
+        shot row uses these read-back values rather than the GUI's spin boxes,
+        so a setting applied in an earlier GUI session is still recorded.
+        """
         try:
             # Read timing settings
             wA, dA, wB, dB, wC, dC, wD, dD = self.bnc.read_settings()
@@ -838,21 +925,49 @@ class ScopeDelayMainWindow(QMainWindow):
             self.bnc_panel.set_delayC(dC)
             self.bnc_panel.set_widthD(wD)
             self.bnc_panel.set_delayD(dD)
-            
+
             # Read period
             period = self.bnc.get_period()
             self.bnc_panel.set_period(period)
-            
-            # Read channel states
+
+            # Read channel states, and polarity for the shot row
+            widths = {"A": wA, "B": wB, "C": wC, "D": wD}
+            delays = {"A": dA, "B": dB, "C": dC, "D": dD}
+            channels = {}
             for ch in ['A', 'B', 'C', 'D']:
                 enabled = self.bnc.get_channel_state(ch)
                 self.bnc_panel.set_channel_enabled(ch, enabled)
-            
+                try:
+                    polarity = self.bnc.get_channel_polarity(ch)
+                    polarity = getattr(polarity, "value", polarity) or ""
+                except Exception:
+                    polarity = UNKNOWN
+                channels[ch] = {
+                    "delay_s": delays[ch],
+                    "width_s": widths[ch],
+                    "enabled": enabled,
+                    "polarity": polarity,
+                }
+
             # Read system mode
             mode = self.bnc.get_system_mode()
             if mode:
                 self.bnc_panel.set_system_mode(mode.value)
-            
+
+            try:
+                trigger_mode = self.bnc.get_trigger_mode()
+                trigger_mode = getattr(trigger_mode, "value", trigger_mode) or UNKNOWN
+            except Exception:
+                trigger_mode = UNKNOWN
+
+            self.system_state.update("bnc575", {
+                "channels": channels,
+                "period_s": period,
+                "system_mode": mode.value if mode else UNKNOWN,
+                "trigger_mode": trigger_mode,
+                "armed": self.bnc_trigger_armed,
+            }, source=SOURCE_READBACK)
+
             self.log("[BNC575] Read all settings from device")
         except Exception as e:
             self.log(f"[BNC575] Error reading settings: {e}")
@@ -930,6 +1045,11 @@ class ScopeDelayMainWindow(QMainWindow):
             self.numato_relay.connect(port)
             relay_panel.set_connected(True, port)
             self.log(f"[Relay] Connected to {port}")
+            # The module reports no relay states, and this GUI has issued no
+            # commands yet, so the physical state is genuinely unknown.
+            self.system_state.update(
+                "relays", {"states": {}, "source": "unknown"}, source=SOURCE_COMMANDED)
+            self.data_logger.log_relay_state({}, source="unknown at connect")
             self._mark_interlock(2, f"relay connected {port}")
 
             # Save port to memory
@@ -962,6 +1082,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self.numato_relay.set_relay(channel, state)
             state_str = "ON" if state else "OFF"
             self.log(f"[Relay] Channel {channel} {state_str}")
+            self._record_relay_state(channel, state, ok=True)
             self._mark_interlock(2, f"relay ch{channel} responded")
 
             # Interlock: turning ON Charging Relay (CH1) also energizes Discharging Relay (CH0)
@@ -978,6 +1099,8 @@ class ScopeDelayMainWindow(QMainWindow):
             self.numato_relay.all_on()
             self.relay_panel.update_all_states([True, True, True, True])
             self.log("[Relay] All channels ON")
+            for _ch in range(4):
+                self._record_relay_state(_ch, True, ok=True)
             self._mark_interlock(2, "relay all on responded")
         except Exception as e:
             self.log(f"[Relay ERROR] {e}")
@@ -989,6 +1112,8 @@ class ScopeDelayMainWindow(QMainWindow):
             self.numato_relay.all_off()
             self.relay_panel.update_all_states([False, False, False, False])
             self.log("[Relay] All channels OFF")
+            for _ch in range(4):
+                self._record_relay_state(_ch, False, ok=True)
             self._mark_interlock(2, "relay all off responded")
         except Exception as e:
             self.log(f"[Relay ERROR] {e}")
@@ -1078,6 +1203,18 @@ class ScopeDelayMainWindow(QMainWindow):
     _RELAY_CHARGING    = 1  # CH1 — Charging Relay 1  (NO)
     _RELAY_DISCHARGING = 0  # CH0 — Discharging Relay 1 (NC)
 
+    # Channel -> shot-log name. This program only identifies two relays by
+    # function ("Charging Relay 1" / "Discharging Relay 1"); neither the panel
+    # nor the driver says which polarity rail they belong to, so the shot row
+    # fills charge_positive/discharge_positive from them and leaves the
+    # negative-rail columns UNKNOWN rather than guessing.
+    _RELAY_NAMES = {
+        0: "discharge_positive",
+        1: "charge_positive",
+        2: "relay3",
+        3: "relay4",
+    }
+
     def _relay_set(self, ch: int, state: bool):
         """Set a relay and update the GUI panel. Safe to call from main thread only."""
         if not self.numato_relay.is_connected:
@@ -1087,8 +1224,10 @@ class ScopeDelayMainWindow(QMainWindow):
             self.numato_relay.set_relay(ch, state)
             self.relay_panel.update_relay_state(ch, state)
             self.log(f"[Relay] CH{ch} → {'ON' if state else 'OFF'}")
+            self._record_relay_state(ch, state, ok=True)
         except Exception as e:
             self.log(f"[Relay ERROR] CH{ch}: {e}")
+            self._record_relay_state(ch, state, ok=False)
 
     def on_export_csv(self):
         """Manual export (toolbar/button): export every captured scope to its
@@ -1134,7 +1273,8 @@ class ScopeDelayMainWindow(QMainWindow):
         self._export_silent = silent
 
         for scope_id in sorted(self.captured_scopes):
-            path = self.data_logger.scope_export_path(scope_id)
+            path = self.data_logger.scope_export_path(
+                scope_id, shot_index=self.shot_logger.session_shot_index)
             worker = CSVExportWorker(self.captured_scopes[scope_id], path)
             worker.finished.connect(self._on_one_export_finished)
             worker.error.connect(self.on_export_error)
@@ -1250,6 +1390,19 @@ class ScopeDelayMainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def log(self, msg: str):
         self.log_panel.log(msg)
+        # Mirror every on-screen line to gui_log_<session>.txt, flushed per
+        # line: the GUI is usually closed within seconds of a shot.
+        try:
+            self.data_logger.append_gui_line(msg)
+        except Exception:
+            pass
+
+    def _deferred_log(self, msg: str):
+        """log() that also works before the log panel is built."""
+        if getattr(self, "log_panel", None) is None:
+            self._early_log_buffer.append(msg)
+        else:
+            self.log(msg)
 
     # Text + color for each Rigol capture-mode state shown in the status strip.
     _CAPTURE_STATE_STYLE = {
@@ -1320,6 +1473,11 @@ class ScopeDelayMainWindow(QMainWindow):
         title.setStyleSheet("font-weight:bold;")
         strip.addWidget(title)
 
+        # The operator sees the next shot number before firing.
+        self.lbl_next_shot = QLabel()
+        strip.addWidget(self.lbl_next_shot)
+        strip.addSpacing(10)
+
         self.interlock_lamps = {}
         self.interlock_manual = {}
         self.interlock_passed = {}
@@ -1354,6 +1512,9 @@ class ScopeDelayMainWindow(QMainWindow):
         strip.addStretch()
         parent_layout.addLayout(strip)
 
+        self._update_next_shot_label()
+        self._update_interlock_state()
+
         # Poll the cheap (no-serial) checks on a timer.
         self._interlock_timer = QTimer(self)
         self._interlock_timer.setInterval(1000)
@@ -1372,7 +1533,11 @@ class ScopeDelayMainWindow(QMainWindow):
             lamp.set_status("green")
         self.log(f"[INTERLOCK] Step {idx} PASSED"
                  + (f" ({source})" if source else ""))
+        self.data_logger.log_interlock(
+            "PASS", step=dict(self._INTERLOCK_STEPS).get(idx, str(idx)),
+            detail=source, passed=True)
         self._update_interlock_fire()
+        self._update_interlock_state()
 
     def _update_interlock_fire(self):
         if hasattr(self, "btn_interlock_fire"):
@@ -1385,7 +1550,9 @@ class ScopeDelayMainWindow(QMainWindow):
             self.interlock_lamps[idx].set_status("red")
             self.interlock_manual[idx].setChecked(False)
         self._update_interlock_fire()
+        self._update_interlock_state()
         self.log("[INTERLOCK] Checklist reset.")
+        self.data_logger.log_interlock("CHECK", detail="checklist reset")
 
     def _poll_interlocks(self):
         """Timer tick: evaluate the auto-checked steps and honor manual
@@ -1422,6 +1589,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self._mark_interlock(3, "manual")
 
         self._update_interlock_fire()
+        self._update_interlock_state()
 
     def _check_lasers_armed(self):
         """True only if every present laser panel reports EXT-armed."""
@@ -1436,12 +1604,22 @@ class ScopeDelayMainWindow(QMainWindow):
 
     def on_interlock_fire(self):
         if not all(self.interlock_passed.values()):
+            labels = dict(self._INTERLOCK_STEPS)
+            failed = [labels.get(i, str(i))
+                      for i, ok in self.interlock_passed.items() if not ok]
             self.error_popup(
                 "Interlocks not satisfied",
                 "All interlock steps (1-4) must be green before firing.")
+            # A blocked attempt is not a shot: no shot number is consumed.
+            self.data_logger.log_interlock("FAIL", detail="; ".join(failed), passed=False)
+            self.data_logger.log_fire_blocked("interlocks_not_satisfied", "; ".join(failed))
+            self.log(f"[SHOT] Fire blocked by interlocks: {', '.join(failed)}")
             return
-        self.log("[INTERLOCK] All checks green - running Single + Capture.")
-        self.on_capture_all_scopes()
+        self.log("[INTERLOCK] All checks green - firing.")
+        # Step 5 fires the real shot. on_bnc_fire is the only path that sends
+        # the master trigger and records a shot row; arming the scopes is a
+        # separate action (on_capture_all_scopes).
+        self.on_bnc_fire()
 
     def set_status(self, color: str, text: str):
         self.status_lamp.set_status(color, text)
@@ -1463,37 +1641,155 @@ class ScopeDelayMainWindow(QMainWindow):
             self.log("[DG535] Connected.")
             self.dg_panel.lamp.set_status("green", "Connected")
             self.dg_panel.set_status(f"Connected on {port}")
+            self._dg_read_all_settings()
         except Exception as e:
             self.set_status("red", "DG535 connection failed")
             self.log(f"[DG535 ERROR] {e}")
             self.error_popup("DG535 Error", str(e))
 
-    def on_dg_fire(self):
+    def on_dg_readback(self):
+        """Read the laser DG535 back into the panel and the system state."""
+        if not self.dg.is_connected():
+            self.error_popup("DG535", "Not connected")
+            return
+        self.set_status("yellow", "Reading DG535 back...")
+        if self._dg_read_all_settings():
+            self.set_status("green", "DG535 read back")
+        else:
+            self.set_status("red", "DG535 readback failed")
+
+    def on_dg_apply_delays(self):
+        """Write only the delays/references the operator actually changed.
+
+        Never touches the trigger mode and never sends SS: the unit stays
+        externally triggered by BNC575 channel B. Requires a readback first,
+        so "unchanged" is measured against what the instrument reported, not
+        against the panel's defaults.
+        """
+        if not self.dg.is_connected():
+            self.error_popup("DG535", "Not connected")
+            return
+        last = getattr(self, "_dg_last_readback", None)
+        if not last:
+            self.error_popup("DG535", "Read the DG535 back before applying.")
+            return
+
+        from instruments.dg535 import Channel
+        ch_ids = {"T0": Channel.T0, "A": Channel.A, "B": Channel.B,
+                  "C": Channel.C, "D": Channel.D}
+
+        # What the panel is asking for.
+        desired = {}
+        for name in ("A", "B", "C", "D"):
+            ref_name, delay = self.dg_panel.get_delay_with_reference(name)
+            desired[name] = {"ref": ref_name, "delay_s": float(delay)}
+
+        # Reject a bad reference graph before writing anything.
+        problem = self._dg_validate_references(desired)
+        if problem:
+            self.error_popup("DG535 reference error", problem)
+            self.data_logger.log_error("DG535_laser", f"apply rejected: {problem}")
+            return
+
+        # Only channels the operator actually edited since the last readback.
+        # Deliberately NOT a comparison against the readback: the instrument
+        # reports more digits than the spin box shows, so comparing values
+        # would mark untouched channels as changed.
+        dirty = self.dg_panel.dirty_channels()
+        changes = []
+        for name in dirty:
+            want = desired[name]
+            have = last.get(name, {})
+            changes.append((name, channel_name(have.get("ref")) or UNKNOWN,
+                            have.get("delay_s"), want["ref"], want["delay_s"]))
+
+        if not changes:
+            self.log("[DG535] Apply: no channel has been edited since the readback.")
+            self.error_popup("DG535", "Nothing to apply: no channel has been "
+                                      "edited since the last readback.")
+            return
+
+        lines = [
+            f"{name}:  {'' if old_d is None else f'{old_d * 1e6:.6f} us'} "
+            f"(ref {old_ref})   ->   {new_d * 1e6:.6f} us (ref {new_ref})"
+            for name, old_ref, old_d, new_ref, new_d in changes
+        ]
+        answer = QMessageBox.question(
+            self, "Write to the laser DG535?",
+            "These channels will be written to the laser DG535:\n\n"
+            + "\n".join(lines)
+            + "\n\nThe trigger mode is not changed and no fire is sent.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.log("[DG535] Apply cancelled by the operator.")
+            return
+
+        before = {n: (channel_name(c.get("ref")) or UNKNOWN, c.get("delay_s"))
+                  for n, c in last.items()}
         try:
-            # SAFETY INTERLOCK: Ensure WJ HV supplies are OFF before firing
-            if not self.ensure_wj_hv_off():
-                self.log("[DG535] Fire ABORTED - WJ HV interlock failed")
-                return
-
-            delayA = self.dg_panel.get_delayA()
-            widthA = self.dg_panel.get_widthA()
-
-            self.log(f"[DG535] Config pulse A: delay={delayA:.3e}, width={widthA:.3e}")
-            self.set_status("yellow", "Configuring DG535...")
-            self.dg.configure_pulse_A(delayA, widthA)
-            self.data_logger.log_dg535_config(delayA, widthA)
-
-            self.dg.set_single_shot()
-            self.dg.fire()
-            self.data_logger.log_dg535_pulse(delayA, widthA)
-
-            self.set_status("green", "DG535 pulse fired")
-            self.log("[DG535] Pulse fired.")
+            for name, _old_ref, _old_d, new_ref, new_d in changes:
+                self.dg.set_delay(ch_ids[name], ch_ids[new_ref], new_d)
+                self.log(f"[DG535] Wrote {name} = {new_d * 1e6:.6f} us (ref {new_ref})")
         except Exception as e:
-            self.set_status("red", "DG535 fire failed")
-            self.log(f"[DG535 ERROR] {e}")
-            self.data_logger.log_error("DG535", str(e))
-            self.error_popup("DG535 Fire Error", str(e))
+            self.log(f"[DG535 ERROR] write failed: {e}")
+            self.data_logger.log_error("DG535_laser", f"apply write failed: {e}")
+            self.error_popup("DG535 Apply Error", str(e))
+            self._dg_read_all_settings()
+            return
+
+        # Confirm the instrument holds what we just wrote.
+        self._dg_read_all_settings()
+        after_state = (self.system_state.get("dg535_laser") or {}).get("channels", {})
+        after = {n: (channel_name(c.get("ref")) or UNKNOWN, c.get("delay_s"))
+                 for n, c in after_state.items()}
+
+        mismatches = []
+        for name, _old_ref, _old_d, new_ref, new_d in changes:
+            got_ref, got_delay = after.get(name, (UNKNOWN, None))
+            if got_ref != new_ref or got_delay is None or abs(got_delay - new_d) > 1e-11:
+                mismatches.append(
+                    f"{name}: wrote {new_d * 1e6:.6f} us (ref {new_ref}), "
+                    f"read back "
+                    f"{'nothing' if got_delay is None else f'{got_delay * 1e6:.6f} us'} "
+                    f"(ref {got_ref})")
+
+        self.data_logger.log_custom(
+            "DG535_APPLY", "DG535_laser",
+            param1=",".join(c[0] for c in changes),
+            param2="mismatch" if mismatches else "verified",
+            notes=("before " + "; ".join(f"{n}={d[1] if d[1] is None else f'{d[1] * 1e6:.6f}us'}"
+                                         f"(ref {d[0]})" for n, d in sorted(before.items()))
+                   + " | after " + "; ".join(f"{n}={d[1] if d[1] is None else f'{d[1] * 1e6:.6f}us'}"
+                                             f"(ref {d[0]})" for n, d in sorted(after.items()))))
+
+        if mismatches:
+            detail = "\n".join(mismatches)
+            self.log(f"[DG535 ERROR] readback does not match what was written:\n{detail}")
+            self.data_logger.log_error("DG535_laser", "apply mismatch: " + "; ".join(mismatches))
+            self.error_popup("DG535 did not take the change", detail)
+            self.set_status("red", "DG535 apply MISMATCH")
+        else:
+            self.log(f"[DG535] Apply verified for {', '.join(c[0] for c in changes)}.")
+            self.set_status("green", "DG535 delays applied")
+            self.dg_panel.clear_dirty()
+
+    @staticmethod
+    def _dg_validate_references(desired):
+        """'' if the reference graph is sane, else why it is not.
+
+        A channel referenced to itself, or a loop such as B->D->B, would make
+        the timing unresolvable (and the shot row's pulse spacing blank).
+        """
+        for name, entry in desired.items():
+            if channel_name(entry.get("ref")) == name:
+                return f"Channel {name} is referenced to itself."
+        unresolved = [n for n, v in resolve_absolute_delays(desired).items() if v is None]
+        if unresolved:
+            return ("Circular or unresolvable reference chain for: "
+                    + ", ".join(sorted(unresolved)))
+        return ""
 
     def on_dg_disconnect(self):
         try:
@@ -1572,6 +1868,9 @@ class ScopeDelayMainWindow(QMainWindow):
             self.log(f"  C: w={wC:.3e}s, d={dC:.3e}s")
             self.log(f"  D: w={wD:.3e}s, d={dD:.3e}s")
             self.log(f"  Period: {period:.3e}s")
+            # Re-read so the cached config is what the instrument holds, not
+            # what the spin boxes say. Connect/apply only, never at fire time.
+            self._bnc_read_all_settings()
             self.set_status("green", "BNC575 settings applied")
 
         except Exception as e:
@@ -1608,6 +1907,7 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.bnc.set_trigger_settings(source, slope, level)
                 self.bnc.arm_trigger()
                 self.bnc_trigger_armed = True
+                self.system_state.update("bnc575", {"armed": True})
                 self.bnc_panel.btn_arm.setText("Disarm (EXT TRIG)")
                 self.data_logger.log_bnc575_arm(level)
                 self.set_status("green", "BNC575 armed (EXT)")
@@ -1615,6 +1915,7 @@ class ScopeDelayMainWindow(QMainWindow):
             else:
                 self.bnc.disarm_trigger()
                 self.bnc_trigger_armed = False
+                self.system_state.update("bnc575", {"armed": False})
                 self.bnc_panel.btn_arm.setText("Arm (EXT TRIG)")
                 self.set_status("yellow", "BNC575 disarmed")
                 self.log("[BNC575] Disarmed external trigger")
@@ -1628,16 +1929,67 @@ class ScopeDelayMainWindow(QMainWindow):
     def on_bnc_fire(self):
         if not self.bnc_connected:
             self.error_popup("BNC575", "Not connected")
+            self.data_logger.log_fire_blocked("bnc575_not_connected")
             return
 
-        # SAFETY INTERLOCK: Ensure WJ HV supplies are OFF before firing
+        # Cached state only: nothing is queried in the fire path.
+        #
+        # fire_internal() sends :PULSE0:MODE SING then :PULSE0:STATE ON and
+        # never touches :PULSE0:TRIG:MODE. In TRIG/DUAL mode that just re-arms
+        # the unit to wait for an external edge, so no t0 is produced - a
+        # missed shot that would still consume a shot number.
+        bnc_state = self.system_state.get("bnc575")
+        cached_mode = str(bnc_state.get("trigger_mode", "") or "").upper()
+        if cached_mode in ("TRIG", "TRIGGERED", "DUAL") or bnc_state.get("armed"):
+            detail = (f"cached trigger mode {cached_mode or UNKNOWN}, "
+                      f"armed={bnc_state.get('armed')}")
+            self.log(f"[BNC575] Fire BLOCKED - {detail}")
+            self.data_logger.log_fire_blocked(
+                "bnc575_in_external_trigger_mode", detail)
+            self.error_popup(
+                "BNC575 in external trigger mode",
+                "The BNC575 is set for an external trigger, so the fire "
+                "command would not produce t0.\n\nDisarm it (Arm/Disarm EXT "
+                "TRIG) and fire again.")
+            return
+
+        # SAFETY INTERLOCK: Ensure WJ HV supplies are OFF before firing.
+        # The WJs charge the Marx and must be off at t0; the charge values
+        # cached while HV was on are what the shot row reports.
         if not self.ensure_wj_hv_off():
             self.log("[BNC575] Fire ABORTED - WJ HV interlock failed")
+            self.data_logger.log_fire_blocked(
+                "wj_hv_off_unconfirmed", "HV could not be confirmed off")
             return
+
+        # A connected scope that is not armed will miss this shot. Cached
+        # state only, and never a reason to block: the shot goes ahead and the
+        # row records which scopes were not ready.
+        unarmed = [f"rigol{sid}" for sid in (1, 2, 3)
+                   if getattr(self, f"rigol{sid}_connected", False)
+                   and not (self.system_state.get(f"rigol{sid}") or {}).get("armed")]
+        notes = ""
+        if unarmed:
+            notes = "scopes not armed at t0: " + ", ".join(unarmed)
+            self.log(f"[BNC575] WARNING: {notes} - they will miss this shot")
+            self.data_logger.log_error("Shot", notes)
 
         try:
             self.set_status("yellow", "Firing BNC575 internal pulse...")
+            # ================= MASTER SHOT (t0) =================
+            # This is the only shot command the PC sends. Trigger chain:
+            #   BNC575 fire  = t0
+            #     channel A -> screen room DG535 (NOT connected to this PC),
+            #                  whose A output at 180 us triggers the Marx
+            #                  trigger generator
+            #     channel B -> laser DG535 (self.dg, GPIB 15 over Prologix),
+            #                  A = laser 1 flashlamp, B = laser 1 Q-switch,
+            #                  C = laser 2 flashlamp, D = laser 2 Q-switch
+            # Nothing is queried between here and the trigger: the snapshot is
+            # built from cached state only, and the shot number is written
+            # immediately after the command returns.
             self.bnc.fire_internal()
+            self._record_shot(notes=notes)
             self.data_logger.log_bnc575_pulse(mode='INTERNAL')
             self.set_status("green", "BNC575 internal fired")
             self.log("[BNC575] Internal pulse fired.")
@@ -1849,22 +2201,86 @@ class ScopeDelayMainWindow(QMainWindow):
             return
         self.start_four_channel_capture(self.rigol3, "Rigol #3", 3)
 
+    # A scope may sit armed for a long time between arming and the shot.
+    _CAPTURE_TIMEOUT_S = 1800.0
+
     def start_four_channel_capture(self, rigol, name, scope_id):
         """Start a 4-channel capture worker for a scope"""
         self.set_status("yellow", f"Capturing {name} (4 channels)...")
-        self.log(f"[{name}] 4-channel capture started...")
+        self.log(f"[{name}] armed, waiting up to "
+                 f"{self._CAPTURE_TIMEOUT_S / 60:.0f} min for the trigger...")
         self._set_capture_state(scope_id, "armed")
+        self.system_state.update(f"rigol{scope_id}", {
+            "connected": True, "armed": True, "capture_ok": None,
+        }, source=SOURCE_COMMANDED)
 
-        worker = CaptureFourChannelWorker(rigol, name, timeout=300.0)
+        worker = CaptureFourChannelWorker(
+            rigol, name, timeout=self._CAPTURE_TIMEOUT_S)
         worker.finished.connect(lambda data, nm: self.on_four_channel_capture_finished(data, nm, scope_id))
         worker.error.connect(lambda msg, nm, sid=scope_id: self.on_single_capture_error(msg, nm, sid))
-        
+
         # Store worker reference to prevent garbage collection
         setattr(self, f'capture_worker_{scope_id}', worker)
         worker.start()
+        self._start_capture_countdown(scope_id, self._CAPTURE_TIMEOUT_S)
+
+    def _start_capture_countdown(self, scope_id, timeout_s):
+        """Show the remaining trigger wait in the capture status strip."""
+        if not hasattr(self, "_capture_deadlines"):
+            self._capture_deadlines = {}
+        self._capture_deadlines[scope_id] = time.monotonic() + timeout_s
+        timer = getattr(self, "_capture_countdown_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(1000)
+            timer.timeout.connect(self._tick_capture_countdown)
+            self._capture_countdown_timer = timer
+        if not timer.isActive():
+            timer.start()
+        self._tick_capture_countdown()
+
+    def _tick_capture_countdown(self):
+        now = time.monotonic()
+        for scope_id, deadline in list(getattr(self, "_capture_deadlines", {}).items()):
+            remaining = deadline - now
+            if remaining <= 0:
+                self._capture_deadlines.pop(scope_id, None)
+                self._set_capture_state(scope_id, "error", "trigger timeout")
+                continue
+            self._set_capture_state(
+                scope_id, "armed",
+                f"waiting {int(remaining // 60)}:{int(remaining % 60):02d}")
+        if not getattr(self, "_capture_deadlines", None):
+            timer = getattr(self, "_capture_countdown_timer", None)
+            if timer is not None:
+                timer.stop()
+
+    def _stop_capture_countdown(self, scope_id):
+        deadlines = getattr(self, "_capture_deadlines", None)
+        if deadlines:
+            deadlines.pop(scope_id, None)
+        if not deadlines:
+            timer = getattr(self, "_capture_countdown_timer", None)
+            if timer is not None:
+                timer.stop()
+
+    def _finish_pending_capture(self, scope_id):
+        """Log SCOPE_ALL once every scope armed by Capture All has finished.
+
+        This used to live at the end of the old inline capture-all loop; the
+        scopes now finish in background workers, so the event is raised here.
+        """
+        pending = getattr(self, "_pending_capture_ids", None)
+        if not pending:
+            return
+        pending.discard(scope_id)
+        if not pending:
+            self.data_logger.log_scope_all_capture()
+            self.log("[CAPTURE] All armed scopes have finished.")
 
     def on_four_channel_capture_finished(self, data, name, scope_id):
         """Handle 4-channel capture completion"""
+        self._stop_capture_countdown(scope_id)
         (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
         # Store data for export
         self.current_data = data  # ← ADD THIS LINE
@@ -1879,12 +2295,23 @@ class ScopeDelayMainWindow(QMainWindow):
         elif scope_id == 3:
             self.scope_window.update_r3(t1, v1, t2, v2, t3, v3, t4, v4)
 
-        # Log capture (count non-empty channels)
+        # Log capture (count non-empty channels). A capture that finishes
+        # after the shot row was written is tied to the shot by this event's
+        # shot number rather than by rewriting the CSV row.
         ch_counts = [len(t1), len(t2), len(t3), len(t4)]
-        self.data_logger.log_scope_capture(scope_id, ch_counts[0], ch_counts[1])
+        self.data_logger.log_scope_capture(
+            scope_id, ch_counts[0], ch_counts[1],
+            shot_number=self._current_shot_number if self._current_shot_number else '')
+        self.system_state.update(f"rigol{scope_id}", {
+            "armed": False,
+            "capture_ok": True,
+            "file": Path(self.data_logger.scope_export_path(
+                scope_id, shot_index=self.shot_logger.session_shot_index)).name,
+        }, source=SOURCE_READBACK)
 
         self.set_status("green", f"{name} captured (4 ch)")
         self._set_capture_state(scope_id, "done", f"{max(len(t1), len(t2), len(t3), len(t4))} pts")
+        self._finish_pending_capture(scope_id)
         self.log(f"[{name}] 4-channel capture complete. Points: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)}")
 
     def on_r1_disconnect(self):
@@ -1918,152 +2345,67 @@ class ScopeDelayMainWindow(QMainWindow):
     def on_single_capture_error(self, msg, name, scope_id=None):
         self.set_status("red", f"{name} error")
         if scope_id is not None:
+            self._stop_capture_countdown(scope_id)
             self._set_capture_state(scope_id, "error")
+            self.system_state.update(f"rigol{scope_id}", {
+                "armed": False, "capture_ok": False,
+            }, source=SOURCE_READBACK)
+            self._finish_pending_capture(scope_id)
         self.error_popup(f"{name} Capture Error", msg)
         self.log(f"[{name} ERROR] {msg}")
 
 
     def on_capture_all_scopes(self):
-        """Capture all 4 channels from all connected scopes"""
-        self.set_status("yellow", "Preparing for 4-channel capture...")
-        self.log("[CAPTURE] Starting 4-channel capture sequence...")
+        """Arm all three scopes for the next shot. Arming only.
 
-        # SAFETY INTERLOCK: Ensure WJ HV supplies are OFF before firing
-        if not self.ensure_wj_hv_off():
-            self.log("[CAPTURE] Capture ABORTED - WJ HV interlock failed")
-            return
+        This used to turn HV off, arm the BNC575 for an external trigger,
+        configure the DG535 (configure_pulse_A -> set_single_shot) and
+        software fire it. None of that happens here any more:
 
-        # 1. STOP and ARM all Rigols early
+          * nothing is written to the laser DG535 - it stays externally
+            triggered by BNC575 channel B at all times
+          * the BNC575 is not armed for an external trigger, which would stop
+            its own fire command from producing t0
+          * HV is not touched. Arming scopes must not change the HV state; the
+            HV interlock lives in on_bnc_fire, the only shot path.
+
+        Each scope then waits for its trigger in a background worker, so the
+        GUI stays responsive until the shot. SCOPE_ALL is logged by
+        _finish_pending_capture once every armed scope has finished.
+        """
+        self.set_status("yellow", "Arming scopes...")
+        self.log("[CAPTURE] Arming all connected scopes (SINGLE)...")
+
+        armed = []
+        self._pending_capture_ids = set()
         try:
-            if self.rigol1_connected:
-                self.rigol1.stop()
-                self.rigol1.single()
-                self.data_logger.log_scope_arm(1)
-            if self.rigol2_connected:
-                self.rigol2.stop()
-                self.rigol2.single()
-                self.data_logger.log_scope_arm(2)
-            if self.rigol3_connected:
-                self.rigol3.stop()
-                self.rigol3.single()
-                self.data_logger.log_scope_arm(3)
-
-            self.log("[CAPTURE] Rigols set to SINGLE")
-            # Show "Armed" for every connected scope, and force a repaint now —
-            # capture-all blocks the GUI thread during the trigger wait, so this
-            # is the operator's cue that the scopes are armed and waiting.
-            from PyQt6.QtWidgets import QApplication
-            for sid, connected in ((1, self.rigol1_connected),
-                                   (2, self.rigol2_connected),
-                                   (3, self.rigol3_connected)):
-                self._set_capture_state(sid, "armed" if connected else "idle")
-            QApplication.processEvents()
+            for scope_id, (scope, connected) in enumerate(
+                    ((self.rigol1, self.rigol1_connected),
+                     (self.rigol2, self.rigol2_connected),
+                     (self.rigol3, self.rigol3_connected)), start=1):
+                if not connected:
+                    self._set_capture_state(scope_id, "idle")
+                    continue
+                scope.stop()
+                scope.single()
+                self.data_logger.log_scope_arm(scope_id)
+                # Starts the background worker and marks the scope armed.
+                self.start_four_channel_capture(
+                    scope, f"Rigol #{scope_id}", scope_id)
+                self._pending_capture_ids.add(scope_id)
+                armed.append(f"Rigol #{scope_id}")
         except Exception as e:
             self.error_popup("Rigol Error", f"Failed to arm scopes: {e}")
             self.data_logger.log_error("SCOPE", str(e))
             return
 
-        time.sleep(0.25)
-
-        # 2. ARM BNC575 for external trigger
-        try:
-            self.bnc.arm_external_trigger(level=3.0)
-            self.data_logger.log_bnc575_arm(3.0)
-            self.log("[BNC575] Armed for external trigger")
-        except Exception as e:
-            self.error_popup("BNC575 Error", str(e))
-            self.data_logger.log_error("BNC575", str(e))
-            return
-
-        # 3. CONFIGURE DG535 but DO NOT FIRE YET
-        try:
-            delayA = self.dg_panel.get_delayA()
-            widthA = self.dg_panel.get_widthA()
-            self.dg.configure_pulse_A(delayA, widthA)
-            self.data_logger.log_dg535_config(delayA, widthA)
-            self.dg.set_single_shot()
-        except Exception as e:
-            self.error_popup("DG535 Error", str(e))
-            self.data_logger.log_error("DG535", str(e))
-            return
-
-        time.sleep(0.2)
-
-        # 4. FIRE DG535 (MASTER TRIGGER)
-        self.log("[CAPTURE] Firing DG535...")
-        try:
-            self.dg.fire()
-            self.data_logger.log_dg535_pulse(delayA, widthA)
-            self.log("[DG535] Trigger pulse fired.")
-        except Exception as e:
-            self.error_popup("DG535 Fire Error", str(e))
-            self.data_logger.log_error("DG535", str(e))
-            return
-
-        time.sleep(0.5)
-
-        # 5. CAPTURE waveforms (4 channels each)
-        self.set_status("yellow", "Capturing 4-channel waveforms...")
-
-        # if self.rigol1_connected:
-        #     data = self.rigol1.wait_and_capture_four()
-        #     (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
-        #     self.scope_window.update_r1(t1, v1, t2, v2, t3, v3, t4, v4)
-        #     self.data_logger.log_scope_capture(1, len(t1), len(t2))
-        #     self.log(f"[Rigol1] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
-
-        # if self.rigol2_connected:
-        #     data = self.rigol2.wait_and_capture_four()
-        #     (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
-        #     self.scope_window.update_r2(t1, v1, t2, v2, t3, v3, t4, v4)
-        #     self.data_logger.log_scope_capture(2, len(t1), len(t2))
-        #     self.log(f"[Rigol2] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
-
-        # if self.rigol3_connected:
-        #     data = self.rigol3.wait_and_capture_four()
-        #     (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
-        #     self.scope_window.update_r3(t1, v1, t2, v2, t3, v3, t4, v4)
-        #     self.data_logger.log_scope_capture(3, len(t1), len(t2))
-        #     self.log(f"[Rigol3] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
-
-        # self.data_logger.log_scope_all_capture()
-
-        # self.set_status("green", "4-channel capture complete")
-        # self.log("[CAPTURE] Done.")
-        if self.rigol1_connected:
-            data = self.rigol1.wait_and_capture_four()
-            self.current_data = data  # ← ADD THIS
-            self.captured_scopes[1] = data
-            (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
-            self.scope_window.update_r1(t1, v1, t2, v2, t3, v3, t4, v4)
-            self.data_logger.log_scope_capture(1, len(t1), len(t2))
-            self._set_capture_state(1, "done", f"{max(len(t1), len(t2), len(t3), len(t4))} pts")
-            self.log(f"[Rigol1] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
-
-        if self.rigol2_connected:
-            data = self.rigol2.wait_and_capture_four()
-            self.current_data = data  # ← ADD THIS
-            self.captured_scopes[2] = data
-            (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
-            self.scope_window.update_r2(t1, v1, t2, v2, t3, v3, t4, v4)
-            self.data_logger.log_scope_capture(2, len(t1), len(t2))
-            self._set_capture_state(2, "done", f"{max(len(t1), len(t2), len(t3), len(t4))} pts")
-            self.log(f"[Rigol2] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
-
-        if self.rigol3_connected:
-            data = self.rigol3.wait_and_capture_four()
-            self.current_data = data  # ← ADD THIS
-            self.captured_scopes[3] = data
-            (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
-            self.scope_window.update_r3(t1, v1, t2, v2, t3, v3, t4, v4)
-            self.data_logger.log_scope_capture(3, len(t1), len(t2))
-            self._set_capture_state(3, "done", f"{max(len(t1), len(t2), len(t3), len(t4))} pts")
-            self.log(f"[Rigol3] Captured: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)} pts")
-
-        self.data_logger.log_scope_all_capture()
-        self._mark_captures_dirty()
-        self.set_status("green", "4-channel capture complete")
-        self.log("[CAPTURE] Done.")
+        if armed:
+            self.set_status("green", f"Armed: {', '.join(armed)}")
+            self.log(f"[CAPTURE] {', '.join(armed)} armed and waiting. "
+                     f"Press BNC575 Fire to shoot.")
+        else:
+            self.set_status("yellow", "No scopes connected")
+            self.log("[CAPTURE] No connected scopes to arm.")
 
 
     def on_r1_single(self):
@@ -2178,31 +2520,36 @@ class ScopeDelayMainWindow(QMainWindow):
         self.log("[SAFETY] All WJ supplies confirmed HV OFF - safe to fire")
         return True
 
-    def _identify_wj_port(self, index, port):
-        """Confirm the supply on `port` is WJ{index+1} before connecting.
+    # GUI unit index -> supply key in instruments/glassman_id.py.
+    _WJ_SUPPLY_KEYS = ("NEG", "POS")   # WJ1 = negative, WJ2 = positive
 
-        The WJ protocol has no ID query and both USB bridges report the same
-        useless serial, so the firmware version from the read-only V command
-        is the identity (wj_firmware in DEVICE_SIGNATURES). Asked on a
-        separate short-lived handle so the WJ reader thread can't steal the
-        reply. Returns the firmware version; raises IOError when nothing
-        answers or the port holds the other supply.
+    def _identify_wj_port(self, index, port):
+        """Confirm the supply on `port` really is WJ{index+1} before connecting.
+
+        Polarity comes from the USB serial each supply's own chip reports
+        (SUPPLIES in instruments/glassman_id.py). That serial follows the
+        supply to any socket; COM numbers and hub locations do not, and these
+        two supplies have been seen swapping hub locations. The WJ protocol
+        itself cannot report polarity, model or serial number.
+
+        Returns the firmware version (logged, not matched on). Raises IOError
+        if the port is gone, holds the other supply, or never answers.
         """
-        self.wj_units[index].close()   # release the port if this unit already holds it
-        probe = WJPowerSupply()
-        try:
-            probe.connect(port)
-            ver = probe.get_version()
-        finally:
-            probe.close()
-        if ver.get("type") != "B":
-            raise IOError(f"no WJ reply on {port} (got {ver.get('raw')!r})")
-        expected = DEVICE_SIGNATURES.get(f"WJ{index+1}_COM", {}).get("wj_firmware")
-        if expected and ver["version"] != expected:
+        key = self._WJ_SUPPLY_KEYS[index]
+        p = next((p for p in list_ports.comports() if p.device == port), None)
+        if p is None:
+            raise IOError(f"{port} is not present")
+        if not wj_matches(p, WJ_SUPPLIES[key]):
+            actual = p.serial_number or ""
+            other = next((k for k, rule in WJ_SUPPLIES.items() if wj_matches(p, rule)), None)
             raise IOError(
-                f"{port} answers as WJ firmware {ver['version']}, but WJ{index+1} is "
-                f"firmware {expected}; that is the other supply")
-        return ver["version"]
+                f"{port} has USB serial {actual!r}; WJ{index+1} is the {key} supply"
+                + (f" and {port} is the {other} supply" if other else ""))
+        self.wj_units[index].close()   # release the port if this unit already holds it
+        version = wj_read_version(port)
+        if version is None:
+            raise IOError(f"no WJ reply on {port}")
+        return version
 
     def on_wj_connect(self, index, port_override=None):
         row = self.wj_panel.rows[index]
@@ -2327,6 +2674,8 @@ class ScopeDelayMainWindow(QMainWindow):
                 except Exception as e:
                     self.log(f"[DataLogger ERROR] Failed to log WJ{i+1} data: {e}")
 
+                self._cache_wj_packet(i, data)
+
                 row.label_status.setText(
                     f"{kv:.2f} kV | {ma:.3f} mA | "
                     f"HV={'ON' if hv else 'OFF'} | "
@@ -2346,6 +2695,265 @@ class ScopeDelayMainWindow(QMainWindow):
             self._mark_interlock(3, "power supplies read back OK")
 
 
+    # ------------------------------------------------------------------
+    #  Shot snapshot, state caches and shutdown
+    # ------------------------------------------------------------------
+    def _update_next_shot_label(self):
+        """Show the number the next shot will get (and any counter warning)."""
+        label = getattr(self, "lbl_next_shot", None)
+        if label is None:
+            return
+        try:
+            nxt = self.shot_logger.peek_next_shot_number()
+        except Exception:
+            nxt = "?"
+        if self.shot_logger.counter_available:
+            label.setText(f"Next shot: {nxt}")
+            label.setStyleSheet("font-weight:bold;")
+        else:
+            label.setText(f"Next shot: {nxt}  (COUNTER LOCKED)")
+            label.setStyleSheet(
+                "font-weight:bold; background-color:#C62828; color:white;"
+                " padding:2px 6px; border-radius:3px;")
+
+    def _update_interlock_state(self):
+        """Cache the interlock picture for the shot row."""
+        labels = dict(self._INTERLOCK_STEPS)
+        failed = [labels.get(i, str(i))
+                  for i, ok in self.interlock_passed.items() if not ok]
+        manual = [labels.get(i, str(i))
+                  for i, chk in self.interlock_manual.items() if chk.isChecked()]
+        self.system_state.update("interlocks", {
+            "master_pass": not failed,
+            "failed": failed,
+            "manual": manual,
+            "steps": dict(self.interlock_passed),
+        }, source=SOURCE_READBACK)
+
+    def _cache_wj_packet(self, unit_index, data):
+        """Store one WJ Q reply in the system state.
+
+        program_kv is the last value this GUI commanded (v_set_kv): the WJ
+        protocol cannot read the programmed setpoint back, only the measured
+        output, so it is commanded state, not confirmed.
+        """
+        unit = f"wj{unit_index + 1}"
+        kv = data.get("kv")
+        ma = data.get("ma")
+        hv_on = data.get("hv_on")
+        fault = data.get("fault")
+        values = {
+            "measured_kv": kv,
+            "current_ma": ma,
+            "hv_on": hv_on,
+            "fault": fault,
+            "connected": True,
+            "program_kv": getattr(self.wj_units[unit_index], "v_set_kv", None),
+        }
+        # Keep the last readback taken while HV was still on. The fire path
+        # dumps HV before the trigger, so these are the charge values.
+        if hv_on:
+            values["charge_kv"] = kv
+            values["charge_ma"] = ma
+            values["charge_monotonic"] = time.monotonic()
+        self.system_state.update(unit, values, source=SOURCE_READBACK)
+
+    def on_wj_packet(self, unit_index, data):
+        """Full Q reply from a WJ reader thread (kV, mA, HV state, fault)."""
+        if data.get("type") != "R":
+            return
+        self._cache_wj_packet(unit_index, data)
+        try:
+            self.data_logger.log_wj_voltage(
+                unit_index + 1, data.get("kv", 0.0), data.get("ma", 0.0),
+                data.get("hv_on", False), data.get("fault", False))
+        except Exception as e:
+            self._deferred_log(f"[DataLogger ERROR] WJ{unit_index+1}: {e}")
+
+    def _record_relay_state(self, channel, state, ok=True):
+        """Log a relay command and cache the commanded state.
+
+        The Numato driver's get_state() returns its own software cache, not a
+        hardware read, so a relay state is only ever "commanded" here. Nothing
+        claims it was confirmed.
+        """
+        name = self._RELAY_NAMES.get(channel, f"ch{channel}")
+        try:
+            self.data_logger.log_relay_command(name, channel, state, ok=ok, confirmed=None)
+        except Exception:
+            pass
+        states = dict((self.system_state.get("relays") or {}).get("states", {}))
+        states[name] = bool(state) if ok else None
+        self.system_state.update(
+            "relays", {"states": states, "source": "commanded"}, source=SOURCE_COMMANDED)
+        try:
+            self.data_logger.log_relay_state(states, source="commanded")
+        except Exception:
+            pass
+
+    def _dg_read_all_settings(self):
+        """Read the laser DG535 back: delays, references and trigger mode.
+
+        Runs at connect, from the Read Back button, and after every Apply.
+        Never in the fire path. Channel map on this system: A = laser 1
+        flashlamp, B = laser 1 Q-switch, C = laser 2 flashlamp, D = laser 2
+        Q-switch. Each delay is relative to a reference channel (the unit
+        currently has B referenced to A and D to C), so the shot row resolves
+        every chain back to T0 before comparing.
+
+        Returns True if the readback succeeded.
+        """
+        from instruments.dg535 import Channel
+        ids = {"A": Channel.A, "B": Channel.B, "C": Channel.C, "D": Channel.D}
+        try:
+            channels = {}
+            for name, ch_id in ids.items():
+                ref, delay = self.dg.get_delay(ch_id)
+                channels[name] = {"ref": ref, "delay_s": delay}
+            try:
+                mode = self.dg.get_trigger_mode()
+                mode_name = getattr(mode, "name", str(mode))
+            except Exception:
+                mode_name = UNKNOWN
+
+            self.system_state.update("dg535_laser", {
+                "channels": channels,
+                "trigger_mode": mode_name,
+            }, source=SOURCE_READBACK)
+            self._dg_last_readback = {n: dict(c) for n, c in channels.items()}
+
+            # Fill the panel with what the instrument actually holds, and let
+            # Apply compare against it.
+            try:
+                for name, entry in channels.items():
+                    self.dg_panel.set_delay_with_reference(
+                        name, channel_name(entry["ref"]) or "T0", entry["delay_s"])
+                self.dg_panel.set_trigger_mode_text(mode_name)
+                self.dg_panel.set_apply_enabled(True)
+            except Exception as e:
+                self.log(f"[DG535] Panel update failed: {e}")
+
+            self.data_logger.log_dg535_readback(
+                {n: (channel_name(c["ref"]) or c["ref"], c["delay_s"])
+                 for n, c in channels.items()},
+                mode_name, source="DG535_laser")
+            self.log("[DG535] Laser DG535 read back: "
+                     + ", ".join(f"{n}={c['delay_s'] * 1e6:.3f}us (ref "
+                                 f"{channel_name(c['ref'])})"
+                                 for n, c in sorted(channels.items()))
+                     + f", trigger {mode_name}")
+            return True
+        except Exception as e:
+            self.log(f"[DG535] Could not read configuration back: {e}")
+            self.data_logger.log_error("DG535_laser", f"readback failed: {e}")
+            return False
+
+    def _on_laser_event(self, tag, event, payload):
+        """Laser panel event, possibly from one of the panel's worker threads.
+
+        Only the data logger and the system state are touched here (both
+        lock-guarded). No widgets, because this is not always the GUI thread.
+        """
+        key = "laser2" if tag.strip().endswith("2") else "laser1"
+        values = {k: payload[k] for k in ("armed", "interlock_ok", "fault", "state", "mode")
+                  if k in payload}
+        if event == "ARM":
+            values.setdefault("armed", True)
+        elif event == "DISARM":
+            values["armed"] = False
+        try:
+            self.system_state.update(key, values, source=SOURCE_READBACK)
+            self.data_logger.log_laser_event(
+                tag, event, state=payload.get("state", ""),
+                detail=payload.get("detail", ""))
+        except Exception:
+            pass
+
+    def _record_shot(self, notes=""):
+        """Claim the global shot number and write the frozen snapshot.
+
+        Called immediately after the BNC575 fire command returns, never
+        before. Never raises: a logging failure must not look like a failed
+        shot, and the number stays consumed either way.
+        """
+        shot_number = None
+        if not self.shot_logger.counter_available:
+            # Another GUI owns the counter. The shot still happened, so it
+            # still gets a row - with a blank shot number and a note.
+            notes = ("; ".join(filter(None, [notes, "shot counter locked by "
+                     f"another GUI instance ({self.shot_logger.counter.lock_message}); "
+                     "no global shot number assigned"])))
+            self.log("[SHOT] WARNING: fired, but the shot counter is locked by "
+                     "another GUI instance - the row has no shot number")
+            self.data_logger.log_error(
+                "Shot", "counter locked by another instance; shot number not claimed")
+            session_index = self.shot_logger.next_session_index()
+        else:
+            try:
+                shot_number = self.shot_logger.claim_shot_number()
+                session_index = self.shot_logger.session_shot_index
+            except Exception as e:
+                self.log(f"[SHOT ERROR] could not claim a shot number: {e}")
+                self.data_logger.log_error("Shot", f"counter write failed: {e}")
+                self.error_popup("Shot counter error",
+                                 f"The shot fired but the counter could not be written:\n{e}")
+                notes = "; ".join(filter(None, [notes, f"counter write failed: {e}"]))
+                session_index = self.shot_logger.next_session_index()
+
+        self._current_shot_number = shot_number
+        try:
+            # Freeze the state first: background threads keep updating it.
+            snapshot = self.system_state.snapshot()
+            now = time.monotonic()
+            for unit in ("wj1", "wj2"):
+                section = snapshot.get(unit) or {}
+                stamped = section.get("charge_monotonic")
+                if stamped is not None:
+                    section["charge_age_ms"] = (now - stamped) * 1000.0
+
+            scope_files = {}
+            for sid in (1, 2, 3):
+                if getattr(self, f"rigol{sid}_connected", False):
+                    scope_files[sid] = Path(self.data_logger.scope_export_path(
+                        sid, shot_index=session_index)).name
+
+            row = build_shot_row(
+                snapshot,
+                shot_number="" if shot_number is None else shot_number,
+                session_shot_index=session_index,
+                datetime_str=datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                timestamp_sec=self.data_logger._get_timestamp(),
+                session_dir=self.data_logger.get_session_dir(),
+                experiment_log_file=Path(self.data_logger.get_log_file_path()).name,
+                gui_version=self.shot_logger.gui_version,
+                scope_files=scope_files,
+                notes=notes,
+            )
+            label = f"#{shot_number}" if shot_number is not None else "(no number)"
+            if self.shot_logger.write_row(row):
+                self.log(f"[SHOT] {label} recorded "
+                         f"(shot {session_index} this session)")
+            else:
+                self.log(f"[SHOT ERROR] shot {label} fired but its row "
+                         f"could not be written - see the logs")
+                self.set_status("red", f"Shot {label}: row write FAILED")
+            self.data_logger.log_shot(
+                "" if shot_number is None else shot_number, session_index, notes=notes)
+        except Exception as e:
+            self.log(f"[SHOT ERROR] snapshot failed for shot {shot_number}: {e}")
+            self.data_logger.log_error("Shot", f"snapshot failed: {e}")
+
+        self._update_next_shot_label()
+        return shot_number
+
+    def _atexit_cleanup(self):
+        """Backup for closeEvent: release the counter lock on any exit path."""
+        try:
+            if getattr(self, "shot_logger", None) is not None:
+                self.shot_logger.close()
+        except Exception:
+            pass
+
     def on_open_scope_window(self):
         self.scope_window.show()
         self.scope_window.raise_()
@@ -2357,7 +2965,8 @@ class ScopeDelayMainWindow(QMainWindow):
         before the app exits. Used by closeEvent. Returns the paths written."""
         saved = []
         for scope_id in sorted(self.captured_scopes):
-            path = self.data_logger.scope_export_path(scope_id)
+            path = self.data_logger.scope_export_path(
+                scope_id, shot_index=self.shot_logger.session_shot_index)
             try:
                 # CSVExportWorker.run() is plain (no thread) when called directly.
                 CSVExportWorker(self.captured_scopes[scope_id], path).run()
@@ -2374,6 +2983,8 @@ class ScopeDelayMainWindow(QMainWindow):
         self._auto_save_timer.stop()
         if hasattr(self, "_interlock_timer"):
             self._interlock_timer.stop()
+        if getattr(self, "_capture_countdown_timer", None) is not None:
+            self._capture_countdown_timer.stop()
         if self._captures_dirty and self.captured_scopes:
             try:
                 saved_files = self._save_captures_sync()
@@ -2399,6 +3010,17 @@ class ScopeDelayMainWindow(QMainWindow):
 
         if hasattr(self, 'sf6_window') and self.sf6_window:
             self.sf6_window.close()
+
+        # Shot logs and the counter must be complete: the GUI is usually
+        # closed within seconds of a shot.
+        try:
+            self.data_logger.log_session_end(self.shot_logger.session_shot_index)
+        except Exception as e:
+            print(f"[SESSION_END failed] {e}")
+        try:
+            self.shot_logger.close()        # releases the counter lock
+        except Exception as e:
+            print(f"[shot logger close failed] {e}")
 
         if hasattr(self, 'data_logger') and self.data_logger:
             self.data_logger.close()

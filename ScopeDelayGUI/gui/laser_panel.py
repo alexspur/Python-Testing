@@ -40,9 +40,13 @@ class LaserPanel(QGroupBox):
 
     def __init__(self, log_func=None, save_func=None, default_port="COM16",
                  title="CFR Laser Control", save_key="CFR_LASER_COM",
-                 log_tag="Laser"):
+                 log_tag="Laser", event_func=None):
         super().__init__(title)
         self._external_log = log_func
+        # Called on arm / disarm / fire / interlock / error so the main window
+        # can persist laser state. Runs on this panel's worker threads, so the
+        # handler must not touch widgets.
+        self._event = event_func
         self._save_func = save_func
         self._save_key = save_key
         self._log_tag = log_tag
@@ -165,6 +169,16 @@ class LaserPanel(QGroupBox):
     def _mode(self):
         return "INT/INT" if self.rb_int.isChecked() else "EXT/EXT"
 
+    def _emit_event(self, event, **payload):
+        """Hand a laser event to the main window (logging + state cache)."""
+        if self._event is None:
+            return
+        payload.setdefault("mode", self._mode())
+        try:
+            self._event(self._log_tag, event, payload)
+        except Exception:
+            pass
+
     def is_armed(self):
         """True only when this laser is in EXT/EXT mode AND reports an ARMED
         state (i.e. prep completed and the Q-switch is armed for external
@@ -212,6 +226,7 @@ class LaserPanel(QGroupBox):
         self.sig_lamp.emit("red", "Disconnected")
         self.sig_state.emit("Idle")
         self.sig_fire_btn.emit(False, self.btn_fire.text())
+        self._emit_event("DISARM", armed=False, state="Disconnected")
 
     # ==================================================================
     # Interlocks
@@ -227,6 +242,8 @@ class LaserPanel(QGroupBox):
         clear, summary, color = self.laser.check_interlocks()
         self.sig_interlock.emit(summary, color)
         self.sig_log.emit(summary.replace("\n  ", " | "))
+        self._emit_event("INTERLOCK", interlock_ok=bool(clear),
+                         detail=summary.replace("\n", " | "))
 
     # ==================================================================
     # Prep sequence (threaded, with 8 s IQ poll)
@@ -321,6 +338,8 @@ class LaserPanel(QGroupBox):
                 self.sig_log.emit(f"Final state string: {st!r}")
                 self.sig_state.emit("READY TO FIRE")
                 self.sig_fire_btn.emit(True, "SINGLE SHOT (OP)")
+                self._emit_event("ARM", armed=False, state="READY TO FIRE",
+                                 fault=False, detail="INT/INT prep complete")
                 self.sig_log.emit("--- PREP COMPLETE (INT/INT) --- click SINGLE SHOT.")
             else:  # EXT/EXT
                 self.sig_state.emit("Arming Q-switch (CC)...")
@@ -330,12 +349,15 @@ class LaserPanel(QGroupBox):
                 if st and "ext" in st.lower() and "qs" in st.lower():
                     self.sig_state.emit("ARMED - waiting for DG535 trigger")
                     self.sig_fire_btn.emit(True, "Verify ARMED")
+                    self._emit_event("ARM", armed=True, state="ARMED",
+                                     fault=False, detail="EXT/EXT prep complete")
                     self.sig_log.emit("--- PREP COMPLETE (EXT/EXT) --- DG535 fires each shot.")
                 else:
                     self.sig_state.emit(f"Prep WARNING: state unexpected: {st}")
         except Exception as e:
             self.sig_log.emit(f"PREP EXCEPTION: {e}")
             self.sig_state.emit(f"Prep error: {e}")
+            self._emit_event("ERROR", fault=True, state="Prep error", detail=str(e))
 
     # ==================================================================
     # Fire / status
@@ -360,6 +382,7 @@ class LaserPanel(QGroupBox):
         resp = self.laser.send_cmd("OP")
         self.sig_log.emit(f"FIRE (OP) sent. Response: {resp!r}")
         self.sig_state.emit("SHOT FIRED - re-prep for another shot")
+        self._emit_event("FIRE", state="SHOT FIRED", detail=f"OP response {resp!r}")
 
     def _fire_ext_status_worker(self):
         st = self.laser.send_cmd("ST")
@@ -367,8 +390,11 @@ class LaserPanel(QGroupBox):
         self.sig_log.emit(f"Status check: ST={st!r}  WOR={wor!r}")
         if st and "ext" in st.lower() and "qs" in st.lower():
             self.sig_state.emit("ARMED - DG535 controls firing")
+            self._emit_event("ARM", armed=True, state="ARMED", detail=f"ST={st!r}")
         else:
             self.sig_state.emit(f"NOT ARMED: {st}")
+            self._emit_event("DISARM", armed=False, state=f"NOT ARMED: {st}",
+                             detail=f"ST={st!r}")
 
     # ==================================================================
     # Stop
@@ -384,6 +410,8 @@ class LaserPanel(QGroupBox):
         self.laser.send_cmd("SHC0")  # close shutter
         self.sig_state.emit("Stopped")
         self.sig_fire_btn.emit(False, self.btn_fire.text())
+        self._emit_event("DISARM", armed=False, state="Stopped",
+                         detail="safe stop: CS, S, SHC0")
 
     def shutdown(self):
         """Called on app close."""
