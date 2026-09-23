@@ -18,7 +18,7 @@ from gui.sf6_window import SF6Window
 from gui.wj_panel import WJPanel
 from gui.scope_plot_window import ScopePlotWindow
 from gui.numato_relay_panel import NumatoRelayPanel
-from gui.laser_panel import LaserPanel
+from gui.laser_panel import DualLaserPanel
 
 from utils.logger import LogPanel
 from utils.status_lamp import StatusLamp
@@ -44,7 +44,7 @@ from instruments.glassman_id import (
     matches as wj_matches,
     read_version as wj_read_version,
 )
-from instruments.bnc575 import BNC575Controller, SystemMode, TriggerMode, TriggerEdge
+from instruments.bnc575 import BNC575Controller
 from instruments.rigol import RigolScope
 from instruments.wj import WJPowerSupply
 from instruments.numato_relay import NumatoRelayController
@@ -53,6 +53,10 @@ from instruments.numato_relay import NumatoRelayController
 class ScopeDelayMainWindow(QMainWindow):
     _relay_update_signal = pyqtSignal(int, bool)  # (channel, state) — safe cross-thread UI update
     _relay_log_signal = pyqtSignal(str)            # log messages from poll thread
+    # (unit index, Q reply) from a WJ reader thread. The reader emits into
+    # this; Qt queues it onto the GUI thread before on_wj_packet runs, so that
+    # handler may safely touch the status row, the interlock lamps and the log.
+    wj_packet_ready = pyqtSignal(int, dict)
 
     # Which instruments auto_connect_all() will try on startup. Any value is
     # coerced with bool(), so 1/0 and True/False both work. main.py can pass
@@ -92,7 +96,7 @@ class ScopeDelayMainWindow(QMainWindow):
             for k, v in auto_connect.items():
                 self.auto_connect_flags[k] = bool(v)
 
-        self.setWindowTitle("Scope + Delay + SF6 Control")
+        self.setWindowTitle("MultiPulse Shot Control")
         self.setGeometry(100, 100, 1700, 900)
         self.setMinimumSize(800, 600)
         self.conn = load_memory()
@@ -122,6 +126,14 @@ class ScopeDelayMainWindow(QMainWindow):
         self.bnc = BNC575Controller()
         self.bnc_connected = False
         self.bnc_trigger_armed = False
+        # Supplies that have returned a good R packet with no fault. Interlock
+        # step 3 latches once every connected supply is in here.
+        self._wj_packets_ok = set()
+        # The reader threads emit from their own thread. Bouncing the packet
+        # through this signal, whose receiver is a bound method of this window,
+        # makes Qt queue it onto the GUI thread before on_wj_packet touches a
+        # lamp, a status label or the log.
+        self.wj_packet_ready.connect(self.on_wj_packet)
 
         # Rigol oscilloscopes, reached over the instrument network (VXI-11 over
         # Ethernet) rather than USB.
@@ -200,8 +212,6 @@ class ScopeDelayMainWindow(QMainWindow):
             pressure_gauge_min=self.pressure_gauge_min,
             pressure_gauge_max=self.pressure_gauge_max,
         )
-        # Keep the SF6 window's voltage box in sync with the configured default.
-        self.sf6_window.program_voltage.setValue(self.startup_charge_kv)
 
         # Populate WJ COM ports (after sf6_window is created so it gets populated too)
         self.refresh_wj_ports()
@@ -290,18 +300,6 @@ class ScopeDelayMainWindow(QMainWindow):
             if last_port and last_port in ports:
                 row.port_combo.setCurrentText(last_port)
 
-        # Mirror ports into SF6 window duplicates
-        if hasattr(self, "sf6_window") and hasattr(self.sf6_window, "wj_port_combos"):
-            for i, combo in enumerate(self.sf6_window.wj_port_combos):
-                combo.blockSignals(True)
-                combo.clear()
-                combo.addItems(ports)
-
-                last_port = self.conn.get(f"WJ{i+1}_COM", None)
-                if last_port and last_port in ports:
-                    combo.setCurrentText(last_port)
-                combo.blockSignals(False)
-
     # ------------------------------------------------------------------
     #  Opta pressure monitor (Modbus TCP, polled on its own QThread)
     # ------------------------------------------------------------------
@@ -318,6 +316,7 @@ class ScopeDelayMainWindow(QMainWindow):
         w.link_up.connect(self._on_pressure_link_up)
         w.link_lost.connect(self._on_pressure_link_lost)
         w.calibration_ready.connect(self._on_pressure_calibration)
+        w.calibration_mismatch.connect(self._on_pressure_calibration_mismatch)
         w.command_done.connect(self._on_pressure_command_done)
         w.command_failed.connect(self._on_pressure_command_failed)
         self.pressure_thread.finished.connect(w.deleteLater)
@@ -327,8 +326,6 @@ class ScopeDelayMainWindow(QMainWindow):
         panel.set_host(f"{self.opta_host}:{self.opta_port}")
         panel.btn_connect.clicked.connect(self.on_pressure_connect)
         panel.btn_disconnect.clicked.connect(self.on_pressure_disconnect)
-        panel.btn_set_full_scale.clicked.connect(self.on_pressure_set_full_scale)
-        panel.btn_zero_here.clicked.connect(self.on_pressure_zero_here)
 
     def on_pressure_connect(self):
         # Also serves as Reconnect: the worker closes any old socket first.
@@ -404,9 +401,22 @@ class ScopeDelayMainWindow(QMainWindow):
             d["psi"], d["volts"], d["counts"], d["under_range"], d["over_range"])
 
     def _on_pressure_calibration(self, cal: dict):
+        """Calibration the Opta reported after the connect-time write."""
         self.sf6_window.sf6_panel.show_calibration(cal)
-        self.log(f"[Opta] Calibration loaded: full scale {cal['full_scale_psi']:.1f} psi, "
-                 f"zero offset {cal['zero_offset_mv']} mV, averaging {cal['avg_samples']}")
+        summary = (f"full scale {cal['full_scale_psi']:.1f} psi, "
+                   f"zero offset {cal['zero_offset_mv']} mV, "
+                   f"averaging {cal['avg_samples']}")
+        self.log(f"[Opta] Calibration loaded: {summary}")
+        self.data_logger.log_info("Opta", f"calibration {summary}")
+
+    def _on_pressure_calibration_mismatch(self, detail: str):
+        """The Opta did not report back what was just written to it.
+
+        The link is up and pressure is still being read, but it is not scaled
+        the way it should be, so this is an error and the panel says so too.
+        """
+        self.log(f"[Opta ERROR] Calibration not verified: {detail}")
+        self.data_logger.log_error("Opta", f"calibration not verified: {detail}")
 
     def _on_pressure_command_done(self, msg):
         self.log(f"[Opta] {msg}")
@@ -416,38 +426,6 @@ class ScopeDelayMainWindow(QMainWindow):
         self.log(f"[Opta ERROR] {msg}")
         self.data_logger.log_error("Opta", msg)
         self.error_popup("Opta Calibration Error", msg)
-
-    def on_pressure_set_full_scale(self):
-        if not self._opta_link_up:
-            self.error_popup("Opta", "Not connected.")
-            return
-        psi = self.sf6_window.sf6_panel.spin_full_scale.value()
-        self.log(f"[Opta] Setting full scale to {psi:.1f} psi...")
-        self.pressure_worker.request_full_scale.emit(psi)
-
-    def on_pressure_zero_here(self):
-        if not self._opta_link_up:
-            self.error_popup("Opta", "Not connected.")
-            return
-        if self._opta_fault is None:
-            self.error_popup("Opta Zero", "No pressure reading yet.")
-            return
-        if self._opta_fault:
-            self.error_popup("Opta Zero",
-                             f"Sensor input is {self._opta_fault}. Fix the sensor before zeroing.")
-            return
-        reply = QMessageBox.question(
-            self, "Zero Pressure",
-            "Take the present transducer output as 0 psi?\n\n"
-            "Vent the line to atmosphere first.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        self.log("[Opta] Zeroing at present input...")
-        self.pressure_worker.request_zero_here.emit()
-
 
     def start_wj_readers(self):
         """Start WJ reader threads and connect to SF6 window plot"""
@@ -467,7 +445,11 @@ class ScopeDelayMainWindow(QMainWindow):
             worker = WJReaderThread(wj)
             worker.new_data.connect(lambda t, kv, ma, i=idx: self.handle_wj_plot_data(i, t, kv, ma))
             # Full Q reply (kV, mA, HV state, fault) for the state cache + log.
-            worker.new_packet.connect(lambda pkt, i=idx: self.on_wj_packet(i, pkt))
+            # Emitting a signal is thread-safe; the hop through wj_packet_ready
+            # is what gets on_wj_packet onto the GUI thread. Connecting the
+            # reader straight to a lambda would run it on the reader thread,
+            # where touching a widget is undefined behaviour.
+            worker.new_packet.connect(lambda pkt, i=idx: self.wj_packet_ready.emit(i, pkt))
             worker.start()
             self.wj_workers.append(worker)
 
@@ -548,7 +530,8 @@ class ScopeDelayMainWindow(QMainWindow):
         # Sort screens left-to-right by x coordinate
         screens_sorted = sorted(screens, key=lambda s: s.geometry().x())
 
-        # Assign based on physical layout: left (vertical) -> SF6, middle -> main window, right -> scope
+        # Assign based on physical layout: left -> scope waveforms,
+        # middle -> main window, right -> Marx generator + WJ supplies
         if len(screens_sorted) >= 3:
             left_screen, middle_screen, right_screen = screens_sorted[:3]
         elif len(screens_sorted) == 2:
@@ -562,15 +545,15 @@ class ScopeDelayMainWindow(QMainWindow):
         self.move(middle_screen.availableGeometry().topLeft())
         self.showMaximized()
 
-        # SF6 window on left screen
-        self.sf6_window.setScreen(left_screen)
-        self.sf6_window.move(left_screen.availableGeometry().topLeft())
-        self.sf6_window.showMaximized()
-
-        # Scope window on right screen
-        self.scope_window.setScreen(right_screen)
-        self.scope_window.move(right_screen.availableGeometry().topLeft())
+        # Scope waveforms on left screen
+        self.scope_window.setScreen(left_screen)
+        self.scope_window.move(left_screen.availableGeometry().topLeft())
         self.scope_window.showMaximized()
+
+        # Marx generator + WJ supplies on right screen
+        self.sf6_window.setScreen(right_screen)
+        self.sf6_window.move(right_screen.availableGeometry().topLeft())
+        self.sf6_window.showMaximized()
 
     def build_scope_controls(self, main_layout):
         layout = QHBoxLayout()
@@ -589,41 +572,38 @@ class ScopeDelayMainWindow(QMainWindow):
 
         self.wj_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
-        # CFR laser control panels (each owns its own serial controller + threads)
-        self.laser_panel = LaserPanel(
+        # Both CFR lasers in one panel, a column each, with one shared Prep
+        # System and one Stop Both. Each column keeps its own serial
+        # controller and threads, and its own Laser1 / Laser2 log tag, so the
+        # LASER_* events and the laser1_* / laser2_* shot columns are
+        # unchanged.
+        self.laser_frame = DualLaserPanel(
             log_func=self.log, save_func=save_memory,
-            default_port="COM16", title="CFR Laser 1",
-            save_key="CFR_LASER_COM", log_tag="Laser1",
-            event_func=self._on_laser_event)
-        self.laser_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            event_func=self._on_laser_event,
+            laser1_port=self.conn.get("CFR_LASER_COM", "COM6"),
+            laser2_port=self.conn.get("CFR_LASER2_COM", "COM8"))
+        self.laser_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
-        self.laser_panel2 = LaserPanel(
-            log_func=self.log, save_func=save_memory,
-            default_port="COM11", title="CFR Laser 2",
-            save_key="CFR_LASER2_COM", log_tag="Laser2",
-            event_func=self._on_laser_event)
-        self.laser_panel2.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        # Auto-connect, the pre-fire interlock check and closeEvent all
+        # address one laser at a time.
+        self.laser_panel = self.laser_frame.laser1
+        self.laser_panel2 = self.laser_frame.laser2
 
         # --------------------------------
         # GRID LAYOUT (2x2 + laser row)
         # --------------------------------
+        # Two even columns, three rows, so the whole instrument grid fits on
+        # screen without scrolling: the lasers across the top, the two delay
+        # generators side by side, then the scopes and the supplies.
         grid = QGridLayout()
-        # Right column stacks Rigol on top with the WJ power supplies directly
-        # beneath it, top-aligned so Rigol hugs the top (no centering gap next
-        # to the tall BNC panel).
-        scope_ps_col = QVBoxLayout()
-        scope_ps_col.setContentsMargins(0, 0, 0, 0)
-        scope_ps_col.addWidget(self.rigol_panel)
-        scope_ps_col.addWidget(self.wj_panel)
-        scope_ps_col.addStretch()
-        scope_ps_container = QWidget()
-        scope_ps_container.setLayout(scope_ps_col)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
 
-        grid.addWidget(self.laser_panel, 0, 0)   # CFR Laser 1
-        grid.addWidget(self.laser_panel2, 0, 1)  # CFR Laser 2 (side by side)
+        grid.addWidget(self.laser_frame, 0, 0, 1, 2)   # both CFR lasers
         grid.addWidget(self.bnc_panel, 1, 0, Qt.AlignmentFlag.AlignTop)
-        grid.addWidget(scope_ps_container, 1, 1, Qt.AlignmentFlag.AlignTop)  # Rigol + WJ
-        grid.addWidget(self.dg_panel, 2, 0, 1, 2)  # span both columns
+        grid.addWidget(self.dg_panel, 1, 1, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(self.rigol_panel, 2, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(self.wj_panel, 2, 1, Qt.AlignmentFlag.AlignTop)
 
         # --------------------------------
         # Left column: instrument grid inside a vertical scroll area. The panels
@@ -672,13 +652,11 @@ class ScopeDelayMainWindow(QMainWindow):
         # The laser DG535 is read back and (deliberately) written only through
         # these two buttons. The GUI never changes its trigger mode and never
         # sends SS: it stays externally triggered by BNC575 channel B.
-        self.dg_panel.btn_fire.setText("Read Back DG535")
-        self.dg_panel.btn_fire.setToolTip(
+        self.dg_panel.btn_read_all.setToolTip(
             "Read the laser DG535's four delays, their reference channels and "
             "the trigger mode, and fill the panel with them.")
-        self.dg_panel.btn_fire.clicked.connect(self.on_dg_readback)
-        self.dg_panel.btn_apply_delays.clicked.connect(self.on_dg_apply_delays)
         self.dg_panel.btn_read_all.clicked.connect(self.on_dg_readback)
+        self.dg_panel.btn_apply_delays.clicked.connect(self.on_dg_apply_delays)
 
         # BNC575 connections
         self.bnc_panel.btn_connect.clicked.connect(self.on_bnc_connect)
@@ -686,35 +664,6 @@ class ScopeDelayMainWindow(QMainWindow):
         self.bnc_panel.btn_fire.clicked.connect(self.on_bnc_fire)
         self.bnc_panel.btn_apply.clicked.connect(self.on_bnc_apply)
         self.bnc_panel.btn_read.clicked.connect(self.on_bnc_read)
-        self.bnc_panel.btn_arm.clicked.connect(self.on_bnc_arm)
-        
-        # Channel enable buttons
-        if hasattr(self.bnc_panel, "btn_en_a"):
-            self.bnc_panel.btn_en_a.clicked.connect(lambda: self.on_bnc_enable_channel("A"))
-            self.bnc_panel.btn_en_b.clicked.connect(lambda: self.on_bnc_enable_channel("B"))
-            self.bnc_panel.btn_en_c.clicked.connect(lambda: self.on_bnc_enable_channel("C"))
-            self.bnc_panel.btn_en_d.clicked.connect(lambda: self.on_bnc_enable_channel("D"))
-        
-        # Trigger enable
-        if hasattr(self.bnc_panel, "btn_en_trig"):
-            self.bnc_panel.btn_en_trig.clicked.connect(self.on_bnc_enable_trigger)
-        
-        # Apply trigger settings
-        if hasattr(self.bnc_panel, "btn_apply_trigger"):
-            self.bnc_panel.btn_apply_trigger.clicked.connect(self.on_bnc_apply_trigger)
-        
-        # Apply system settings (mode, period, burst)
-        if hasattr(self.bnc_panel, "btn_apply_system"):
-            self.bnc_panel.btn_apply_system.clicked.connect(self.on_bnc_apply_system)
-        
-        # Store/Recall
-        if hasattr(self.bnc_panel, "btn_store"):
-            self.bnc_panel.btn_store.clicked.connect(self.on_bnc_store)
-        if hasattr(self.bnc_panel, "btn_recall"):
-            self.bnc_panel.btn_recall.clicked.connect(self.on_bnc_recall)
-        if hasattr(self.bnc_panel, "btn_factory"):
-            self.bnc_panel.btn_factory.clicked.connect(self.on_bnc_factory_reset)
-
         self.rigol_panel.btn_r1.clicked.connect(self.on_rigol1_connect)
         self.rigol_panel.btn_r2.clicked.connect(self.on_rigol2_connect)
         self.rigol_panel.btn_r3.clicked.connect(self.on_rigol3_connect)
@@ -730,11 +679,9 @@ class ScopeDelayMainWindow(QMainWindow):
 
         self.wj_panel.btn_hv_on.clicked.connect(self.on_wj_hv_on)
         self.wj_panel.btn_hv_off.clicked.connect(self.on_wj_hv_off)
-        self.wj_panel.btn_reset.clicked.connect(self.on_wj_reset)
         # clicked emits a bool checked arg; swallow it so on_wj_set_voltage
         # falls back to the spin-box values instead of receiving kv=False.
         self.wj_panel.btn_set_v.clicked.connect(lambda: self.on_wj_set_voltage())
-        self.wj_panel.btn_read.clicked.connect(self.on_wj_read)
 
         # --- Disconnect buttons ---
         self.dg_panel.btn_disconnect.clicked.connect(self.on_dg_disconnect)
@@ -958,16 +905,16 @@ class ScopeDelayMainWindow(QMainWindow):
                     "polarity": polarity,
                 }
 
-            # Read system mode
+            # System mode is still recorded in the shot row. The panel no
+            # longer has a control for it: it is set on the front panel.
             mode = self.bnc.get_system_mode()
-            if mode:
-                self.bnc_panel.set_system_mode(mode.value)
 
             try:
                 trigger_mode = self.bnc.get_trigger_mode()
                 trigger_mode = getattr(trigger_mode, "value", trigger_mode) or UNKNOWN
             except Exception:
                 trigger_mode = UNKNOWN
+            self.bnc_panel.set_trigger_mode_text(trigger_mode)
 
             self.system_state.update("bnc575", {
                 "channels": channels,
@@ -987,24 +934,6 @@ class ScopeDelayMainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def connect_sf6_window(self):
         """Connect signals from SF6 window to main window handlers"""
-        # Duplicate WJ controls under the plot
-        sw = self.sf6_window
-        sw.btn_apply_program.clicked.connect(
-            lambda: self.on_wj_set_voltage(sw.program_voltage.value(), sw.program_current.value())
-        )
-        sw.btn_hv_on.clicked.connect(self.on_wj_hv_on)
-        sw.btn_hv_off.clicked.connect(self.on_wj_hv_off)
-        sw.btn_reset.clicked.connect(self.on_wj_reset)
-        sw.btn_read.clicked.connect(self.on_wj_read)
-
-        for i in range(len(sw.wj_port_combos)):
-            sw.btn_wj_connect[i].clicked.connect(
-                lambda _, idx=i: self.on_wj_connect(idx, sw.wj_port_combos[idx].currentText())
-            )
-            sw.btn_wj_disconnect[i].clicked.connect(
-                lambda _, idx=i: self.on_wj_disconnect(idx)
-            )
-
         # Connect Numato Relay panel
         self.connect_relay_panel()
 
@@ -1548,6 +1477,31 @@ class ScopeDelayMainWindow(QMainWindow):
         self._update_interlock_fire()
         self._update_interlock_state()
 
+    def _unmark_interlock(self, idx, reason=""):
+        """Drop step `idx` back to red (idempotent). The inverse of _mark.
+
+        The checklist latches so a step that has passed is not re-evaluated on
+        every timer tick, but a latch must not outlive the evidence it was
+        latched on. A supply that faults after step 3 went green would
+        otherwise leave the fire button armed on a reading that is no longer
+        true.
+        """
+        if not getattr(self, "interlock_passed", None):
+            return
+        if not self.interlock_passed.get(idx):
+            return
+        self.interlock_passed[idx] = False
+        lamp = self.interlock_lamps.get(idx)
+        if lamp:
+            lamp.set_status("red")
+        self.log(f"[INTERLOCK] Step {idx} CLEARED"
+                 + (f" ({reason})" if reason else ""))
+        self.data_logger.log_interlock(
+            "FAIL", step=dict(self._INTERLOCK_STEPS).get(idx, str(idx)),
+            detail=reason, passed=False)
+        self._update_interlock_fire()
+        self._update_interlock_state()
+
     def _update_interlock_fire(self):
         if hasattr(self, "btn_interlock_fire"):
             self.btn_interlock_fire.setEnabled(
@@ -1591,8 +1545,9 @@ class ScopeDelayMainWindow(QMainWindow):
                     self.numato_relay.is_connected:
                 self._mark_interlock(2, "relay connected")
 
-        # Step 3 - power supplies. Latches from on_wj_read (a good R packet with
-        # no fault); here we only honor a manual override checkbox.
+        # Step 3 - power supplies. Latches in on_wj_packet (a good R packet
+        # with no fault from every supply); here we only honor a manual
+        # override checkbox.
         if not self.interlock_passed.get(3) and \
                 self.interlock_manual[3].isChecked():
             self._mark_interlock(3, "manual")
@@ -1902,39 +1857,6 @@ class ScopeDelayMainWindow(QMainWindow):
             self.log(f"[BNC575 ERROR] {e}")
             self.error_popup("BNC575 Read Error", str(e))
 
-    def on_bnc_arm(self):
-        if not self.bnc_connected:
-            self.error_popup("BNC575", "Not connected")
-            return
-            
-        try:
-            source = self.bnc_panel.get_trigger_source()
-            slope = self.bnc_panel.get_trigger_slope()
-            level = self.bnc_panel.get_trigger_level()
-
-            if not self.bnc_trigger_armed:
-                self.bnc.set_trigger_settings(source, slope, level)
-                self.bnc.arm_trigger()
-                self.bnc_trigger_armed = True
-                self.system_state.update("bnc575", {"armed": True})
-                self.bnc_panel.btn_arm.setText("Disarm (EXT TRIG)")
-                self.data_logger.log_bnc575_arm(level)
-                self.set_status("green", "BNC575 armed (EXT)")
-                self.log(f"[BNC575] Armed for external trigger: {source}/{slope} @ {level:.2f} V")
-            else:
-                self.bnc.disarm_trigger()
-                self.bnc_trigger_armed = False
-                self.system_state.update("bnc575", {"armed": False})
-                self.bnc_panel.btn_arm.setText("Arm (EXT TRIG)")
-                self.set_status("yellow", "BNC575 disarmed")
-                self.log("[BNC575] Disarmed external trigger")
-        except Exception as e:
-            self.set_status("red", "BNC575 arm failed")
-            self.log(f"[BNC575 ERROR] {e}")
-            self.data_logger.log_error("BNC575", str(e))
-            self.error_popup("BNC575 Arm Error", str(e))
-
-
     def on_bnc_fire(self):
         if not self.bnc_connected:
             self.error_popup("BNC575", "Not connected")
@@ -1958,8 +1880,9 @@ class ScopeDelayMainWindow(QMainWindow):
             self.error_popup(
                 "BNC575 in external trigger mode",
                 "The BNC575 is set for an external trigger, so the fire "
-                "command would not produce t0.\n\nDisarm it (Arm/Disarm EXT "
-                "TRIG) and fire again.")
+                "command would not produce t0.\n\nSet the trigger mode to "
+                "DIS on the BNC575 front panel, then Read Settings and fire "
+                "again.")
             return
 
         # SAFETY INTERLOCK: Ensure WJ HV supplies are OFF before firing.
@@ -2007,132 +1930,6 @@ class ScopeDelayMainWindow(QMainWindow):
             self.log(f"[BNC575 ERROR] {e}")
             self.data_logger.log_error("BNC575", str(e))
             self.error_popup("BNC575 Fire Error", str(e))
-
-    def on_bnc_apply_trigger(self):
-        if not self.bnc_connected:
-            self.error_popup("BNC575", "Not connected")
-            return
-            
-        try:
-            source = self.bnc_panel.get_trigger_source()
-            slope = self.bnc_panel.get_trigger_slope()
-            level = self.bnc_panel.get_trigger_level()
-            
-            self.bnc.set_trigger_settings(source, slope, level)
-            self.log(f"[BNC575] Trigger settings applied: {source}, {slope}, {level:.2f} V")
-            self.set_status("green", "Trigger settings applied")
-        except Exception as e:
-            self.log(f"[BNC575 ERROR] {e}")
-            self.error_popup("BNC575 Trigger Error", str(e))
-
-    def on_bnc_apply_system(self):
-        if not self.bnc_connected:
-            self.error_popup("BNC575", "Not connected")
-            return
-            
-        try:
-            mode_str = self.bnc_panel.get_system_mode()
-            mode_map = {
-                "NORM": SystemMode.CONTINUOUS,
-                "SING": SystemMode.SINGLE,
-                "BURS": SystemMode.BURST,
-                "DCYC": SystemMode.DUTY_CYCLE
-            }
-            mode = mode_map.get(mode_str, SystemMode.CONTINUOUS)
-            
-            self.bnc.set_system_mode(mode)
-            
-            period = self.bnc_panel.get_period()
-            self.bnc.set_period(period)
-            
-            if mode == SystemMode.BURST and hasattr(self.bnc_panel, 'burst_count'):
-                count = self.bnc_panel.burst_count.value()
-                self.bnc.set_burst_count(count)
-                self.log(f"[BNC575] System: mode={mode_str}, period={period:.6e}s, burst={count}")
-            else:
-                self.log(f"[BNC575] System: mode={mode_str}, period={period:.6e}s")
-            
-            self.set_status("green", "System settings applied")
-            
-        except Exception as e:
-            self.log(f"[BNC575 ERROR] {e}")
-            self.error_popup("BNC575 System Error", str(e))
-
-    def on_bnc_enable_channel(self, channel: str):
-        if not self.bnc_connected:
-            return
-            
-        try:
-            enabled = self.bnc_panel.is_channel_enabled(channel)
-            self.bnc.set_channel_state(channel, enabled)
-            self.log(f"[BNC575] Channel {channel} {'ENABLED' if enabled else 'DISABLED'}")
-        except Exception as e:
-            self.log(f"[BNC575 ERROR] {e}")
-            self.error_popup("BNC575 Channel Error", str(e))
-
-    def on_bnc_enable_trigger(self):
-        if not self.bnc_connected:
-            return
-            
-        try:
-            enabled = self.bnc_panel.is_trigger_enabled()
-            self.bnc.enable_trigger(enabled)
-            self.log(f"[BNC575] Trigger output {'ENABLED' if enabled else 'DISABLED'}")
-        except Exception as e:
-            self.log(f"[BNC575 ERROR] {e}")
-            self.error_popup("BNC575 Trigger Error", str(e))
-
-    def on_bnc_store(self):
-        if not self.bnc_connected:
-            self.error_popup("BNC575", "Not connected")
-            return
-            
-        try:
-            location = self.bnc_panel.store_location.value()
-            self.bnc.store_config(location)
-            self.log(f"[BNC575] Stored config to location {location}")
-            self.set_status("green", f"Config stored to {location}")
-        except Exception as e:
-            self.log(f"[BNC575 ERROR] {e}")
-            self.error_popup("BNC575 Store Error", str(e))
-
-    def on_bnc_recall(self):
-        if not self.bnc_connected:
-            self.error_popup("BNC575", "Not connected")
-            return
-            
-        try:
-            location = self.bnc_panel.store_location.value()
-            self.bnc.recall_config(location)
-            self._bnc_read_all_settings()
-            self.log(f"[BNC575] Recalled config from location {location}")
-            self.set_status("green", f"Config recalled from {location}")
-        except Exception as e:
-            self.log(f"[BNC575 ERROR] {e}")
-            self.error_popup("BNC575 Recall Error", str(e))
-
-    def on_bnc_factory_reset(self):
-        if not self.bnc_connected:
-            self.error_popup("BNC575", "Not connected")
-            return
-            
-        reply = QMessageBox.question(
-            self, "Factory Reset",
-            "Reset BNC575 to factory defaults?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-            
-        try:
-            self.bnc.recall_defaults()
-            self._bnc_read_all_settings()
-            self.log("[BNC575] Reset to factory defaults")
-            self.set_status("green", "Factory reset complete")
-        except Exception as e:
-            self.log(f"[BNC575 ERROR] {e}")
-            self.error_popup("BNC575 Reset Error", str(e))
-
 
     # ------------------------------------------------------------------
     #  Rigol Handlers
@@ -2593,14 +2390,19 @@ class ScopeDelayMainWindow(QMainWindow):
         # supply per click — anything more collides with the WJ reader
         # thread's Q polls. Voltage is the spinbox value; current is each
         # supply's MAX (matches Apply Program behavior).
-        kv = self.wj_panel.voltage.value()
+        try:
+            kv, ma = self.wj_panel.program_values()
+        except ValueError as e:
+            self.log(f"[WJ] HV ON refused: {e}")
+            self.data_logger.log_error("WJ", f"HV ON refused: {e}")
+            self.error_popup("WJ out of range", str(e))
+            return
 
         for i, wj in enumerate(self.wj_units):
             try:
-                wj_ma = wj.imax_ma
-                resp = wj.send_set(kv=kv, ma=wj_ma, hv_on=True)
-                self.data_logger.log_wj_command(i+1, "HV_ON")
-                self.log(f"[WJ{i+1}] HV ON @ {kv} kV, {wj_ma} mA (MAX) → {resp}")
+                resp = wj.send_set(kv=kv, ma=ma, hv_on=True)
+                self.data_logger.log_wj_command(i+1, "HV_ON", f"{kv}kV_{ma}mA")
+                self.log(f"[WJ{i+1}] HV ON @ {kv} kV, {ma} mA → {resp}")
             except Exception as e:
                 self.log(f"[WJ{i+1} ERROR] {e}")
                 self.data_logger.log_error(f"WJ{i+1}", str(e))
@@ -2619,28 +2421,30 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.data_logger.log_error(f"WJ{i+1}", str(e))
 
 
-    def on_wj_reset(self):
-        for i, wj in enumerate(self.wj_units):
-            try:
-                wj.reset_pulse()
-                self.data_logger.log_wj_command(i+1, "RESET")
-                self.log(f"[WJ{i+1}] Reset OK")
-            except Exception as e:
-                self.log(f"[WJ{i+1} ERROR] {e}")
-                self.data_logger.log_error(f"WJ{i+1}", str(e))
-
     def on_wj_set_voltage(self, kv=None, ma=None):
-        if kv is None:
-            kv = self.wj_panel.voltage.value()
-        # Current is always commanded to each WJ supply's maximum on Apply
-        # Program — user wants every supply opened wide.
+        # Both supplies are programmed together from the shared fields. A
+        # value above the supplies' rating is refused here rather than being
+        # clamped down inside the driver, where nothing would say so.
+        try:
+            if kv is None or ma is None:
+                kv, ma = self.wj_panel.program_values()
+            elif kv > self.wj_panel.MAX_KV:
+                raise ValueError(
+                    f"{kv:.2f} kV is above the {self.wj_panel.MAX_KV:.0f} kV rating")
+            elif ma > self.wj_panel.MAX_MA:
+                raise ValueError(
+                    f"{ma:.2f} mA is above the {self.wj_panel.MAX_MA:.1f} mA rating")
+        except ValueError as e:
+            self.log(f"[WJ] Apply Program refused: {e}")
+            self.data_logger.log_error("WJ", f"Apply Program refused: {e}")
+            self.error_popup("WJ out of range", str(e))
+            return
 
         for i, wj in enumerate(self.wj_units):
             try:
-                wj_ma = wj.imax_ma
-                resp = wj.set_program(kv, wj_ma)
-                self.data_logger.log_wj_command(i+1, "SET_PROGRAM", f"{kv}kV_{wj_ma}mA")
-                self.log(f"[WJ{i+1}] Set → {kv} kV, {wj_ma} mA (MAX) ({resp})")
+                resp = wj.set_program(kv, ma)
+                self.data_logger.log_wj_command(i+1, "SET_PROGRAM", f"{kv}kV_{ma}mA")
+                self.log(f"[WJ{i+1}] Set → {kv} kV, {ma} mA ({resp})")
             except Exception as e:
                 self.log(f"[WJ{i+1} ERROR] {e}")
                 self.data_logger.log_error(f"WJ{i+1}", str(e))
@@ -2654,54 +2458,6 @@ class ScopeDelayMainWindow(QMainWindow):
 
         self.wj_panel.rows[index].lamp.set_status("red", "Disconnected")
         self.log(f"[WJ{index+1}] Disconnected")
-
-
-    def on_wj_read(self):
-        all_good = bool(self.wj_units)
-        for i, wj in enumerate(self.wj_units):
-            try:
-                data = wj.query()
-                self.log(f"[WJ{i+1}] Readback: {data}")
-
-                row = self.wj_panel.rows[i]
-
-                if data.get("type") != "R":
-                    row.label_status.setText("No R packet")
-                    all_good = False
-                    continue
-
-                if data.get("fault", False):
-                    all_good = False
-
-                kv = data.get("kv", 0.0)
-                ma = data.get("ma", 0.0)
-                hv = data.get("hv_on", False)
-                fault = data.get("fault", False)
-
-                try:
-                    self.data_logger.log_wj_voltage(i+1, kv, ma, hv, fault)
-                except Exception as e:
-                    self.log(f"[DataLogger ERROR] Failed to log WJ{i+1} data: {e}")
-
-                self._cache_wj_packet(i, data)
-
-                row.label_status.setText(
-                    f"{kv:.2f} kV | {ma:.3f} mA | "
-                    f"HV={'ON' if hv else 'OFF'} | "
-                    f"Fault={'YES' if fault else 'NO'}"
-                )
-
-            except Exception as e:
-                self.log(f"[WJ{i+1} ERROR] {e}")
-                self.data_logger.log_error(f"WJ{i+1}", str(e))
-                row = self.wj_panel.rows[i]
-                row.label_status.setText("Read Error")
-                all_good = False
-
-        # Interlock step 3: valid readback (R packet, no fault) from every
-        # supply means the programmed voltage is applied and healthy.
-        if all_good:
-            self._mark_interlock(3, "power supplies read back OK")
 
 
     # ------------------------------------------------------------------
@@ -2739,6 +2495,26 @@ class ScopeDelayMainWindow(QMainWindow):
             "steps": dict(self.interlock_passed),
         }, source=SOURCE_READBACK)
 
+    def _show_wj_status(self, unit_index, data):
+        """Per-supply readback line on that supply's row.
+
+        GUI thread only: reached from on_wj_packet, which the reader threads
+        get to through wj_packet_ready. Fault is called out only when it is
+        set, so the common case stays short enough not to widen the panel.
+        """
+        rows = getattr(self, "wj_panel", None)
+        rows = rows.rows if rows is not None else []
+        if unit_index >= len(rows):
+            return
+        text = (f"{data.get('kv', 0.0):.2f} kV  {data.get('ma', 0.0):.3f} mA  "
+                f"HV {'ON' if data.get('hv_on') else 'OFF'}")
+        if data.get("fault"):
+            text += "  FAULT"
+        row = rows[unit_index]
+        row.label_status.setText(text)
+        row.label_status.setStyleSheet(
+            "color:#C62828; font-weight:bold;" if data.get("fault") else "")
+
     def _cache_wj_packet(self, unit_index, data):
         """Store one WJ Q reply in the system state.
 
@@ -2768,10 +2544,27 @@ class ScopeDelayMainWindow(QMainWindow):
         self.system_state.update(unit, values, source=SOURCE_READBACK)
 
     def on_wj_packet(self, unit_index, data):
-        """Full Q reply from a WJ reader thread (kV, mA, HV state, fault)."""
+        """Full Q reply from a WJ reader thread (kV, mA, HV state, fault).
+
+        This is also where interlock step 3 latches. It used to latch from the
+        READBACK button, which no longer exists; the reader threads poll both
+        supplies continuously, so a good R packet with no fault from every
+        supply is the same evidence without an operator click.
+        """
         if data.get("type") != "R":
             return
         self._cache_wj_packet(unit_index, data)
+        self._show_wj_status(unit_index, data)
+        if data.get("fault", False):
+            self._wj_packets_ok.discard(unit_index)
+            # Step 3 latched on "both supplies read back healthy". That is no
+            # longer true, so it goes back to red rather than standing on a
+            # stale reading.
+            self._unmark_interlock(3, f"WJ{unit_index + 1} reports a fault")
+        else:
+            self._wj_packets_ok.add(unit_index)
+            if len(self._wj_packets_ok) >= len(self.wj_units):
+                self._mark_interlock(3, "power supplies read back OK")
         try:
             self.data_logger.log_wj_voltage(
                 unit_index + 1, data.get("kv", 0.0), data.get("ma", 0.0),
@@ -2994,6 +2787,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self._interlock_timer.stop()
         if getattr(self, "_capture_countdown_timer", None) is not None:
             self._capture_countdown_timer.stop()
+
         if self._captures_dirty and self.captured_scopes:
             try:
                 saved_files = self._save_captures_sync()
@@ -3034,16 +2828,10 @@ class ScopeDelayMainWindow(QMainWindow):
         if hasattr(self, 'data_logger') and self.data_logger:
             self.data_logger.close()
 
-        if hasattr(self, 'laser_panel') and self.laser_panel:
+        if hasattr(self, 'laser_frame') and self.laser_frame:
             try:
-                self.laser_panel.shutdown()
+                self.laser_frame.shutdown()
             except Exception as e:
-                self.log(f"[Laser1] shutdown error: {e}")
-
-        if hasattr(self, 'laser_panel2') and self.laser_panel2:
-            try:
-                self.laser_panel2.shutdown()
-            except Exception as e:
-                self.log(f"[Laser2] shutdown error: {e}")
+                self.log(f"[Lasers] shutdown error: {e}")
 
         event.accept()

@@ -35,10 +35,10 @@ OPTA_POLL_MS = 200
 # (the save-on-close safety net still runs).
 AUTO_SAVE_DELAY_SEC = 10.0
 
-# Dome pressure gauge scale (PSI) shown in the SF6 window. Adjust to match the
-# current sensor range.
+# Marx pressure gauge scale (PSI). Matches the fitted transducer, which is a
+# 0-10 V / 0-100 psi unit.
 PRESSURE_GAUGE_MIN_PSI = 0.0
-PRESSURE_GAUGE_MAX_PSI = 160.0
+PRESSURE_GAUGE_MAX_PSI = 100.0
 
 # Startup charge voltage (kV) preloaded into the "Set Voltage" box for the WJ
 # power supplies. This is the kV that HV ON commands.

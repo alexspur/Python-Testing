@@ -168,6 +168,7 @@ UI panel for connecting to and controlling multiple Rigol oscilloscopes.
 from PyQt6.QtWidgets import (
     QGroupBox, QGridLayout, QPushButton, QLabel
 )
+from utils.accent_button import accent_button, CAPTURE_GREEN
 from utils.status_lamp import StatusLamp
 
 
@@ -178,21 +179,25 @@ class RigolPanel(QGroupBox):
         self.setLayout(layout)
 
         # --- BUTTONS ---
-        self.btn_r1 = QPushButton("Connect Rigol #1")
-        self.btn_r2 = QPushButton("Connect Rigol #2")
-        self.btn_r3 = QPushButton("Connect Rigol #3")
+        # Each row is already labelled "Rigol #N:", so repeating the scope
+        # number on every button only makes the panel wider than the window.
+        self.btn_r1 = QPushButton("Connect")
+        self.btn_r2 = QPushButton("Connect")
+        self.btn_r3 = QPushButton("Connect")
 
         # SINGLE-CAPTURE BUTTONS
-        self.btn_r1_single = QPushButton("R1 SINGLE")
-        self.btn_r2_single = QPushButton("R2 SINGLE")
-        self.btn_r3_single = QPushButton("R3 SINGLE")
+        self.btn_r1_single = QPushButton("SINGLE")
+        self.btn_r2_single = QPushButton("SINGLE")
+        self.btn_r3_single = QPushButton("SINGLE")
 
-        self.btn_r1_capture = QPushButton("Capture R1")
-        self.btn_r2_capture = QPushButton("Capture R2")
-        self.btn_r3_capture = QPushButton("Capture R3")
+        self.btn_r1_capture = QPushButton("Capture")
+        self.btn_r2_capture = QPushButton("Capture")
+        self.btn_r3_capture = QPushButton("Capture")
 
         # Main capture all button
-        self.btn_capture = QPushButton("Capture All Scopes")
+        self.btn_capture = QPushButton("Capture All")
+        accent_button(self.btn_capture, CAPTURE_GREEN,
+                      "Arm all three scopes for the next shot.")
 
         # --- LAYOUT ---
         layout.addWidget(QLabel("Rigol #1:"), 0, 0)
@@ -220,17 +225,18 @@ class RigolPanel(QGroupBox):
         layout.addWidget(self.lamp_r2, 1, 4)
         layout.addWidget(self.lamp_r3, 2, 4)
 
-        self.btn_r1_disconnect = QPushButton("Disconnect R1")
+        self.btn_r1_disconnect = QPushButton("Disconnect")
         layout.addWidget(self.btn_r1_disconnect, 0, 5)
 
-        self.btn_r2_disconnect = QPushButton("Disconnect R2")
+        self.btn_r2_disconnect = QPushButton("Disconnect")
         layout.addWidget(self.btn_r2_disconnect, 1, 5)
 
-        self.btn_r3_disconnect = QPushButton("Disconnect R3")
+        self.btn_r3_disconnect = QPushButton("Disconnect")
         layout.addWidget(self.btn_r3_disconnect, 2, 5)
 
         # Capture all button
         layout.addWidget(self.btn_capture, 3, 0, 1, 3)
 
-        self.btn_export = QPushButton("Export Waveforms to CSV")
+        self.btn_export = QPushButton("Export CSV")
+        self.btn_export.setToolTip("Export the captured waveforms to CSV.")
         layout.addWidget(self.btn_export)

@@ -775,6 +775,85 @@ class TestGuiShotLogging(unittest.TestCase):
         # The lock is released, so the next GUI can claim numbers.
         self.assertTrue(ShotCounter(self.tmp / "logs").acquire_lock())
 
+    def test_wj_reader_packets_reach_the_handler_through_the_signal(self):
+        """The reader threads emit into wj_packet_ready so Qt queues the
+        packet onto the GUI thread. Wiring them straight to on_wj_packet ran
+        it on the reader thread, where touching a widget is undefined."""
+        self.win.wj_packet_ready.emit(0, {"type": "R", "kv": 65.0, "ma": 2.0,
+                                          "hv_on": True, "fault": False})
+        self.assertIn("65.00 kV", self.win.wj_panel.rows[0].label_status.text())
+
+    def test_window_title_is_the_shot_control_title(self):
+        self.assertEqual(self.win.windowTitle(), "MultiPulse Shot Control")
+
+    def test_wj_fault_unlatches_interlock_step3(self):
+        """A latch must not outlive its evidence: step 3 latched on both
+        supplies reading back healthy, so a later fault drops it to red."""
+        good = {"type": "R", "kv": 70.0, "ma": 1.5, "hv_on": True, "fault": False}
+        self.win.on_wj_packet(0, good)
+        self.win.on_wj_packet(1, good)
+        self.assertTrue(self.win.interlock_passed[3], "step 3 should have latched")
+
+        self.win.on_wj_packet(1, dict(good, fault=True))
+        self.assertFalse(self.win.interlock_passed[3],
+                         "a faulted supply must clear step 3")
+        self.assertFalse(self.win.btn_interlock_fire.isEnabled())
+        self.assertIn("INTERLOCK_FAIL", event_types(self.dl.get_log_file_path()))
+
+    def test_step3_relatches_once_the_fault_clears(self):
+        good = {"type": "R", "kv": 70.0, "ma": 1.5, "hv_on": True, "fault": False}
+        self.win.on_wj_packet(0, good)
+        self.win.on_wj_packet(1, good)
+        self.win.on_wj_packet(1, dict(good, fault=True))
+        self.assertFalse(self.win.interlock_passed[3])
+
+        # Healthy again from both supplies re-satisfies the step.
+        self.win.on_wj_packet(1, good)
+        self.assertTrue(self.win.interlock_passed[3])
+
+    def test_wj_packet_updates_the_per_supply_status_row(self):
+        """Deleting the READBACK button left nothing writing these labels."""
+        self.win.on_wj_packet(0, {"type": "R", "kv": 70.0, "ma": 1.5,
+                                  "hv_on": True, "fault": False})
+        text = self.win.wj_panel.rows[0].label_status.text()
+        self.assertIn("70.00 kV", text)
+        self.assertIn("1.500 mA", text)
+        self.assertIn("HV ON", text)
+        self.assertNotIn("FAULT", text)
+
+    def test_wj_fault_is_called_out_on_the_row(self):
+        self.win.on_wj_packet(1, {"type": "R", "kv": 0.0, "ma": 0.0,
+                                  "hv_on": False, "fault": True})
+        self.assertIn("FAULT", self.win.wj_panel.rows[1].label_status.text())
+
+    def test_interlock_step3_latches_from_the_reader(self):
+        """Step 3 used to latch from the READBACK button, which is gone."""
+        self.assertFalse(self.win.interlock_passed.get(3))
+        good = {"type": "R", "kv": 70.0, "ma": 1.5, "hv_on": True, "fault": False}
+        self.win.on_wj_packet(0, good)
+        self.assertFalse(self.win.interlock_passed.get(3),
+                         "one supply is not both supplies")
+        self.win.on_wj_packet(1, good)
+        self.assertTrue(self.win.interlock_passed.get(3))
+
+    def test_faulted_supply_does_not_satisfy_step3(self):
+        good = {"type": "R", "kv": 70.0, "ma": 1.5, "hv_on": True, "fault": False}
+        bad = dict(good, fault=True)
+        self.win.on_wj_packet(0, good)
+        self.win.on_wj_packet(1, bad)
+        self.assertFalse(self.win.interlock_passed.get(3))
+
+    def test_pressure_value_is_passed_through_unscaled(self):
+        """The Opta computes psi from its own calibration registers. Removing
+        the calibration UI must not have introduced any GUI-side scaling."""
+        self.win._opta_link_up = True
+        self.win._on_pressure_data({
+            "psi": 42.37, "volts": 4.237, "counts": 1234, "uptime_s": 10,
+            "under_range": False, "over_range": False})
+        self.assertEqual(self.win.system_state.get("pressure")["psi"], 42.37)
+        self.assertEqual(self.win._latest_psi, 42.37)
+        self.assertIn("42.37", self.win.sf6_window.sf6_panel.lbl_psi.text())
+
     def test_connection_memory_writes_go_to_the_temp_copy(self):
         """Every connect handler ends in save_memory(). With the path patched,
         the write lands in the temp folder."""
@@ -816,6 +895,293 @@ class TestRigolAddresses(unittest.TestCase):
         leftovers = {k: v for k, v in default_data.items()
                      if isinstance(v, str) and "USB0::" in v}
         self.assertEqual(leftovers, {}, "a saved USB address would override the default")
+
+
+class TestSimplifiedPanels(unittest.TestCase):
+    """Panel behavior after the GUI simplification. No main window, no ports."""
+
+    # ------------------------------------------------------------ WJ supplies
+    def test_preset_fills_the_field_and_sends_nothing(self):
+        from gui.wj_panel import WJPanel
+        panel = WJPanel(num_units=2)
+        panel.voltage.setValue(60.0)
+        panel.preset_buttons[70.0].click()
+        self.assertEqual(panel.voltage.value(), 70.0)
+        # A preset is a field edit only: the panel holds no supply handles at
+        # all, so there is nothing it could have commanded.
+        self.assertFalse(hasattr(panel, "wj_units"))
+
+    def test_every_preset_is_within_the_rating(self):
+        from gui.wj_panel import WJPanel
+        panel = WJPanel(num_units=2)
+        for kv, btn in panel.preset_buttons.items():
+            btn.click()
+            self.assertLessEqual(kv, WJPanel.MAX_KV)
+            self.assertEqual(panel.program_values()[0], kv)
+
+    def test_value_above_the_rating_is_rejected(self):
+        from gui.wj_panel import WJPanel
+        panel = WJPanel(num_units=2)
+        # The spin box clamps at the rating, so defeat it to prove the check
+        # is in program_values() and not only in the widget.
+        panel.voltage.setRange(0, 500)
+        panel.voltage.setValue(150.0)
+        with self.assertRaises(ValueError):
+            panel.program_values()
+
+        panel.voltage.setValue(75.0)
+        panel.current.setRange(0, 50)
+        panel.current.setValue(12.0)
+        with self.assertRaises(ValueError):
+            panel.program_values()
+
+    def test_current_defaults_to_full_scale(self):
+        """Behavior is unchanged until the operator edits the field: every
+        supply used to be commanded to its maximum current."""
+        from gui.wj_panel import WJPanel
+        panel = WJPanel(num_units=2)
+        self.assertEqual(panel.current.value(), WJPanel.MAX_MA)
+        self.assertEqual(panel.program_values(), (60.0, WJPanel.MAX_MA))
+
+    # ---------------------------------------------------------------- lasers
+    def test_both_lasers_default_to_ext_ext(self):
+        from gui.laser_panel import DualLaserPanel
+        panel = DualLaserPanel()
+        self.assertEqual(len(panel.lasers), 2)
+        for col in panel.lasers:
+            self.assertTrue(col.rb_ext.isChecked(), f"{col.title} must default to EXT/EXT")
+            self.assertFalse(col.rb_int.isChecked())
+            self.assertEqual(col._mode(), "EXT/EXT")
+
+    def test_laser_columns_keep_their_event_tags(self):
+        """LASER_* events and the laser1_* / laser2_* shot columns key off these."""
+        from gui.laser_panel import DualLaserPanel
+        panel = DualLaserPanel()
+        self.assertEqual([c._log_tag for c in panel.lasers], ["Laser1", "Laser2"])
+        self.assertEqual([c._save_key for c in panel.lasers],
+                         ["CFR_LASER_COM", "CFR_LASER2_COM"])
+
+    def test_prep_system_preps_both_lasers(self):
+        from gui.laser_panel import DualLaserPanel
+        panel = DualLaserPanel()
+        started = []
+
+        for col in panel.lasers:
+            def start(c=col):
+                started.append(c._log_tag)
+                return True
+            col.start_prep = start
+
+        panel.on_prep_both()
+        self.assertEqual(started, ["Laser1", "Laser2"])
+
+    def test_one_laser_failing_prep_does_not_skip_the_other(self):
+        from gui.laser_panel import DualLaserPanel
+        panel = DualLaserPanel()
+        started = []
+
+        def fail_laser1():
+            started.append("Laser1")
+            panel.laser1.sig_prep_done.emit("Laser1", False, "not connected")
+            return False
+
+        def ok_laser2():
+            started.append("Laser2")
+            return True
+
+        panel.laser1.start_prep = fail_laser1
+        panel.laser2.start_prep = ok_laser2
+
+        panel.on_prep_both()
+        self.assertEqual(started, ["Laser1", "Laser2"],
+                         "laser 2 must still be prepped after laser 1 fails")
+
+        panel.laser2.sig_prep_done.emit("Laser2", True, "ARMED")
+        text = panel.prep_result_label.text()
+        self.assertIn("CFR Laser 1: FAILED (not connected)", text)
+        self.assertIn("CFR Laser 2: OK (ARMED)", text)
+
+    def test_verify_armed_checks_both_lasers(self):
+        from gui.laser_panel import DualLaserPanel
+        panel = DualLaserPanel()
+        checked = []
+
+        for col in panel.lasers:
+            def verify(c=col):
+                checked.append(c._log_tag)
+                return True
+            col.start_verify = verify
+
+        panel.on_verify_both()
+        self.assertEqual(checked, ["Laser1", "Laser2"])
+
+    def test_verify_reports_each_laser_separately(self):
+        from gui.laser_panel import DualLaserPanel
+        panel = DualLaserPanel()
+        panel.laser1.sig_verify_done.emit("Laser1", True, "ARMED")
+        panel.laser2.sig_verify_done.emit("Laser2", False, "NOT ARMED: idle")
+        text = panel.result_label.text()
+        self.assertIn("CFR Laser 1: ARMED", text)
+        self.assertIn("CFR Laser 2: NOT ARMED", text)
+
+    # ------------------------------------------------------- removed controls
+    def test_dg535_keeps_only_the_delays(self):
+        from gui.dg535_panel import DG535Panel
+        panel = DG535Panel()
+        # No tab bar left: one page of content, built straight into the panel.
+        self.assertFalse(hasattr(panel, "tabs"))
+        self.assertEqual(sorted(panel.delay_widgets), ["A", "B", "C", "D"])
+        for gone in ("btn_apply_trigger", "btn_apply_outputs", "btn_store",
+                     "btn_recall", "btn_recall_defaults", "btn_read_status",
+                     "btn_clear", "btn_apply_all", "btn_fire"):
+            self.assertFalse(hasattr(panel, gone), f"{gone} should be gone")
+        for kept in ("btn_connect", "btn_disconnect", "btn_read_all",
+                     "btn_apply_delays", "trigger_mode_label"):
+            self.assertTrue(hasattr(panel, kept), f"{kept} must remain")
+
+    def test_dg535_delay_units_stay_microseconds(self):
+        from gui.dg535_panel import DG535Panel
+        panel = DG535Panel()
+        for name, w in panel.delay_widgets.items():
+            self.assertFalse(w["delay_combo"].isEnabled(), f"{name} unit must be locked")
+            self.assertEqual(w["delay_combo"].currentData(), 1e-6)
+
+    def test_bnc575_keeps_timing_and_drops_arming(self):
+        from gui.bnc575_panel import BNC575Panel
+        panel = BNC575Panel()
+        self.assertFalse(hasattr(panel, "tabs"))
+        for gone in ("btn_arm", "btn_en_a", "btn_en_trig", "btn_apply_trigger",
+                     "btn_apply_system", "btn_store", "btn_recall", "btn_factory",
+                     "system_mode", "frequency", "clock_source"):
+            self.assertFalse(hasattr(panel, gone), f"{gone} should be gone")
+        for kept in ("btn_connect", "btn_fire", "btn_apply", "btn_read",
+                     "period", "trigger_mode_label"):
+            self.assertTrue(hasattr(panel, kept), f"{kept} must remain")
+        # The enable state is still readable for the shot row, read-only.
+        panel.set_channel_enabled("A", True)
+        self.assertTrue(panel.is_channel_enabled("A"))
+        self.assertEqual(panel.enable_labels["A"].text(), "ON")
+
+    def test_bnc575_delays_are_locked_to_microseconds(self):
+        from gui.bnc575_panel import BNC575Panel
+        panel = BNC575Panel()
+        for ch in ("A", "B", "C", "D"):
+            unit = getattr(panel, f"delay{ch}_unit")
+            self.assertEqual(unit.get_multiplier(), 1e-6, f"delay {ch} must be µs")
+            for btn in unit.btn_group.buttons():
+                self.assertFalse(btn.isEnabled(), f"delay {ch} unit must be locked")
+        # A delay typed as 200 is 200 µs, whatever else is on the panel.
+        panel.delayA.setValue(200.0)
+        self.assertAlmostEqual(panel.get_delayA(), 200e-6)
+
+    def test_the_three_action_buttons_are_colour_coded(self):
+        """Fire, Prep System and Capture All are what the operator reaches for
+        during a shot. They must not look like every other button, and they
+        must not look like each other."""
+        from gui.bnc575_panel import BNC575Panel
+        from gui.laser_panel import DualLaserPanel
+        from gui.rigol_panel import RigolPanel
+        from utils.accent_button import FIRE_RED, PREP_BLUE, CAPTURE_GREEN
+
+        # Hold the panels in locals: a temporary panel is garbage collected
+        # and Qt deletes its children with it, leaving a dead button.
+        bnc, lasers, rigol = BNC575Panel(), DualLaserPanel(), RigolPanel()
+        checks = [("Fire", bnc.btn_fire, FIRE_RED),
+                  ("Prep System", lasers.btn_prep, PREP_BLUE),
+                  ("Capture All", rigol.btn_capture, CAPTURE_GREEN)]
+        for name, btn, colour in checks:
+            style = btn.styleSheet()
+            self.assertIn(colour, style, f"{name} must carry its accent colour")
+            self.assertIn("color: white", style, f"{name} must not be default-coloured")
+        self.assertEqual(len({c for _, _, c in checks}), 3,
+                         "the three actions must be three different colours")
+
+    def test_instrument_panels_fit_without_scrolling(self):
+        """The grid is the lasers across the top, then BNC575 | DG535, then
+        Rigol | WJ. Their minimum sizes are what force a scrollbar, so they
+        have to stay inside what a 1920x1080 desktop leaves for the window."""
+        from gui.bnc575_panel import BNC575Panel
+        from gui.dg535_panel import DG535Panel
+        from gui.laser_panel import DualLaserPanel
+        from gui.rigol_panel import RigolPanel
+        from gui.wj_panel import WJPanel
+
+        m = {name: w.minimumSizeHint() for name, w in (
+            ("lasers", DualLaserPanel()), ("bnc", BNC575Panel()),
+            ("dg", DG535Panel()), ("rigol", RigolPanel()), ("wj", WJPanel()))}
+        rows = [
+            (m["lasers"].height(), m["lasers"].width()),
+            (max(m["bnc"].height(), m["dg"].height()), m["bnc"].width() + m["dg"].width()),
+            (max(m["rigol"].height(), m["wj"].height()), m["rigol"].width() + m["wj"].width()),
+        ]
+        total_h = sum(r[0] for r in rows)
+        widest = max(r[1] for r in rows)
+        # Budget: about 160 px of status strips and margins vertically, and
+        # 380 px for the relay/log column horizontally.
+        self.assertLessEqual(total_h + 160, 1010,
+                             f"instrument grid would scroll vertically ({total_h} px of panels)")
+        self.assertLessEqual(widest + 380, 1900,
+                             f"instrument grid would scroll horizontally ({widest} px widest row)")
+
+    def test_pressure_panel_has_no_calibration_controls(self):
+        from gui.sf6_panel import MarxPressurePanel
+        panel = MarxPressurePanel()
+        self.assertEqual(panel.title(), "Marx Pressure")
+        for gone in ("spin_full_scale", "btn_set_full_scale", "btn_zero_here",
+                     "lbl_cal_full_scale", "lbl_cal_zero", "lbl_cal_avg"):
+            self.assertFalse(hasattr(panel, gone), f"{gone} should be gone")
+
+
+class TestOptaCalibration(unittest.TestCase):
+    """The calibration lives on the Opta; the GUI writes and verifies it."""
+
+    class FakeOpta:
+        def __init__(self, reports):
+            self.reports = reports
+            self.writes = []
+
+        def set_full_scale_psi(self, psi):
+            self.writes.append(("full_scale_psi", psi))
+
+        def set_zero_offset_mv(self, mv):
+            self.writes.append(("zero_offset_mv", mv))
+
+        def read_calibration(self):
+            return dict(self.reports)
+
+    def _worker(self, reports):
+        from utils.pressure_worker import PressureWorker
+        w = PressureWorker("192.0.2.1")      # never connected
+        w.io = self.FakeOpta(reports)
+        return w
+
+    def test_constants_match_the_transducer(self):
+        from instruments.opta_pressure import (
+            OPTA_FULL_SCALE_PSI, OPTA_ZERO_OFFSET_MV, OPTA_AVG_SAMPLES)
+        # 0-10 V / 0-100 psi transducer.
+        self.assertEqual(OPTA_FULL_SCALE_PSI, 100.0)
+        self.assertEqual(OPTA_ZERO_OFFSET_MV, 0)
+        self.assertEqual(OPTA_AVG_SAMPLES, 32)
+
+    def test_connect_writes_then_verifies(self):
+        from instruments.opta_pressure import OPTA_FULL_SCALE_PSI, OPTA_ZERO_OFFSET_MV
+        w = self._worker({"full_scale_psi": 100.0, "zero_offset_mv": 0,
+                          "avg_samples": 32})
+        cal = w._apply_calibration()
+        self.assertEqual(w.io.writes, [("full_scale_psi", OPTA_FULL_SCALE_PSI),
+                                       ("zero_offset_mv", OPTA_ZERO_OFFSET_MV)])
+        self.assertTrue(cal["verified"])
+        self.assertEqual(cal["mismatch"], "")
+
+    def test_readback_that_disagrees_is_flagged(self):
+        w = self._worker({"full_scale_psi": 159.4, "zero_offset_mv": 0,
+                          "avg_samples": 32})
+        seen = []
+        w.calibration_mismatch.connect(seen.append)
+        cal = w._apply_calibration()
+        self.assertFalse(cal["verified"])
+        self.assertIn("full scale", cal["mismatch"])
+        self.assertEqual(len(seen), 1, "a mismatch must be reported once")
 
 
 if __name__ == "__main__":

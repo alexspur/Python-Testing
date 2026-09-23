@@ -268,12 +268,13 @@ Features:
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QLineEdit, QPushButton, QComboBox, QDoubleSpinBox,
-    QSpinBox, QCheckBox, QTabWidget, QFrame, QSizePolicy,
-    QButtonGroup, QScrollArea
+    QFrame, QSizePolicy, QButtonGroup
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from typing import Optional
+
+from utils.accent_button import accent_button, FIRE_RED
 
 # Try to import StatusLamp from utils
 try:
@@ -356,6 +357,19 @@ class UnitSelector(QWidget):
                     btn.setChecked(True)
                     self._multiplier = mult
                 break
+
+    def lock(self, unit: str, why: str = ""):
+        """Pin the unit and stop the operator changing it.
+
+        The panel multiplies the spin box by whatever unit is selected at the
+        moment the value is read, so an accidental unit change would rewrite
+        the value that Apply sends without the number on screen changing.
+        """
+        self.set_unit(unit)
+        for btn in self.btn_group.buttons():
+            btn.setEnabled(False)
+            if why:
+                btn.setToolTip(why)
 
 
 class FreqUnitSelector(QWidget):
@@ -443,29 +457,36 @@ class BNC575Panel(QWidget):
         self.btn_connect = QPushButton("Connect")
         self.btn_disconnect = QPushButton("Disconnect")
         self.btn_fire = QPushButton("Fire (INT)")
-        self.btn_fire.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold;")
+        # The master shot: this is the command that produces t0.
+        accent_button(self.btn_fire, FIRE_RED,
+                      "Fire the BNC575 internally. This is the shot.")
         conn_layout.addWidget(self.btn_connect)
         conn_layout.addWidget(self.btn_disconnect)
         conn_layout.addWidget(self.btn_fire)
         conn_layout.addStretch()
         main_layout.addLayout(conn_layout)
-        
-        # ========== TABS ==========
-        self.tabs = QTabWidget()
-        main_layout.addWidget(self.tabs)
-        
-        # Create tabs
-        self._create_timing_tab()
-        self._create_system_tab()
-        self._create_trigger_tab()
-        self._create_advanced_tab()
-    
-    def _create_timing_tab(self):
-        """Channel timing configuration"""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setSpacing(4)
-        
+
+        # ========== TRIGGER MODE (read-only) ==========
+        # The GUI no longer arms or disarms the BNC575. The mode is set on the
+        # front panel and only reported here, because a fire command issued
+        # while the unit waits on an external edge produces no t0.
+        trig_row = QHBoxLayout()
+        trig_row.addWidget(QLabel("<b>Trigger mode (read-only):</b>"))
+        self.trigger_mode_label = QLabel("---")
+        self.trigger_mode_label.setStyleSheet("font-weight:bold; color:#1565C0;")
+        trig_row.addWidget(self.trigger_mode_label)
+        trig_row.addStretch()
+        main_layout.addLayout(trig_row)
+
+        # ========== TIMING ==========
+        # Built straight into the panel. There is only one page left, so a tab
+        # bar would cost height for nothing, and this panel has to sit beside
+        # the DG535 without the window scrolling.
+        self._build_timing(main_layout)
+
+    def _build_timing(self, layout):
+        """Channel timing, period, and the Apply / Read buttons."""
+
         # Channel timing group
         timing_group = QGroupBox("Channel Timing (Width / Delay)")
         timing_layout = QGridLayout(timing_group)
@@ -478,7 +499,12 @@ class BNC575Panel(QWidget):
         timing_layout.addWidget(QLabel("Delay"), 0, 4)
         timing_layout.addWidget(QLabel("Unit"), 0, 5)
         timing_layout.addWidget(QLabel("En"), 0, 7)
-        
+
+        # Channel enable is read-only: it is reported by Read Settings and
+        # recorded in the shot row, but the GUI does not toggle outputs.
+        self._channel_enabled = {}
+        self.enable_labels = {}
+
         # Channel A
         timing_layout.addWidget(QLabel("A:"), 1, 0)
         self.widthA = QDoubleSpinBox()
@@ -499,12 +525,7 @@ class BNC575Panel(QWidget):
         self.delayA_unit = UnitSelector("µs")
         timing_layout.addWidget(self.delayA_unit, 1, 5)
         timing_layout.addWidget(QLabel(""), 1, 6)  # spacer
-        self.btn_en_a = QPushButton("A")
-        self.btn_en_a.setCheckable(True)
-        self.btn_en_a.setChecked(True)
-        self.btn_en_a.setFixedWidth(30)
-        self._style_enable_btn(self.btn_en_a)
-        timing_layout.addWidget(self.btn_en_a, 1, 7)
+        timing_layout.addWidget(self._make_enable_label("A"), 1, 7)
         
         # Channel B
         timing_layout.addWidget(QLabel("B:"), 2, 0)
@@ -524,12 +545,7 @@ class BNC575Panel(QWidget):
         timing_layout.addWidget(self.delayB, 2, 4)
         self.delayB_unit = UnitSelector("µs")
         timing_layout.addWidget(self.delayB_unit, 2, 5)
-        self.btn_en_b = QPushButton("B")
-        self.btn_en_b.setCheckable(True)
-        self.btn_en_b.setChecked(True)
-        self.btn_en_b.setFixedWidth(30)
-        self._style_enable_btn(self.btn_en_b)
-        timing_layout.addWidget(self.btn_en_b, 2, 7)
+        timing_layout.addWidget(self._make_enable_label("B"), 2, 7)
         
         # Channel C
         timing_layout.addWidget(QLabel("C:"), 3, 0)
@@ -549,12 +565,7 @@ class BNC575Panel(QWidget):
         timing_layout.addWidget(self.delayC, 3, 4)
         self.delayC_unit = UnitSelector("µs")
         timing_layout.addWidget(self.delayC_unit, 3, 5)
-        self.btn_en_c = QPushButton("C")
-        self.btn_en_c.setCheckable(True)
-        self.btn_en_c.setChecked(True)
-        self.btn_en_c.setFixedWidth(30)
-        self._style_enable_btn(self.btn_en_c)
-        timing_layout.addWidget(self.btn_en_c, 3, 7)
+        timing_layout.addWidget(self._make_enable_label("C"), 3, 7)
         
         # Channel D
         timing_layout.addWidget(QLabel("D:"), 4, 0)
@@ -574,15 +585,28 @@ class BNC575Panel(QWidget):
         timing_layout.addWidget(self.delayD, 4, 4)
         self.delayD_unit = UnitSelector("µs")
         timing_layout.addWidget(self.delayD_unit, 4, 5)
-        self.btn_en_d = QPushButton("D")
-        self.btn_en_d.setCheckable(True)
-        self.btn_en_d.setChecked(True)
-        self.btn_en_d.setFixedWidth(30)
-        self._style_enable_btn(self.btn_en_d)
-        timing_layout.addWidget(self.btn_en_d, 4, 7)
-        
+        timing_layout.addWidget(self._make_enable_label("D"), 4, 7)
+
+        # Delays on this instrument are always entered in microseconds.
+        for unit in (self.delayA_unit, self.delayB_unit,
+                     self.delayC_unit, self.delayD_unit):
+            unit.lock("µs", "BNC575 delays are always entered in microseconds.")
+
+        # T0 period shares the timing grid rather than taking a group box of
+        # its own: Apply writes it together with the channel timing anyway,
+        # and a second frame costs height this panel cannot spare.
+        timing_layout.addWidget(QLabel("T₀:"), 5, 0)
+        self.period = QDoubleSpinBox()
+        self.period.setRange(0.0001, 999999)
+        self.period.setDecimals(4)
+        self.period.setValue(1.0)
+        self.period.setFixedWidth(80)
+        timing_layout.addWidget(self.period, 5, 1)
+        self.period_unit = UnitSelector("ms")
+        timing_layout.addWidget(self.period_unit, 5, 2)
+
         layout.addWidget(timing_group)
-        
+
         # Apply/Read buttons
         btn_layout = QHBoxLayout()
         self.btn_apply = QPushButton("Apply Settings")
@@ -593,312 +617,19 @@ class BNC575Panel(QWidget):
         btn_layout.addWidget(self.btn_read)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
-        
-        layout.addStretch()
-        self.tabs.addTab(tab, "Timing")
-    
-    def _create_system_tab(self):
-        """System mode and rate configuration"""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        
-        # System Mode
-        mode_group = QGroupBox("System Mode")
-        mode_layout = QGridLayout(mode_group)
-        
-        mode_layout.addWidget(QLabel("Mode:"), 0, 0)
-        self.system_mode = QComboBox()
-        self.system_mode.addItems(["Continuous", "Single Shot", "Burst", "Duty Cycle"])
-        mode_layout.addWidget(self.system_mode, 0, 1)
-        
-        mode_layout.addWidget(QLabel("Burst Count:"), 0, 2)
-        self.burst_count = QSpinBox()
-        self.burst_count.setRange(1, 9999999)
-        self.burst_count.setValue(1)
-        mode_layout.addWidget(self.burst_count, 0, 3)
-        
-        mode_layout.addWidget(QLabel("On Count:"), 1, 0)
-        self.on_count = QSpinBox()
-        self.on_count.setRange(1, 9999999)
-        self.on_count.setValue(1)
-        mode_layout.addWidget(self.on_count, 1, 1)
-        
-        mode_layout.addWidget(QLabel("Off Count:"), 1, 2)
-        self.off_count = QSpinBox()
-        self.off_count.setRange(1, 9999999)
-        self.off_count.setValue(1)
-        mode_layout.addWidget(self.off_count, 1, 3)
-        
-        layout.addWidget(mode_group)
-        
-        # Rate/Period
-        rate_group = QGroupBox("Rate / Period (T₀)")
-        rate_layout = QGridLayout(rate_group)
-        
-        rate_layout.addWidget(QLabel("Period:"), 0, 0)
-        self.period = QDoubleSpinBox()
-        self.period.setRange(0.0001, 999999)
-        self.period.setDecimals(4)
-        self.period.setValue(1.0)
-        self.period.setFixedWidth(100)
-        rate_layout.addWidget(self.period, 0, 1)
-        self.period_unit = UnitSelector("ms")
-        rate_layout.addWidget(self.period_unit, 0, 2)
-        
-        rate_layout.addWidget(QLabel("Frequency:"), 1, 0)
-        self.frequency = QDoubleSpinBox()
-        self.frequency.setRange(0.0001, 20000000)
-        self.frequency.setDecimals(2)
-        self.frequency.setValue(1000.0)
-        self.frequency.setFixedWidth(100)
-        rate_layout.addWidget(self.frequency, 1, 1)
-        self.freq_unit = FreqUnitSelector("Hz")
-        rate_layout.addWidget(self.freq_unit, 1, 2)
-        
-        # Sync period/freq
-        self.period.valueChanged.connect(self._period_changed)
-        self.frequency.valueChanged.connect(self._freq_changed)
-        self.period_unit.unitChanged.connect(self._period_changed)
-        self.freq_unit.unitChanged.connect(self._freq_changed)
-        
-        layout.addWidget(rate_group)
-        
-        # Clock source
-        clock_group = QGroupBox("Clock Source")
-        clock_layout = QHBoxLayout(clock_group)
-        clock_layout.addWidget(QLabel("Source:"))
-        self.clock_source = QComboBox()
-        self.clock_source.addItems(["System", "Ext 10MHz", "Ext 20MHz", "Ext 25MHz",
-                                    "Ext 40MHz", "Ext 50MHz", "Ext 80MHz", "Ext 100MHz"])
-        clock_layout.addWidget(self.clock_source)
-        clock_layout.addStretch()
-        layout.addWidget(clock_group)
-        
-        # Apply button
-        self.btn_apply_system = QPushButton("Apply System Settings")
-        self.btn_apply_system.setStyleSheet("background-color: #2196F3; color: white; padding: 6px;")
-        layout.addWidget(self.btn_apply_system)
-        
-        layout.addStretch()
-        self.tabs.addTab(tab, "System")
-    
-    def _create_trigger_tab(self):
-        """Trigger and gate configuration"""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        
-        # Trigger
-        trig_group = QGroupBox("Trigger Configuration")
-        trig_layout = QGridLayout(trig_group)
-        
-        trig_layout.addWidget(QLabel("Source:"), 0, 0)
-        self.trig_source = QComboBox()
-        self.trig_source.addItems(["INT", "EXT"])
-        trig_layout.addWidget(self.trig_source, 0, 1)
-        
-        trig_layout.addWidget(QLabel("Slope:"), 0, 2)
-        self.trig_slope = QComboBox()
-        self.trig_slope.addItems(["POS", "NEG"])
-        trig_layout.addWidget(self.trig_slope, 0, 3)
-        
-        trig_layout.addWidget(QLabel("Level:"), 1, 0)
-        self.trig_level = QDoubleSpinBox()
-        self.trig_level.setRange(0.20, 15.0)
-        self.trig_level.setValue(2.5)
-        self.trig_level.setSuffix(" V")
-        self.trig_level.setDecimals(2)
-        trig_layout.addWidget(self.trig_level, 1, 1)
-        
-        # Enable trigger checkbox
-        self.btn_en_trig = QPushButton("Enable Ext Trigger")
-        self.btn_en_trig.setCheckable(True)
-        self.btn_en_trig.setStyleSheet("""
-            QPushButton { padding: 6px; }
-            QPushButton:checked { background-color: #9C27B0; color: white; }
-        """)
-        trig_layout.addWidget(self.btn_en_trig, 1, 2, 1, 2)
-        
-        layout.addWidget(trig_group)
-        
-        # Trigger buttons
-        trig_btn_layout = QHBoxLayout()
-        self.btn_apply_trigger = QPushButton("Apply Trigger Settings")
-        self.btn_arm = QPushButton("Arm (EXT TRIG)")
-        self.btn_arm.setStyleSheet("background-color: #9C27B0; color: white; padding: 6px;")
-        trig_btn_layout.addWidget(self.btn_apply_trigger)
-        trig_btn_layout.addWidget(self.btn_arm)
-        trig_btn_layout.addStretch()
-        layout.addLayout(trig_btn_layout)
-        
-        # Gate
-        gate_group = QGroupBox("Gate Configuration")
-        gate_layout = QGridLayout(gate_group)
-        
-        gate_layout.addWidget(QLabel("Mode:"), 0, 0)
-        self.gate_mode = QComboBox()
-        self.gate_mode.addItems(["Disabled", "Pulse Inhibit", "Output Inhibit", "Per Channel"])
-        gate_layout.addWidget(self.gate_mode, 0, 1)
-        
-        gate_layout.addWidget(QLabel("Logic:"), 0, 2)
-        self.gate_logic = QComboBox()
-        self.gate_logic.addItems(["Active High", "Active Low"])
-        gate_layout.addWidget(self.gate_logic, 0, 3)
-        
-        gate_layout.addWidget(QLabel("Level:"), 1, 0)
-        self.gate_level = QDoubleSpinBox()
-        self.gate_level.setRange(0.20, 15.0)
-        self.gate_level.setValue(2.5)
-        self.gate_level.setSuffix(" V")
-        gate_layout.addWidget(self.gate_level, 1, 1)
-        
-        layout.addWidget(gate_group)
-        
-        layout.addStretch()
-        self.tabs.addTab(tab, "Trigger/Gate")
-    
-    def _create_advanced_tab(self):
-        """Advanced settings: polarity, sync, store/recall"""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        
-        # Polarity
-        pol_group = QGroupBox("Channel Polarity")
-        pol_layout = QGridLayout(pol_group)
-        
-        for i, ch in enumerate(['A', 'B', 'C', 'D']):
-            pol_layout.addWidget(QLabel(f"Ch {ch}:"), 0, i*2)
-            combo = QComboBox()
-            combo.addItems(["Normal", "Inverted"])
-            setattr(self, f'polarity_{ch}', combo)
-            pol_layout.addWidget(combo, 0, i*2+1)
-        
-        layout.addWidget(pol_group)
-        
-        # Sync source
-        sync_group = QGroupBox("Channel Sync Source")
-        sync_layout = QGridLayout(sync_group)
-        
-        for i, ch in enumerate(['A', 'B', 'C', 'D']):
-            sync_layout.addWidget(QLabel(f"Ch {ch}:"), 0, i*2)
-            combo = QComboBox()
-            combo.addItems(["T0", "CHA", "CHB", "CHC", "CHD"])
-            setattr(self, f'sync_{ch}', combo)
-            sync_layout.addWidget(combo, 0, i*2+1)
-        
-        layout.addWidget(sync_group)
-        
-        # Output mode
-        output_group = QGroupBox("Output Mode / Amplitude")
-        output_layout = QGridLayout(output_group)
-        
-        for i, ch in enumerate(['A', 'B', 'C', 'D']):
-            output_layout.addWidget(QLabel(f"Ch {ch}:"), i, 0)
-            mode_combo = QComboBox()
-            mode_combo.addItems(["TTL", "Adjustable"])
-            setattr(self, f'output_mode_{ch}', mode_combo)
-            output_layout.addWidget(mode_combo, i, 1)
-            
-            amp_spin = QDoubleSpinBox()
-            amp_spin.setRange(2.0, 20.0)
-            amp_spin.setValue(4.0)
-            amp_spin.setSuffix(" V")
-            amp_spin.setEnabled(False)  # Only for adjustable
-            setattr(self, f'amplitude_{ch}', amp_spin)
-            output_layout.addWidget(amp_spin, i, 2)
-            
-            # Connect to enable/disable amplitude
-            mode_combo.currentTextChanged.connect(
-                lambda text, spin=amp_spin: spin.setEnabled(text == "Adjustable")
-            )
-        
-        layout.addWidget(output_group)
-        
-        # Store/Recall
-        store_group = QGroupBox("Store / Recall Configuration")
-        store_layout = QHBoxLayout(store_group)
-        
-        store_layout.addWidget(QLabel("Location:"))
-        self.store_location = QSpinBox()
-        self.store_location.setRange(1, 12)
-        self.store_location.setValue(1)
-        store_layout.addWidget(self.store_location)
-        
-        self.btn_store = QPushButton("Store")
-        self.btn_recall = QPushButton("Recall")
-        self.btn_factory = QPushButton("Factory Reset")
-        self.btn_factory.setStyleSheet("background-color: #f44336; color: white;")
-        
-        store_layout.addWidget(self.btn_store)
-        store_layout.addWidget(self.btn_recall)
-        store_layout.addWidget(self.btn_factory)
-        store_layout.addStretch()
-        
-        layout.addWidget(store_group)
-        
-        # Display settings
-        disp_group = QGroupBox("Display Settings")
-        disp_layout = QHBoxLayout(disp_group)
-        
-        disp_layout.addWidget(QLabel("Brightness:"))
-        self.brightness = QSpinBox()
-        self.brightness.setRange(0, 4)
-        self.brightness.setValue(2)
-        disp_layout.addWidget(self.brightness)
-        
-        self.display_enabled = QCheckBox("Display On")
-        self.display_enabled.setChecked(True)
-        disp_layout.addWidget(self.display_enabled)
-        
-        self.keylock = QCheckBox("Keylock")
-        disp_layout.addWidget(self.keylock)
-        
-        disp_layout.addStretch()
-        layout.addWidget(disp_group)
-        
-        layout.addStretch()
-        self.tabs.addTab(tab, "Advanced")
-    
-    def _style_enable_btn(self, btn: QPushButton):
-        """Style channel enable button"""
-        btn.setStyleSheet("""
-            QPushButton { 
-                padding: 2px; 
-                border: 1px solid #888;
-                border-radius: 3px;
-            }
-            QPushButton:checked { 
-                background-color: #4CAF50; 
-                color: white;
-                border: 1px solid #388E3C;
-            }
-        """)
-    
-    def _period_changed(self):
-        """Update frequency when period changes"""
-        try:
-            period_s = self.period.value() * self.period_unit.get_multiplier()
-            if period_s > 0:
-                freq = 1.0 / period_s
-                freq_mult = self.freq_unit.get_multiplier()
-                self.frequency.blockSignals(True)
-                self.frequency.setValue(freq / freq_mult)
-                self.frequency.blockSignals(False)
-        except:
-            pass
-    
-    def _freq_changed(self):
-        """Update period when frequency changes"""
-        try:
-            freq = self.frequency.value() * self.freq_unit.get_multiplier()
-            if freq > 0:
-                period = 1.0 / freq
-                period_mult = self.period_unit.get_multiplier()
-                self.period.blockSignals(True)
-                self.period.setValue(period / period_mult)
-                self.period.blockSignals(False)
-        except:
-            pass
-    
+
+    def _make_enable_label(self, channel: str) -> QLabel:
+        """Read-only per-channel enable indicator, filled by Read Settings."""
+        lbl = QLabel("--")
+        lbl.setFixedWidth(34)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setToolTip(
+            f"Channel {channel} output state, as read from the BNC575. "
+            "Set it on the front panel.")
+        self.enable_labels[channel] = lbl
+        self._channel_enabled[channel] = None
+        return lbl
+
     # ==================== GETTER METHODS (return seconds) ====================
     
     def get_widthA(self) -> float:
@@ -936,10 +667,6 @@ class BNC575Panel(QWidget):
     def get_period(self) -> float:
         """Get period in seconds"""
         return self.period.value() * self.period_unit.get_multiplier()
-    
-    def get_frequency(self) -> float:
-        """Get frequency in Hz"""
-        return self.frequency.value() * self.freq_unit.get_multiplier()
     
     # ==================== SETTER METHODS (accept seconds) ====================
     
@@ -991,60 +718,24 @@ class BNC575Panel(QWidget):
     # ==================== CHANNEL ENABLE STATE ====================
     
     def is_channel_enabled(self, channel: str) -> bool:
-        """Check if channel is enabled"""
+        """Channel output state as last read from the BNC575.
+
+        False when nothing has been read back yet, which is what the shot row
+        should record: the GUI has not seen the instrument say otherwise.
+        """
         ch = channel.upper().replace("CH", "")
-        btn = getattr(self, f'btn_en_{ch.lower()}', None)
-        return btn.isChecked() if btn else False
-    
+        return bool(self._channel_enabled.get(ch))
+
     def set_channel_enabled(self, channel: str, enabled: bool):
-        """Set channel enabled state"""
+        """Fill the read-only indicator from a readback."""
         ch = channel.upper().replace("CH", "")
-        btn = getattr(self, f'btn_en_{ch.lower()}', None)
-        if btn:
-            btn.setChecked(enabled)
-    
-    # ==================== TRIGGER SETTINGS ====================
-    
-    def get_trigger_source(self) -> str:
-        """Get trigger source: INT or EXT"""
-        return self.trig_source.currentText()
-    
-    def get_trigger_slope(self) -> str:
-        """Get trigger slope: POS or NEG"""
-        return self.trig_slope.currentText()
-    
-    def get_trigger_level(self) -> float:
-        """Get trigger level in volts"""
-        return self.trig_level.value()
-    
-    def is_trigger_enabled(self) -> bool:
-        """Check if external trigger is enabled"""
-        return self.btn_en_trig.isChecked()
-    
-    # ==================== SYSTEM MODE ====================
-    
-    def get_system_mode(self) -> str:
-        """Get system mode"""
-        modes = {
-            "Continuous": "NORM",
-            "Single Shot": "SING", 
-            "Burst": "BURS",
-            "Duty Cycle": "DCYC"
-        }
-        return modes.get(self.system_mode.currentText(), "NORM")
-    
-    def set_system_mode(self, mode: str):
-        """Set system mode"""
-        modes = {
-            "NORM": "Continuous",
-            "SING": "Single Shot",
-            "BURS": "Burst",
-            "DCYC": "Duty Cycle"
-        }
-        text = modes.get(mode.upper(), "Continuous")
-        idx = self.system_mode.findText(text)
-        if idx >= 0:
-            self.system_mode.setCurrentIndex(idx)
+        self._channel_enabled[ch] = bool(enabled)
+        lbl = self.enable_labels.get(ch)
+        if lbl:
+            lbl.setText("ON" if enabled else "OFF")
+            lbl.setStyleSheet(
+                "color:white; font-weight:bold; border-radius:3px; background-color:"
+                + ("#43A047;" if enabled else "#9E9E9E;"))
     
     # ==================== STATUS ====================
     
@@ -1066,6 +757,14 @@ class BNC575Panel(QWidget):
         else:
             self.lamp.set_status("yellow", "Stopped")
 
+    def set_trigger_mode_text(self, text: str):
+        """Show the trigger mode read back from the instrument.
+
+        DIS means the unit fires on its own command, which is what a shot
+        needs. TRIG or DUAL means it is waiting on an external edge.
+        """
+        self.trigger_mode_label.setText(str(text))
+
 
 # Test standalone
 if __name__ == "__main__":
@@ -1082,6 +781,5 @@ if __name__ == "__main__":
     print(f"Width A: {panel.get_widthA()}")
     print(f"Delay A: {panel.get_delayA()}")
     print(f"Period: {panel.get_period()}")
-    print(f"Mode: {panel.get_system_mode()}")
     
     sys.exit(app.exec())
