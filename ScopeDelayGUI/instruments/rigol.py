@@ -76,45 +76,39 @@ class RigolScope:
         return self.instr.query(cmd).strip()
         
     def _query_binary(self, cmd: str) -> bytes:
-        """Query oscilloscope and return binary data with TMC header parsing."""
-        # Temporarily disable read termination for binary data
+        """Send a query and read one TMC block by its declared length.
+
+        Do not use read_raw() here. A raw TCP socket is an undelimited byte
+        stream, so read_raw() has no stop condition and blocks until the
+        timeout. Reading the declared byte count works on every transport,
+        and a short transfer raises instead of returning truncated data.
+        """
         old_term = self.instr.read_termination
         self.instr.read_termination = None
         try:
             self.instr.write(cmd)
-            # Read raw bytes - the scope returns TMC format: #NXXXXXX<data>
-            raw = self.instr.read_raw()
-            return self._parse_tmc_data(raw)
+            head = self.instr.read_bytes(2)
+            if head[0:1] != b'#':
+                raise ValueError(f"Invalid TMC header, expected '#', got {head[0:1]!r}")
+            n_digits = int(head[1:2])
+            length = int(self.instr.read_bytes(n_digits))
+            data = self.instr.read_bytes(length)
+            if len(data) != length:
+                raise IOError(f"TMC block declared {length} bytes, got {len(data)}")
+            # Trailing newline. Short timeout so a missing byte never costs the
+            # full 30 s driver timeout.
+            old_timeout = self.instr.timeout
+            self.instr.timeout = 200
+            try:
+                self.instr.read_bytes(1)
+            except Exception:
+                pass
+            finally:
+                self.instr.timeout = old_timeout
+            return data
         finally:
             self.instr.read_termination = old_term
-        
-    def _parse_tmc_data(self, raw: bytes) -> bytes:
-        """
-        Parse TMC block data format.
-        
-        Format: #NXXXXXX<data><terminator>
-        Where:
-            # is the header identifier
-            N is number of digits describing data length
-            XXXXXX is the data length in ASCII
-            <data> is the actual binary data
-            <terminator> is usually \n
-        """
-        if raw[0:1] != b'#':
-            raise ValueError(f"Invalid TMC header, expected '#', got {raw[0:1]}")
-            
-        # Get number of length digits
-        n_digits = int(raw[1:2])
-        
-        # Get data length
-        data_length = int(raw[2:2+n_digits])
-        
-        # Extract data (skip header, take data_length bytes)
-        header_length = 2 + n_digits
-        data = raw[header_length:header_length + data_length]
-        
-        return data
-        
+
     def get_trigger_status(self) -> str:
         """
         Query current trigger status.

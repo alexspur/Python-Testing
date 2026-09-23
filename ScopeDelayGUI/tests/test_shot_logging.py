@@ -133,6 +133,57 @@ class FakeScope:
         self.calls.append("single")
 
 
+def tmc_block(payload, newline=True, declared=None):
+    """Build a TMC block: #<n><length><payload>[\\n].
+
+    declared overrides the length in the header, to simulate a transfer that
+    delivers fewer bytes than it promised.
+    """
+    digits = str(len(payload) if declared is None else declared)
+    head = b"#" + str(len(digits)).encode() + digits.encode()
+    return head + payload + (b"\n" if newline else b"")
+
+
+class FakeVisaInstrument:
+    """Stands in for a pyvisa session. No VISA library, no socket.
+
+    read_bytes(n) mimics pyvisa: it returns exactly n bytes, gathering across
+    however many pieces the transport delivered, and raises when the stream
+    runs dry - which is what a timeout looks like to the driver.
+
+    lenient=True instead returns whatever is available, to prove the driver's
+    own length check catches a short transfer rather than passing truncated
+    samples up as a waveform.
+    """
+
+    def __init__(self, pieces, read_termination="\n", timeout=30000,
+                 lenient=False):
+        self._pieces = [bytes(p) for p in pieces]
+        self._buf = b""
+        self.read_termination = read_termination
+        self.timeout = timeout
+        self.lenient = lenient
+        self.written = []
+        self.reads = []            # byte counts requested, in order
+        self.timeouts_seen = []    # timeout in force at each read
+
+    def write(self, cmd):
+        self.written.append(cmd)
+
+    def read_bytes(self, n):
+        self.reads.append(n)
+        self.timeouts_seen.append(self.timeout)
+        while len(self._buf) < n and self._pieces:
+            self._buf += self._pieces.pop(0)
+        if len(self._buf) < n:
+            if not self.lenient:
+                raise TimeoutError(f"wanted {n} bytes, stream had {len(self._buf)}")
+            out, self._buf = self._buf, b""
+            return out
+        out, self._buf = self._buf[:n], self._buf[n:]
+        return out
+
+
 class TempLogRoot:
     """Run inside a throwaway working directory so logs/ is temporary."""
 
@@ -1233,6 +1284,106 @@ class TestOptaCalibration(unittest.TestCase):
         self.assertFalse(cal["verified"])
         self.assertIn("full scale", cal["mismatch"])
         self.assertEqual(len(seen), 1, "a mismatch must be reported once")
+
+
+class TestTmcBlockReads(unittest.TestCase):
+    """_query_binary reads a TMC block by its declared length.
+
+    It used to call read_raw() once. A raw TCP socket is an undelimited byte
+    stream, so read_raw() had no stop condition and every waveform read
+    blocked until the 30 s timeout: VI_ERROR_TMO on every channel.
+    """
+
+    PAYLOAD = bytes(range(256)) * 4      # 1024 bytes, every byte value
+
+    def _scope(self, instr):
+        """A RigolScope with no VISA session. __new__ skips __init__, which
+        would build a pyvisa ResourceManager."""
+        from instruments.rigol import RigolScope
+        scope = RigolScope.__new__(RigolScope)
+        scope.instr = instr
+        return scope
+
+    def test_normal_block_instr_style(self):
+        """VXI-11 hands over one complete message."""
+        instr = FakeVisaInstrument([tmc_block(self.PAYLOAD)])
+        scope = self._scope(instr)
+        self.assertEqual(scope._query_binary(":WAVeform:DATA?"), self.PAYLOAD)
+        self.assertEqual(instr.written, [":WAVeform:DATA?"])
+
+    def test_normal_block_socket_style(self):
+        """A socket delivers the same block in whatever pieces arrive."""
+        blob = tmc_block(self.PAYLOAD)
+        pieces = [blob[i:i + 7] for i in range(0, len(blob), 7)]
+        scope = self._scope(FakeVisaInstrument(pieces))
+        self.assertEqual(scope._query_binary(":WAVeform:DATA?"), self.PAYLOAD)
+
+    def test_block_delivered_in_several_short_pieces(self):
+        """Reassembly must not depend on how the stream was chopped up."""
+        blob = tmc_block(self.PAYLOAD)
+        pieces = [blob[:1], blob[1:2], blob[2:3], blob[3:9], blob[9:500],
+                  blob[500:501], blob[501:]]
+        instr = FakeVisaInstrument(pieces)
+        scope = self._scope(instr)
+        self.assertEqual(scope._query_binary(":WAVeform:DATA?"), self.PAYLOAD)
+        # Header byte pair, the length digits, the payload, then the newline.
+        self.assertEqual(instr.reads[:3], [2, 4, len(self.PAYLOAD)])
+
+    def test_short_block_raises_rather_than_truncating(self):
+        """The header promises 64 bytes and only 3 arrive."""
+        instr = FakeVisaInstrument([tmc_block(b"\x01\x02\x03", declared=64)])
+        scope = self._scope(instr)
+        with self.assertRaises(Exception):
+            scope._query_binary(":WAVeform:DATA?")
+
+    def test_lenient_transport_short_read_is_caught_by_the_length_check(self):
+        """A transport that returns short instead of raising must still not
+        yield a truncated waveform."""
+        instr = FakeVisaInstrument([tmc_block(b"\x01\x02\x03", declared=64)],
+                                   lenient=True)
+        scope = self._scope(instr)
+        with self.assertRaises(IOError) as cm:
+            scope._query_binary(":WAVeform:DATA?")
+        self.assertIn("declared 64", str(cm.exception))
+
+    def test_missing_trailing_newline_does_not_stall(self):
+        """A block with no trailing newline must return, and must not spend
+        the 30 s driver timeout waiting for a byte that is not coming."""
+        payload = b"\xde\xad\xbe\xef"
+        instr = FakeVisaInstrument([tmc_block(payload, newline=False)])
+        scope = self._scope(instr)
+        self.assertEqual(scope._query_binary(":WAVeform:DATA?"), payload)
+        self.assertIn(200, instr.timeouts_seen, "newline read must use a short timeout")
+        self.assertEqual(instr.timeout, 30000, "driver timeout must be restored")
+
+    def test_read_termination_is_restored(self):
+        instr = FakeVisaInstrument([tmc_block(b"\x00\x01")], read_termination="\n")
+        scope = self._scope(instr)
+        scope._query_binary(":WAVeform:DATA?")
+        self.assertEqual(instr.read_termination, "\n")
+
+    def test_read_termination_is_restored_even_on_failure(self):
+        instr = FakeVisaInstrument([b"XX"], read_termination="\n")
+        scope = self._scope(instr)
+        with self.assertRaises(ValueError):
+            scope._query_binary(":WAVeform:DATA?")
+        self.assertEqual(instr.read_termination, "\n")
+
+    def test_bad_header_raises(self):
+        instr = FakeVisaInstrument([b"XX1234"])
+        scope = self._scope(instr)
+        with self.assertRaises(ValueError):
+            scope._query_binary(":WAVeform:DATA?")
+
+    def test_driver_has_no_read_raw_call_left(self):
+        """read_raw() is what stalled on a socket; nothing may reintroduce it.
+
+        Matches the call, not the name: the replacement docstring mentions
+        read_raw() in prose to say why it must not be used here.
+        """
+        import inspect
+        from instruments import rigol
+        self.assertNotIn("self.instr.read_raw(", inspect.getsource(rigol))
 
 
 if __name__ == "__main__":
