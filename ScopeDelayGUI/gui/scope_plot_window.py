@@ -78,14 +78,21 @@ class ScopePlotWindow(QWidget):
         # BUTTON BAR FOR R1, R2, R3 SINGLE + CAPTURE
         btn_row = QHBoxLayout()
 
+        # The Read buttons call the same handlers as the ones in the main
+        # window: they read the acquisition already in memory and never
+        # re-arm. The SINGLE buttons do arm, and are left alone.
         self.btn_r1_single = QPushButton("R1 SINGLE")
-        self.btn_r1_capture = QPushButton("Capture R1")
+        self.btn_r1_capture = QPushButton("Read R1")
 
         self.btn_r2_single = QPushButton("R2 SINGLE")
-        self.btn_r2_capture = QPushButton("Capture R2")
+        self.btn_r2_capture = QPushButton("Read R2")
 
         self.btn_r3_single = QPushButton("R3 SINGLE")
-        self.btn_r3_capture = QPushButton("Capture R3")
+        self.btn_r3_capture = QPushButton("Read R3")
+
+        for _btn in (self.btn_r1_capture, self.btn_r2_capture, self.btn_r3_capture):
+            _btn.setToolTip("Read the last acquisition from this scope. "
+                            "Does not re-arm, so it cannot discard the shot.")
 
         btn_row.addWidget(self.btn_r1_single)
         btn_row.addWidget(self.btn_r1_capture)

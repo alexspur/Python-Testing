@@ -190,9 +190,15 @@ class RigolPanel(QGroupBox):
         self.btn_r2_single = QPushButton("SINGLE")
         self.btn_r3_single = QPushButton("SINGLE")
 
-        self.btn_r1_capture = QPushButton("Capture")
-        self.btn_r2_capture = QPushButton("Capture")
-        self.btn_r3_capture = QPushButton("Capture")
+        # Read what is already in the scope's memory. These never send
+        # :SINGle: arming discards the previous acquisition, so a read that
+        # re-armed would destroy the shot it was meant to retrieve.
+        self.btn_r1_capture = QPushButton("Read R1")
+        self.btn_r2_capture = QPushButton("Read R2")
+        self.btn_r3_capture = QPushButton("Read R3")
+        for _btn in (self.btn_r1_capture, self.btn_r2_capture, self.btn_r3_capture):
+            _btn.setToolTip("Read the last acquisition from this scope. "
+                            "Does not re-arm, so it cannot discard the shot.")
 
         # Main capture all button
         self.btn_capture = QPushButton("Capture All")
