@@ -12,7 +12,8 @@ default_data = {
     "WJ1_COM": "COM13",
     "WJ2_COM": "COM16",
     "RELAY_COM": "COM7",
-    "CFR_LASER_COM": "COM18",
+    "CFR_LASER_COM": "COM6",
+    "CFR_LASER2_COM": "COM8",
 
     # The scopes are on the instrument network (VXI-11 over Ethernet), not USB.
     "Rigol1_VISA": "TCPIP0::192.168.10.51::INSTR",
