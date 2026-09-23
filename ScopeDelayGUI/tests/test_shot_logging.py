@@ -39,7 +39,12 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 from utils.data_logger import DataLogger
 from utils.shot_logger import SHOT_COLUMNS, ShotCounter, ShotLogger
 from utils.shot_snapshot import build_shot_row, pulse_spacing_ns, resolve_absolute_delays
+from utils.connect_memory import save_memory
 from utils.system_state import SystemState, SOURCE_READBACK
+
+# The operator's real saved port table, one level above ScopeDelayGUI. Tests
+# assert byte-for-byte that they never write to it.
+REAL_MEMORY_FILE = Path(__file__).resolve().parent.parent.parent / "connection_memory.json"
 
 _app = QApplication.instance() or QApplication([])
 
@@ -365,6 +370,7 @@ class TestGuiShotLogging(unittest.TestCase):
 
     def setUp(self):
         import gui.main_window as mw
+        import utils.connect_memory as cm
 
         # Per-test watchdog: dump every thread's stack and exit rather than
         # hang if a modal dialog or a thread join ever blocks again.
@@ -383,6 +389,21 @@ class TestGuiShotLogging(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         p = patch.object(mw, "RigolScope", FakeScope)
+        p.start()
+        self.addCleanup(p.stop)
+
+        # connection_memory.json holds the operator's saved ports. MEM_FILE is
+        # a relative path, so the temp cwd already hides the real file, but pin
+        # it explicitly: every connect handler ends in save_memory(), and a
+        # test that reaches one must not rewrite the real table.
+        p = patch.object(cm, "MEM_FILE", str(self.tmp / "connection_memory.json"))
+        p.start()
+        self.addCleanup(p.stop)
+
+        # load_memory() resolves ports by USB identity, which calls
+        # find_supplies() and opens the live WJ supplies. Hand the window the
+        # remembered defaults instead so startup opens nothing.
+        p = patch.object(mw, "load_memory", lambda *a, **k: dict(cm.default_data))
         p.start()
         self.addCleanup(p.stop)
 
@@ -753,6 +774,48 @@ class TestGuiShotLogging(unittest.TestCase):
         self.assertEqual(counter["last_shot"], 1)
         # The lock is released, so the next GUI can claim numbers.
         self.assertTrue(ShotCounter(self.tmp / "logs").acquire_lock())
+
+    def test_connection_memory_writes_go_to_the_temp_copy(self):
+        """Every connect handler ends in save_memory(). With the path patched,
+        the write lands in the temp folder."""
+        save_memory("Rigol1_VISA", "TCPIP0::192.0.2.1::INSTR")
+        written = json.loads((self.tmp / "connection_memory.json").read_text())
+        self.assertEqual(written["Rigol1_VISA"], "TCPIP0::192.0.2.1::INSTR")
+
+    def test_real_connection_memory_is_untouched(self):
+        """Building the window and saving ports must leave the operator's real
+        connection_memory.json byte-for-byte identical."""
+        if not REAL_MEMORY_FILE.exists():
+            self.skipTest("no real connection_memory.json in this checkout")
+        before = REAL_MEMORY_FILE.read_bytes()
+        save_memory("Rigol1_VISA", "TCPIP0::192.0.2.1::INSTR")
+        save_memory("DG535_COM", "COM99")
+        self.assertEqual(REAL_MEMORY_FILE.read_bytes(), before,
+                         "a test wrote to the real connection_memory.json")
+
+
+class TestRigolAddresses(unittest.TestCase):
+    """The three scopes moved from USB to the instrument network.
+
+    Mapped by scope number: rigol1 -> .51, rigol2 -> .52, rigol3 -> .53.
+    """
+
+    EXPECTED = {
+        "Rigol1_VISA": "TCPIP0::192.168.10.51::INSTR",
+        "Rigol2_VISA": "TCPIP0::192.168.10.52::INSTR",
+        "Rigol3_VISA": "TCPIP0::192.168.10.53::INSTR",
+    }
+
+    def test_defaults_are_the_ethernet_addresses(self):
+        from utils.connect_memory import default_data
+        for key, expected in self.EXPECTED.items():
+            self.assertEqual(default_data[key], expected, f"{key} must be the TCPIP address")
+
+    def test_no_usb_visa_address_remains_in_the_defaults(self):
+        from utils.connect_memory import default_data
+        leftovers = {k: v for k, v in default_data.items()
+                     if isinstance(v, str) and "USB0::" in v}
+        self.assertEqual(leftovers, {}, "a saved USB address would override the default")
 
 
 if __name__ == "__main__":

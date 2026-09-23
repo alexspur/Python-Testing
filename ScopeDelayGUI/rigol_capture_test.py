@@ -87,10 +87,13 @@ class RigolScope:
 #  MAIN SCRIPT (edit VISA addresses as needed)
 # ===========================================================
 
+# The scopes are on the instrument network now (VXI-11 over Ethernet):
+# Rigol 1 = .51, Rigol 2 = .52, Rigol 3 = .53. This list keeps the order it
+# had before the move (scope 3, then 1, then 2).
 RIGOL_ADDR = [
-    "USB0::0x1AB1::0x0514::DS7A233300256::0::INSTR",
-    "USB0::0x1AB1::0x0514::DS7A232900210::0::INSTR",
-    "USB0::0x1AB1::0x0514::DS7A230800035::0::INSTR",
+    "TCPIP0::192.168.10.53::INSTR",
+    "TCPIP0::192.168.10.51::INSTR",
+    "TCPIP0::192.168.10.52::INSTR",
 ]
 
 scopes = []

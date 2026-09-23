@@ -14,9 +14,10 @@ default_data = {
     "RELAY_COM": "COM7",
     "CFR_LASER_COM": "COM18",
 
-    "Rigol1_VISA": "USB0::0x1AB1::0x0514::DS7A232900210::0::INSTR",
-    "Rigol2_VISA": "USB0::0x1AB1::0x0514::DS7A230800035::0::INSTR",
-    "Rigol3_VISA": "USB0::0x1AB1::0x0514::DS7A233300256::0::INSTR",
+    # The scopes are on the instrument network (VXI-11 over Ethernet), not USB.
+    "Rigol1_VISA": "TCPIP0::192.168.10.51::INSTR",
+    "Rigol2_VISA": "TCPIP0::192.168.10.52::INSTR",
+    "Rigol3_VISA": "TCPIP0::192.168.10.53::INSTR",
 }
 
 # --------------------------------------------------------------------------

@@ -123,10 +123,19 @@ class ScopeDelayMainWindow(QMainWindow):
         self.bnc_connected = False
         self.bnc_trigger_armed = False
 
-        # Rigol oscilloscopes (using resource_name parameter for new API)
-        self.rigol2 = RigolScope(resource_name="USB0::0x1AB1::0x0514::DS7A230800035::0::INSTR")  # Physical scope 1
-        self.rigol3 = RigolScope(resource_name="USB0::0x1AB1::0x0514::DS7A233300256::0::INSTR")  # Physical scope 2
-        self.rigol1 = RigolScope(resource_name="USB0::0x1AB1::0x0514::DS7A232900210::0::INSTR")  # Physical scope 3
+        # Rigol oscilloscopes, reached over the instrument network (VXI-11 over
+        # Ethernet) rather than USB.
+        #
+        # Instrument network, built and verified separately - not configured here:
+        #   192.168.10.1   EdgeRouter
+        #   192.168.10.20  Arduino Opta (Modbus TCP, port 502)
+        #   192.168.10.21  this PC
+        #   192.168.10.51  Rigol 1
+        #   192.168.10.52  Rigol 2
+        #   192.168.10.53  Rigol 3
+        self.rigol1 = RigolScope(resource_name="TCPIP0::192.168.10.51::INSTR")  # Physical scope 1 (192.168.10.51)
+        self.rigol2 = RigolScope(resource_name="TCPIP0::192.168.10.52::INSTR")  # Physical scope 2 (192.168.10.52)
+        self.rigol3 = RigolScope(resource_name="TCPIP0::192.168.10.53::INSTR")  # Physical scope 3 (192.168.10.53)
     
         # Multiple WJ supplies
         self.wj_units = [
