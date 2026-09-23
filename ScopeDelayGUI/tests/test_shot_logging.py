@@ -1610,10 +1610,12 @@ class FakeVisaSession:
 
     def query(self, cmd):
         self.queries.append(cmd)
-        if cmd == "*IDN?":
-            return self.idn
+        # responses wins over the idn shortcut, so a test can canned-answer
+        # *IDN? like any other query.
         if cmd in self.responses:
             return self.responses[cmd]
+        if cmd == "*IDN?":
+            return self.idn
         raise TimeoutError(f"no canned response for {cmd}")
 
     def write(self, cmd):
@@ -1648,7 +1650,14 @@ class FakeResourceManager:
 
 
 def make_scope(session, resource="TCPIP0::192.168.10.51::5555::SOCKET"):
-    """RigolScope with no ResourceManager and no VISA library."""
+    """RigolScope with no ResourceManager and no VISA library.
+
+    __new__ skips __init__ (which would build a pyvisa ResourceManager), so
+    every attribute __init__ would have set has to be set here instead -
+    including the lock, or any locked method raises AttributeError and the
+    driver's own except-blocks swallow it into a silent fallback.
+    """
+    import threading
     from instruments.rigol import RigolScope
     scope = RigolScope.__new__(RigolScope)
     scope.rm = FakeResourceManager(session)
@@ -1656,7 +1665,171 @@ def make_scope(session, resource="TCPIP0::192.168.10.51::5555::SOCKET"):
     scope.resource_name = resource
     scope.error_hook = None
     scope.last_capture_status = {}
+    scope._last_channel_stats = {}
+    scope._lock = threading.RLock()
     return scope
+
+
+def canned_session(**extra):
+    """A FakeVisaSession that answers every settings query."""
+    from instruments.rigol import SCOPE_QUERIES, CHANNEL_QUERIES
+    s = FakeVisaSession()
+    for cmd in SCOPE_QUERIES.values():
+        s.responses[cmd] = "0"
+    for tmpl in CHANNEL_QUERIES.values():
+        for ch in (1, 2, 3, 4):
+            s.responses[tmpl.format(ch=ch)] = "0"
+    s.responses.update(extra)
+    return s
+
+
+class TestScopeSettingsReadback(unittest.TestCase):
+    """Query-only settings reads, the lock, and the derived values."""
+
+    # --------------------------------------------------- query-only contract
+    def test_every_settings_query_ends_in_a_question_mark(self):
+        """The tables are the only place scope settings SCPI is written, so
+        enforcing it here makes it impossible to add a command that sets
+        something by accident."""
+        from instruments.rigol import SCOPE_QUERIES, CHANNEL_QUERIES
+        for name, cmd in SCOPE_QUERIES.items():
+            self.assertTrue(cmd.endswith("?"), f"SCOPE_QUERIES[{name}] = {cmd!r}")
+        for name, tmpl in CHANNEL_QUERIES.items():
+            self.assertTrue(tmpl.endswith("?"), f"CHANNEL_QUERIES[{name}] = {tmpl!r}")
+
+    def test_a_settings_read_never_writes(self):
+        session = canned_session()
+        scope = make_scope(session)
+        scope.instr = session
+
+        scope.get_settings()
+
+        self.assertEqual(session.written, [],
+                         "get_settings() must not send a single write")
+        for cmd in session.queries:
+            self.assertTrue(cmd.endswith("?"), f"{cmd!r} is not a query")
+
+    def test_a_failed_query_records_unknown_and_continues(self):
+        """One dead query must cost that value and nothing else - a settings
+        read can never stop a connect or an arm."""
+        from instruments.rigol import UNKNOWN
+        session = canned_session()
+        del session.responses[":TIMebase:MAIN:SCALe?"]      # this one fails
+        scope = make_scope(session)
+        scope.instr = session
+        scope.error_hook = lambda ch, msg: None
+
+        settings = scope.get_settings()
+
+        self.assertEqual(settings["scope"]["timebase_scale_s_div"], UNKNOWN)
+        self.assertEqual(settings["scope"]["trigger_sweep"], "0")
+        self.assertEqual(sorted(settings["channels"]), [1, 2, 3, 4])
+
+    def test_idn_is_split_into_model_serial_firmware(self):
+        session = canned_session(**{"*IDN?": "RIGOL TECHNOLOGIES,DS7054,DS7A232900210,00.01.02"})
+        scope = make_scope(session)
+        scope.instr = session
+        s = scope.get_settings()["scope"]
+        self.assertEqual(s["model"], "DS7054")
+        self.assertEqual(s["serial"], "DS7A232900210")
+        self.assertEqual(s["firmware"], "00.01.02")
+
+    # ------------------------------------------------------------- the lock
+    def test_settings_and_disconnect_are_not_blocked_by_wait_for_trigger(self):
+        """wait_for_trigger releases the lock between polls. If it held the
+        lock for the whole wait, a settings read or a disconnect would queue
+        behind a trigger wait that can legitimately run for 30 minutes."""
+        import threading
+        import time as _time
+
+        session = canned_session(**{":TRIGger:STATus?": "WAIT"})   # never fires
+        scope = make_scope(session)
+        scope.instr = session
+        scope.error_hook = lambda ch, msg: None
+
+        def waiter():
+            try:
+                scope.wait_for_trigger(timeout=3.0, poll_interval=0.02)
+            except Exception:
+                pass          # disconnect below pulls the session out from under it
+
+        t = threading.Thread(target=waiter, daemon=True)
+        t.start()
+        _time.sleep(0.1)                      # let it get into the poll loop
+
+        started = _time.monotonic()
+        scope.get_settings()
+        scope.disconnect()
+        elapsed = _time.monotonic() - started
+
+        self.assertLess(elapsed, 1.0,
+                        f"settings read + disconnect took {elapsed:.2f}s behind "
+                        "a trigger wait; the lock is held too long")
+        t.join(timeout=5)
+
+    # --------------------------------------------------- derived quantities
+    def test_voltage_bounds_come_from_the_preamble_not_a_division_count(self):
+        from instruments.rigol import voltage_bounds
+        pre = {"yincrement": 0.01, "yorigin": 0.0, "yreference": 128.0}
+        lo, hi = voltage_bounds(pre)
+        self.assertAlmostEqual(lo, (0 - 128.0) * 0.01)
+        self.assertAlmostEqual(hi, (255 - 128.0) * 0.01)
+
+    def test_voltage_bounds_respect_an_offset(self):
+        from instruments.rigol import voltage_bounds
+        pre = {"yincrement": 0.02, "yorigin": -10.0, "yreference": 128.0}
+        lo, hi = voltage_bounds(pre)
+        self.assertAlmostEqual(lo, (0 - 128.0 + 10.0) * 0.02)
+        self.assertAlmostEqual(hi, (255 - 128.0 + 10.0) * 0.02)
+        self.assertLess(lo, hi)
+
+    def test_clip_stats_counts_both_rails(self):
+        import numpy as np
+        from instruments.rigol import clip_stats
+        codes = np.array([0, 0, 128, 255, 200], dtype=np.uint8)
+        s = clip_stats(codes)
+        self.assertEqual(s["clipped_low"], 2)
+        self.assertEqual(s["clipped_high"], 1)
+        self.assertEqual(s["clipped"], 3)
+        self.assertEqual((s["code_min"], s["code_max"]), (0, 255))
+
+    def test_clip_stats_on_a_clean_trace_is_zero(self):
+        import numpy as np
+        from instruments.rigol import clip_stats
+        s = clip_stats(np.array([10, 128, 240], dtype=np.uint8))
+        self.assertEqual(s["clipped"], 0)
+
+    def test_clip_stats_tolerates_no_data(self):
+        from instruments.rigol import clip_stats
+        s = clip_stats(None)
+        self.assertEqual(s["clipped"], 0)
+        self.assertIsNone(s["code_min"])
+        self.assertEqual(s["points"], 0)
+
+    # ------------------------------------------------- BNC575 honesty
+    def test_bnc575_getters_return_none_instead_of_a_plausible_default(self):
+        """A fabricated 1 ms period or 0.0 delay is indistinguishable from a
+        real reading, so a dead link used to be logged as a genuine readback."""
+        from instruments.bnc575 import BNC575Controller
+        bnc = BNC575Controller.__new__(BNC575Controller)
+        bnc._query = lambda cmd: "not a number"
+        bnc._resolve_channel = lambda ch: 1
+
+        self.assertIsNone(bnc.get_period())
+        self.assertIsNone(bnc.get_frequency())
+        self.assertIsNone(bnc.get_trigger_level())
+        self.assertIsNone(bnc.get_channel_width(1))
+        self.assertIsNone(bnc.get_channel_delay(1))
+        self.assertIsNone(bnc.get_channel_amplitude(1))
+
+    def test_bnc575_getters_still_parse_a_good_reply(self):
+        from instruments.bnc575 import BNC575Controller
+        bnc = BNC575Controller.__new__(BNC575Controller)
+        bnc._query = lambda cmd: "0.002"
+        bnc._resolve_channel = lambda ch: 1
+        self.assertAlmostEqual(bnc.get_period(), 0.002)
+        self.assertAlmostEqual(bnc.get_frequency(), 500.0)
+        self.assertAlmostEqual(bnc.get_channel_delay(1), 0.002)
 
 
 class TestScopeCaptureReliability(unittest.TestCase):

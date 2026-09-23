@@ -10,7 +10,89 @@ and returns properly scaled voltage/time arrays.
 import pyvisa
 import numpy as np
 import re
+import threading
 import time
+
+
+# Matches utils.system_state.UNKNOWN. Kept as a local constant so the
+# instrument layer does not import from utils.
+UNKNOWN = "UNKNOWN"
+
+# Waveform format codes from the preamble's first field.
+FORMAT_BYTE = 0
+
+# BYTE mode is 8-bit: a sample sitting on either rail is clipped.
+ADC_MIN_CODE = 0
+ADC_MAX_CODE = 255
+
+# Query-only. EVERY entry must end in '?' - enforced by the test suite, so a
+# command that sets something can never be added here by accident. SCPI copied
+# from compare_scopes.py where it exists, which is verified against these
+# three DS7054s.
+SCOPE_QUERIES = {
+    "idn": "*IDN?",
+    "memory_depth": ":ACQuire:MDEPth?",
+    "acquisition_type": ":ACQuire:TYPE?",
+    "average_count": ":ACQuire:AVERages?",
+    "sample_rate_sa_s": ":ACQuire:SRATe?",
+    "timebase_scale_s_div": ":TIMebase:MAIN:SCALe?",
+    "timebase_offset_s": ":TIMebase:MAIN:OFFSet?",
+    "timebase_mode": ":TIMebase:MODE?",
+    "trigger_mode": ":TRIGger:MODE?",
+    "trigger_sweep": ":TRIGger:SWEep?",
+    "trigger_source": ":TRIGger:EDGE:SOURce?",
+    "trigger_slope": ":TRIGger:EDGE:SLOPe?",
+    "trigger_level_v": ":TRIGger:EDGE:LEVel?",
+    "trigger_coupling": ":TRIGger:COUPling?",
+    "trigger_holdoff_s": ":TRIGger:HOLDoff?",
+    "trigger_status": ":TRIGger:STATus?",
+    "waveform_format": ":WAVeform:FORMat?",
+}
+
+CHANNEL_QUERIES = {
+    "display": ":CHANnel{ch}:DISPlay?",
+    "scale_v_div": ":CHANnel{ch}:SCALe?",
+    "offset_v": ":CHANnel{ch}:OFFSet?",
+    "probe_ratio": ":CHANnel{ch}:PROBe?",
+    "coupling": ":CHANnel{ch}:COUPling?",
+    "impedance": ":CHANnel{ch}:IMPedance?",
+    "bandwidth_limit": ":CHANnel{ch}:BWLimit?",
+    "invert": ":CHANnel{ch}:INVert?",
+    "units": ":CHANnel{ch}:UNITs?",
+    "label": ":CHANnel{ch}:LABel?",
+}
+
+
+def voltage_bounds(preamble):
+    """Min and max capturable volts, straight from the preamble.
+
+    v(code) = (code - yreference - yorigin) * yincrement, evaluated at the two
+    ADC rails. Deliberately NOT V/div x divisions: the division count is a
+    fixed display property of the model, not a readback, so anything derived
+    from it would be an assumption. This is instrument-derived and exact.
+    """
+    yinc = float(preamble["yincrement"])
+    yorig = float(preamble["yorigin"])
+    yref = float(preamble["yreference"])
+    lo = (ADC_MIN_CODE - yref - yorig) * yinc
+    hi = (ADC_MAX_CODE - yref - yorig) * yinc
+    return (min(lo, hi), max(lo, hi))
+
+
+def clip_stats(codes, guard=0):
+    """Count samples resting on the ADC rails, from the raw uint8 codes.
+
+    guard widens the test by a code either side; a signal pinned one code off
+    the rail is still a clipped signal.
+    """
+    if codes is None or len(codes) == 0:
+        return {"clipped": 0, "clipped_low": 0, "clipped_high": 0,
+                "code_min": None, "code_max": None, "points": 0}
+    low = int(np.count_nonzero(codes <= ADC_MIN_CODE + guard))
+    high = int(np.count_nonzero(codes >= ADC_MAX_CODE - guard))
+    return {"clipped": low + high, "clipped_low": low, "clipped_high": high,
+            "code_min": int(codes.min()), "code_max": int(codes.max()),
+            "points": int(len(codes))}
 
 
 # ':ACQuire:MDEPth?' answers with an SI suffix ('1M', '125M') as readily as a
@@ -55,6 +137,18 @@ class RigolScope:
         # Per-channel outcome of the last capture_four_channels() call:
         # {channel: {"state": ok|short|failed|not_displayed, "points": int, ...}}
         self.last_capture_status = {}
+        # Per-channel clip statistics, preamble and voltage bounds from the
+        # last read. Statistics only - the raw arrays are not kept.
+        self._last_channel_stats = {}
+        # One transaction at a time on this session. Re-entrant because a
+        # channel read holds it while calling _write/_query_binary, which take
+        # it again on the same thread.
+        #
+        # This guards ONE session object. It cannot protect against a second
+        # process on the same scope: compare_scopes.py opens its own VXI-11
+        # session to these three and can write :ACQuire:MDEPth. Running that
+        # during a shot is unsafe, lock or no lock.
+        self._lock = threading.RLock()
 
     def _report(self, message: str, channel: int = None):
         """Surface a driver-level problem through the GUI logger if wired."""
@@ -97,48 +191,73 @@ class RigolScope:
         # A second Connect press must not leak a session. Port 5555 accepts
         # one raw-socket client, so an orphaned session locks the scope out
         # until it is power cycled.
-        if self.instr is not None:
-            if self.resource_name == open_resource_name:
-                return                      # already connected to this scope
-            self.disconnect()               # moving to a different resource
+        with self._lock:
+            if self.instr is not None:
+                if self.resource_name == open_resource_name:
+                    return                  # already connected to this scope
+                self.disconnect()           # moving to a different resource
 
-        self.instr = self.rm.open_resource(self.resource_name)
-        self.instr.timeout = 30000  # 30 second timeout for large transfers
-        self.instr.read_termination = '\n'
-        self.instr.write_termination = '\n'
+            self.instr = self.rm.open_resource(self.resource_name)
+            self.instr.timeout = 30000  # 30 second timeout for large transfers
+            self.instr.read_termination = '\n'
+            self.instr.write_termination = '\n'
 
-        # A raw socket has no keepalive by default, so a scope that reboots or
-        # a link that flaps leaves a half-open session that still reports
-        # connected and costs a full 30 s timeout on every read. VXI-11 fails
-        # faster on its own; the socket needs to be told.
-        if '::SOCKET' in self.resource_name.upper():
-            try:
-                self.instr.set_visa_attribute(
-                    pyvisa.constants.ResourceAttribute.tcpip_keepalive, True)
-            except Exception as e:
-                self._report(f"TCP keepalive not set on {self.resource_name}: {e}")
+            # A raw socket has no keepalive by default, so a scope that
+            # reboots or a link that flaps leaves a half-open session that
+            # still reports connected and costs a full 30 s timeout on every
+            # read. VXI-11 fails faster on its own; the socket needs telling.
+            if '::SOCKET' in self.resource_name.upper():
+                try:
+                    self.instr.set_visa_attribute(
+                        pyvisa.constants.ResourceAttribute.tcpip_keepalive, True)
+                except Exception as e:
+                    self._report(f"TCP keepalive not set on {self.resource_name}: {e}")
 
-        # Verify connection
-        idn = self.instr.query('*IDN?')
+            # Verify connection. Inside the lock with the rest of setup: until
+            # this returns, the session is open but unconfigured, and another
+            # thread's query landing in that window would hit a socket with no
+            # keepalive and no verified identity.
+            idn = self.instr.query('*IDN?')
+
         print(f"Connected to: {idn.strip()}")
         
     def disconnect(self):
-        """Disconnect from the oscilloscope."""
-        if self.instr:
-            self.instr.close()
-            self.instr = None
+        """Disconnect from the oscilloscope.
+
+        Takes the lock so the session is never closed mid-transaction. It is
+        only ever held for one transaction at a time, so this cannot wait on a
+        whole capture.
+        """
+        with self._lock:
+            if self.instr:
+                self.instr.close()
+                self.instr = None
             
     def is_connected(self) -> bool:
         """Check if connected to oscilloscope."""
         return self.instr is not None
         
     def _write(self, cmd: str):
-        """Send command to oscilloscope."""
-        self.instr.write(cmd)
-        
+        """Send command to oscilloscope. One transaction."""
+        with self._lock:
+            self.instr.write(cmd)
+
     def _query(self, cmd: str) -> str:
-        """Query oscilloscope and return response."""
-        return self.instr.query(cmd).strip()
+        """Query oscilloscope and return response. One transaction."""
+        with self._lock:
+            return self.instr.query(cmd).strip()
+
+    def _safe_query(self, cmd: str) -> str:
+        """Query that records UNKNOWN instead of raising.
+
+        A settings read must never stop a connect or an arm, so one dead
+        query costs that one value and nothing else.
+        """
+        try:
+            return self._query(cmd)
+        except Exception as e:
+            self._report(f"{cmd} failed: {e}")
+            return UNKNOWN
         
     def _query_binary(self, cmd: str) -> bytes:
         """Send a query and read one TMC block by its declared length.
@@ -220,11 +339,55 @@ class RigolScope:
     def get_trigger_status(self) -> str:
         """
         Query current trigger status.
-        
+
         Returns:
             One of: 'TD' (triggered), 'WAIT', 'RUN', 'AUTO', 'STOP'
         """
         return self._query(':TRIGger:STATus?')
+
+    def get_waveform_preamble(self) -> dict:
+        """Public preamble read for whatever source is currently selected.
+
+        Query-only: it does not set :WAVeform:SOURce, because that would be a
+        write. Per-channel preambles come from the capture path, which has
+        already selected each source for its own read.
+        """
+        preamble = self._get_waveform_preamble()
+        lo, hi = voltage_bounds(preamble)
+        preamble["v_min"] = lo
+        preamble["v_max"] = hi
+        return preamble
+
+    def get_settings(self, channels=(1, 2, 3, 4)) -> dict:
+        """Every scope and per-channel setting, in one locked pass.
+
+        Query-only throughout. Holds the lock for the whole read, which is
+        well under a second, so a settings read is atomic with respect to a
+        capture rather than interleaving with one.
+
+        A failed query records UNKNOWN and the pass continues.
+        """
+        out = {"scope": {}, "channels": {}, "read_seconds": 0.0}
+        started = time.monotonic()
+        with self._lock:
+            for name, cmd in SCOPE_QUERIES.items():
+                out["scope"][name] = self._safe_query(cmd)
+
+            # *IDN? is vendor,model,serial,firmware - same split compare_scopes
+            # uses. Parsed here so nobody has to re-parse it downstream.
+            idn = out["scope"].get("idn") or ""
+            parts = [p.strip() for p in idn.split(",")]
+            out["scope"]["model"] = parts[1] if len(parts) > 1 else UNKNOWN
+            out["scope"]["serial"] = parts[2] if len(parts) > 2 else UNKNOWN
+            out["scope"]["firmware"] = parts[3] if len(parts) > 3 else UNKNOWN
+
+            for ch in channels:
+                out["channels"][ch] = {
+                    name: self._safe_query(tmpl.format(ch=ch))
+                    for name, tmpl in CHANNEL_QUERIES.items()
+                }
+        out["read_seconds"] = time.monotonic() - started
+        return out
         
     def single(self):
         """Set oscilloscope to single trigger mode and arm."""
@@ -301,18 +464,53 @@ class RigolScope:
             True if triggered successfully, False if timeout
         """
         start_time = time.time()
-        
+
+        # Deliberately NOT holding the lock across this loop. Each poll takes
+        # and releases it inside get_trigger_status(), and the sleep happens
+        # with the lock free, so a settings read or a disconnect can get in
+        # between polls instead of waiting out the whole trigger wait - which
+        # can be 30 minutes.
         while (time.time() - start_time) < timeout:
             status = self.get_trigger_status()
-            
+
             # STOP or TD means acquisition is complete and ready to read
             if status in ('STOP', 'TD'):
                 return True
-                
+
             time.sleep(poll_interval)
-            
+
         return False
         
+    def _stash_channel_stats(self, channel, codes, preamble):
+        """Record clip stats, preamble and voltage bounds for one channel.
+
+        Statistics only. A real capture is 1,000,000 points per channel; the
+        raw uint8 array is measured here, where it already exists, and then
+        dropped rather than carried up to the GUI beside the float volts.
+        """
+        entry = dict(clip_stats(codes))
+        if preamble:
+            entry["preamble"] = {k: preamble.get(k) for k in (
+                "format", "points", "xincrement", "xorigin",
+                "yincrement", "yorigin", "yreference")}
+            lo, hi = voltage_bounds(preamble)
+            entry["v_min"], entry["v_max"] = lo, hi
+        self._last_channel_stats[channel] = entry
+        return entry
+
+    def _check_byte_format(self, channel, preamble):
+        """BYTE was just requested; warn if the scope says otherwise.
+
+        The decode below is hard-wired to uint8, so a WORD reply would be
+        silently mis-read at half length and every clip count would be wrong.
+        """
+        fmt = preamble.get('format')
+        if fmt != FORMAT_BYTE:
+            self._report(
+                f"channel {channel}: preamble reports format {fmt}, expected "
+                f"BYTE ({FORMAT_BYTE}); samples may be mis-decoded",
+                channel=channel)
+
     def _get_waveform_preamble(self) -> dict:
         """
         Get waveform preamble containing scaling parameters.
@@ -355,41 +553,50 @@ class RigolScope:
         Returns:
             Tuple of (time_array, voltage_array) as numpy arrays
         """
-        # Set waveform source to the specified channel
-        self._write(f':WAVeform:SOURce CHANnel{channel}')
-        
-        # Set to NORMAL mode (read screen data) 
-        # Use RAW mode if you need full memory depth
-        self._write(':WAVeform:MODE NORMal')
-        
-        # Set byte format for data transfer
-        self._write(':WAVeform:FORMat BYTE')
-        
-        # Get the preamble with scaling factors
-        preamble = self._get_waveform_preamble()
-        
-        # Read the waveform data
-        raw_data = self._query_binary(':WAVeform:DATA?')
-        
-        # Convert bytes to numpy array
-        raw_values = np.frombuffer(raw_data, dtype=np.uint8)
-        
-        # Convert to voltage using preamble parameters
-        # Formula: voltage = (raw_value - yreference - yorigin) * yincrement
-        yinc = preamble['yincrement']
-        yorig = preamble['yorigin']
-        yref = preamble['yreference']
-        
-        voltage = (raw_values.astype(float) - yref - yorig) * yinc
-        
-        # Generate time array
-        # Formula: time = xorigin + index * xincrement
-        xinc = preamble['xincrement']
-        xorig = preamble['xorigin']
-        
-        time_array = xorig + np.arange(len(voltage)) * xinc
-        
-        return time_array, voltage
+        # One channel's read is a single transaction: source, mode, format,
+        # preamble and data belong together, or another caller could change
+        # :WAVeform:SOURce between them and this would return that channel.
+        with self._lock:
+            # Set waveform source to the specified channel
+            self._write(f':WAVeform:SOURce CHANnel{channel}')
+
+            # Set to NORMAL mode (read screen data)
+            # Use RAW mode if you need full memory depth
+            self._write(':WAVeform:MODE NORMal')
+
+            # Set byte format for data transfer
+            self._write(':WAVeform:FORMat BYTE')
+
+            # Get the preamble with scaling factors
+            preamble = self._get_waveform_preamble()
+            self._check_byte_format(channel, preamble)
+
+            # Read the waveform data
+            raw_data = self._query_binary(':WAVeform:DATA?')
+
+            # Convert bytes to numpy array
+            raw_values = np.frombuffer(raw_data, dtype=np.uint8)
+
+            # Measure clipping on the raw codes, before the conversion below
+            # turns them into volts and the rails are no longer visible.
+            self._stash_channel_stats(channel, raw_values, preamble)
+
+            # Convert to voltage using preamble parameters
+            # Formula: voltage = (raw_value - yreference - yorigin) * yincrement
+            yinc = preamble['yincrement']
+            yorig = preamble['yorigin']
+            yref = preamble['yreference']
+
+            voltage = (raw_values.astype(float) - yref - yorig) * yinc
+
+            # Generate time array
+            # Formula: time = xorigin + index * xincrement
+            xinc = preamble['xincrement']
+            xorig = preamble['xorigin']
+
+            time_array = xorig + np.arange(len(voltage)) * xinc
+
+            return time_array, voltage
         
     def _get_memory_depth(self) -> int:
         """Return the acquisition memory depth (total RAW points available).
@@ -427,53 +634,65 @@ class RigolScope:
         Returns:
             Tuple of (time_array, voltage_array) as numpy arrays
         """
-        # Set waveform source, RAW mode (internal memory), BYTE format.
-        self._write(f':WAVeform:SOURce CHANnel{channel}')
-        self._write(':WAVeform:MODE RAW')
-        self._write(':WAVeform:FORMat BYTE')
+        # One channel's read is a single transaction. The source, mode and
+        # format writes, the preamble and every chunk belong together: if
+        # anything else changed :WAVeform:SOURce partway through, the later
+        # chunks would come from a different channel and be concatenated onto
+        # this one's samples without any error.
+        with self._lock:
+            # Set waveform source, RAW mode (internal memory), BYTE format.
+            self._write(f':WAVeform:SOURce CHANnel{channel}')
+            self._write(':WAVeform:MODE RAW')
+            self._write(':WAVeform:FORMat BYTE')
 
-        # Total points to read out of memory.
-        total = self._get_memory_depth()
-        if total <= 0:
-            return np.array([]), np.array([])
+            # Total points to read out of memory.
+            total = self._get_memory_depth()
+            if total <= 0:
+                self._stash_channel_stats(channel, None, None)
+                return np.array([]), np.array([])
 
-        # Read the scaling preamble once (yinc/xinc are constant across chunks).
-        self._write(':WAVeform:STARt 1')
-        self._write(f':WAVeform:STOP {min(chunk_size, total)}')
-        preamble = self._get_waveform_preamble()
+            # Read the scaling preamble once (yinc/xinc are constant across chunks).
+            self._write(':WAVeform:STARt 1')
+            self._write(f':WAVeform:STOP {min(chunk_size, total)}')
+            preamble = self._get_waveform_preamble()
+            self._check_byte_format(channel, preamble)
 
-        # Walk the memory in chunks. Advance by the number of points actually
-        # returned so a short read can't desync the window.
-        chunks = []
-        start = 1
-        while start <= total:
-            stop = min(start + chunk_size - 1, total)
-            self._write(f':WAVeform:STARt {start}')
-            self._write(f':WAVeform:STOP {stop}')
-            raw = self._query_binary(':WAVeform:DATA?')
-            vals = np.frombuffer(raw, dtype=np.uint8)
-            if vals.size == 0:
-                break  # nothing came back — avoid an infinite loop
-            chunks.append(vals)
-            start += vals.size
+            # Walk the memory in chunks. Advance by the number of points actually
+            # returned so a short read can't desync the window.
+            chunks = []
+            start = 1
+            while start <= total:
+                stop = min(start + chunk_size - 1, total)
+                self._write(f':WAVeform:STARt {start}')
+                self._write(f':WAVeform:STOP {stop}')
+                raw = self._query_binary(':WAVeform:DATA?')
+                vals = np.frombuffer(raw, dtype=np.uint8)
+                if vals.size == 0:
+                    break  # nothing came back — avoid an infinite loop
+                chunks.append(vals)
+                start += vals.size
 
-        if chunks:
-            raw_values = np.concatenate(chunks)
-        else:
-            raw_values = np.array([], dtype=np.uint8)
+            if chunks:
+                raw_values = np.concatenate(chunks)
+            else:
+                raw_values = np.array([], dtype=np.uint8)
 
-        # Convert ADC counts to voltage using preamble parameters.
-        yinc = preamble['yincrement']
-        yorig = preamble['yorigin']
-        yref = preamble['yreference']
-        voltage = (raw_values.astype(float) - yref - yorig) * yinc
+            # Measure clipping on the raw ADC codes, before the conversion
+            # below turns them into volts and loses the rails.
+            self._stash_channel_stats(channel, raw_values, preamble)
 
-        # Generate the time array from the timebase.
-        xinc = preamble['xincrement']
-        xorig = preamble['xorigin']
-        time_array = xorig + np.arange(len(voltage)) * xinc
+            # Convert ADC counts to voltage using preamble parameters.
+            yinc = preamble['yincrement']
+            yorig = preamble['yorigin']
+            yref = preamble['yreference']
+            voltage = (raw_values.astype(float) - yref - yorig) * yinc
 
-        return time_array, voltage
+            # Generate the time array from the timebase.
+            xinc = preamble['xincrement']
+            xorig = preamble['xorigin']
+            time_array = xorig + np.arange(len(voltage)) * xinc
+
+            return time_array, voltage
         
     def capture_two_channels(self, ch1: int = 1, ch2: int = 2) -> tuple:
         """
@@ -620,6 +839,13 @@ class RigolScope:
                               "expected": expected, "error": str(e)}
                 self._report(f"channel {ch}: read failed: {e}", channel=ch)
                 results.append(empty)
+
+        # Carry each channel's clip statistics, preamble and voltage bounds
+        # alongside its outcome, so one object describes the whole capture.
+        for ch, entry in status.items():
+            stats = dict(self._last_channel_stats.get(ch, {}))
+            stats.pop("points", None)     # already recorded from the volts array
+            entry.update(stats)
 
         self.last_capture_status = status
         return tuple(results)

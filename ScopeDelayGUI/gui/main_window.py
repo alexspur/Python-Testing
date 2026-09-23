@@ -890,18 +890,22 @@ class ScopeDelayMainWindow(QMainWindow):
         try:
             # Read timing settings
             wA, dA, wB, dB, wC, dC, wD, dD = self.bnc.read_settings()
-            self.bnc_panel.set_widthA(wA)
-            self.bnc_panel.set_delayA(dA)
-            self.bnc_panel.set_widthB(wB)
-            self.bnc_panel.set_delayB(dB)
-            self.bnc_panel.set_widthC(wC)
-            self.bnc_panel.set_delayC(dC)
-            self.bnc_panel.set_widthD(wD)
-            self.bnc_panel.set_delayD(dD)
+            # A value the instrument could not report now comes back as None
+            # rather than a plausible default. Leave the panel showing its
+            # previous number instead of writing None into a spin box, and
+            # record UNKNOWN rather than fiction in the shot row.
+            for setter, value in (
+                    (self.bnc_panel.set_widthA, wA), (self.bnc_panel.set_delayA, dA),
+                    (self.bnc_panel.set_widthB, wB), (self.bnc_panel.set_delayB, dB),
+                    (self.bnc_panel.set_widthC, wC), (self.bnc_panel.set_delayC, dC),
+                    (self.bnc_panel.set_widthD, wD), (self.bnc_panel.set_delayD, dD)):
+                if value is not None:
+                    setter(value)
 
             # Read period
             period = self.bnc.get_period()
-            self.bnc_panel.set_period(period)
+            if period is not None:
+                self.bnc_panel.set_period(period)
 
             # Read channel states, and polarity for the shot row
             widths = {"A": wA, "B": wB, "C": wC, "D": wD}
@@ -916,8 +920,8 @@ class ScopeDelayMainWindow(QMainWindow):
                 except Exception:
                     polarity = UNKNOWN
                 channels[ch] = {
-                    "delay_s": delays[ch],
-                    "width_s": widths[ch],
+                    "delay_s": UNKNOWN if delays[ch] is None else delays[ch],
+                    "width_s": UNKNOWN if widths[ch] is None else widths[ch],
                     "enabled": enabled,
                     "polarity": polarity,
                 }
@@ -935,7 +939,7 @@ class ScopeDelayMainWindow(QMainWindow):
 
             self.system_state.update("bnc575", {
                 "channels": channels,
-                "period_s": period,
+                "period_s": UNKNOWN if period is None else period,
                 "system_mode": mode.value if mode else UNKNOWN,
                 "trigger_mode": trigger_mode,
                 "armed": self.bnc_trigger_armed,
