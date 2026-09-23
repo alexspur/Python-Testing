@@ -1,121 +1,12 @@
 # gui/wj_panel.py
 
-
-# from PyQt6.QtWidgets import (
-#     QGroupBox, QVBoxLayout, QHBoxLayout, QPushButton,
-#     QLabel, QDoubleSpinBox, QFormLayout
-# )
-# from utils.status_lamp import StatusLamp
-
-# # class WJPanel(QGroupBox):
-# #     def __init__(self):
-# class WJPanel(QGroupBox):
-#     def __init__(self, num_units=1):
-#         super().__init__("WJ High-Voltage Supplies")
-#         self.num_units = num_units
-#         # super().__init__("WJ HV Power Supply")
-
-#         layout = QVBoxLayout()
-#         self.setLayout(layout)
-
-#         # ------------------- CONNECT -------------------
-#         row = QHBoxLayout()
-#         # self.btn_connect = QPushButton("Connect (COM6)")
-#         self.btn_connect = QPushButton("Connect")
-#         self.btn_disconnect = QPushButton("Disconnect")
-#         layout.addWidget(self.btn_disconnect)
-#         row.addWidget(self.btn_connect)
-#         layout.addLayout(row)
-#         self.lamp = StatusLamp(size=14)
-#         layout.addWidget(self.lamp)
-
-#         # ------------------- SETPOINTS -------------------
-#         form = QFormLayout()
-#         self.voltage = QDoubleSpinBox()
-#         self.voltage.setRange(0, 200)  # kV
-#         self.voltage.setDecimals(3)
-
-#         self.current = QDoubleSpinBox()
-#         self.current.setRange(0, 20)   # mA or A depending on rating
-#         self.current.setDecimals(3)
-
-#         form.addRow("Voltage (kV):", self.voltage)
-#         form.addRow("Current (mA):", self.current)
-#         layout.addLayout(form)
-
-#         # ------------------- COMMAND BUTTONS -------------------
-#         row2 = QHBoxLayout()
-#         self.btn_set_v = QPushButton("Set Voltage")
-#         self.btn_set_i = QPushButton("Set Current")
-#         row2.addWidget(self.btn_set_v)
-#         row2.addWidget(self.btn_set_i)
-#         layout.addLayout(row2)
-
-#         row3 = QHBoxLayout()
-#         self.btn_hv_on  = QPushButton("HV ON")
-#         self.btn_hv_off = QPushButton("HV OFF")
-#         self.btn_reset  = QPushButton("Reset")
-#         row3.addWidget(self.btn_hv_on)
-#         row3.addWidget(self.btn_hv_off)
-#         row3.addWidget(self.btn_reset)
-#         layout.addLayout(row3)
-
-#         # ------------------- READBACK -------------------
-#         self.btn_read = QPushButton("Readback Status")
-#         layout.addWidget(self.btn_read)
-
-#         self.label_status = QLabel("Status: ---")
-#         layout.addWidget(self.label_status)
-
-#         # ------------------- LIVE PLOT WINDOW -------------------
-#         self.btn_open_plot = QPushButton("Open WJ Live Plot")
-#         layout.addWidget(self.btn_open_plot)
-
-#         self.rows = []
-
-#         for i in range(self.num_units):
-#             row = self.make_supply_row(i)
-#             layout.addLayout(row)
-#             self.rows.append(row)
-        
-#     def make_supply_row(self, index):
-#         row = QHBoxLayout()
-
-#         label = QLabel(f"WJ #{index+1}")
-#         connect = QPushButton("Connect")
-#         disconnect = QPushButton("Disconnect")
-#         lamp = StatusLamp(size=14)
-
-#         # Save to list so main_window can access
-#         row.label = label
-#         row.connect = connect
-#         row.disconnect = disconnect
-#         row.lamp = lamp
-
-#         row.addWidget(label)
-#         row.addWidget(connect)
-#         row.addWidget(disconnect)
-#         row.addWidget(lamp)
-#         return row
-
-
-
-# gui/wj_panel.py
-
-
 from PyQt6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QLabel, QDoubleSpinBox, QFormLayout,
-    QComboBox
+    QPushButton, QLabel, QDoubleSpinBox, QComboBox
 )
 
-# from PyQt6.QtWidgets import (
-#     QGroupBox, QVBoxLayout, QGridLayout, QLabel, QPushButton, QComboBox, QHBoxLayout, QDoubleSpinBox
-# )
 from utils.status_lamp import StatusLamp
 
-
-from utils.status_lamp import StatusLamp
 
 class WJPanel(QGroupBox):
     def __init__(self, num_units=2):
@@ -181,12 +72,6 @@ class WJPanel(QGroupBox):
             grid.addWidget(row.label_status, i, 5)
 
         layout.addLayout(grid)
-
-        # ─────────────────────────────────────────────
-        # OPTIONAL: Live plot button
-        # ─────────────────────────────────────────────
-        self.btn_open_plot = QPushButton("Open WJ Live Plot")
-        layout.addWidget(self.btn_open_plot)
 
 
 class WJRow:

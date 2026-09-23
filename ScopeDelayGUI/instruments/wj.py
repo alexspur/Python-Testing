@@ -133,14 +133,17 @@ class WJPowerSupply:
         except ValueError:
             return {"type": "R", "raw": s, "parse_error": "bad hex in V/I"}
 
-        # Digital monitors (12 bits across three ASCII hex chars)
+        # Byte 11 of the R packet holds the digital status bits. s[0] is 'R'
+        # (byte 1), so byte 11 is s[10].
+        #
+        # This used to read int(s[10:13], 16) & 0xF, which masks down to byte
+        # 13, not byte 11: with HV on, byte 11 reads '4' but s[10:13] == '400'
+        # and & 0xF gives 0, so query() reported HV=OFF while HV was ON. That
+        # result feeds ensure_wj_hv_off(), the pre-fire interlock.
         try:
-            dig_str = s[10:13]  # bytes 11-13
-            dig_val = int(dig_str, 16)
+            byte11 = int(s[10:11], 16)
         except ValueError:
-            dig_val = 0
-
-        byte11 = dig_val & 0xF  # lowest nibble: control mode, fault, HV ON
+            byte11 = 0
         control_mode_current = bool(byte11 & 0x1)  # 1 = current mode :contentReference[oaicite:2]{index=2}
         fault = bool(byte11 & 0x2)                # 1 = fault
         hv_on = bool(byte11 & 0x4)                # 1 = HV ON
