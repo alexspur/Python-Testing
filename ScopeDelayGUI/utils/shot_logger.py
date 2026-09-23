@@ -187,15 +187,23 @@ SHOT_COLUMNS = (
         "interlock_manual_overrides",
         # --- scopes (filenames stay rigol<N>_<session ts>.csv so the existing
         #     post-test analysis keeps working; they are named here instead) ---
+        # rigol<N>_file is the filename this shot EXPECTS. Whether it was
+        # actually written is a separate column, filled by the report from
+        # SCOPE_EXPORT events plus a check that the file exists: the row used
+        # to name a file for every connected scope whether or not any capture
+        # or export ever happened.
         "rigol1_armed",
         "rigol1_capture_ok",
         "rigol1_file",
+        "rigol1_file_written",
         "rigol2_armed",
         "rigol2_capture_ok",
         "rigol2_file",
+        "rigol2_file_written",
         "rigol3_armed",
         "rigol3_capture_ok",
         "rigol3_file",
+        "rigol3_file_written",
         "gui_version",
         "notes",
     ]
@@ -338,6 +346,11 @@ class ShotCounter:
     def _candidate_logs(self):
         if self.master_file.exists():
             yield self.master_file
+        # Masters retired by a schema change. The current master starts empty
+        # after a rollover, so without these every shot fired before the
+        # schema changed is invisible to recovery and its number would be
+        # handed out a second time.
+        yield from sorted(self.logs_root.glob("shot_log_master_schema_v*.csv"))
         # Per-session shot logs, in case the master was lost as well.
         yield from sorted(self.logs_root.glob("*/*/shot_log_*.csv"))
 

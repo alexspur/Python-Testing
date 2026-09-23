@@ -253,6 +253,10 @@ def build_shot_row(snapshot, shot_number, session_shot_index, datetime_str,
             f"rigol{scope_id}_armed": fmt(sec.get("armed")),
             f"rigol{scope_id}_capture_ok": fmt(sec.get("capture_ok")),
             f"rigol{scope_id}_file": scope_files.get(scope_id, sec.get("file", "")),
+            # Left blank at t0 on purpose. The export has not run yet, so the
+            # row cannot honestly claim the file exists; the report fills this
+            # in from SCOPE_EXPORT events and a check against the disk.
+            f"rigol{scope_id}_file_written": "",
         })
 
     row["notes"] = "; ".join(p for p in notes_parts if p)

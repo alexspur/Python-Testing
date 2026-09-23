@@ -23,7 +23,8 @@ from gui.laser_panel import DualLaserPanel
 from utils.logger import LogPanel
 from utils.status_lamp import StatusLamp
 from utils.serial_tools import list_serial_ports
-from utils.capture_single_worker import CaptureSingleWorker, CaptureFourChannelWorker
+from utils.capture_single_worker import (
+    CaptureFourChannelWorker, ImmediateFourChannelWorker)
 from utils.connect_memory import load_memory, save_memory, scope_resource, SCOPE_TRANSPORT
 from utils.data_logger import DataLogger
 from utils.csv_export_worker import CSVExportWorker
@@ -53,6 +54,10 @@ from instruments.numato_relay import NumatoRelayController
 class ScopeDelayMainWindow(QMainWindow):
     _relay_update_signal = pyqtSignal(int, bool)  # (channel, state) — safe cross-thread UI update
     _relay_log_signal = pyqtSignal(str)            # log messages from poll thread
+    # (scope id, channel or 0, message) from a RigolScope error hook. The hook
+    # fires on the capture QThread, so it goes through a signal to reach the
+    # GUI thread before anything is logged or a widget is touched.
+    scope_error_ready = pyqtSignal(int, int, str)
     # (unit index, Q reply) from a WJ reader thread. The reader emits into
     # this; Qt queues it onto the GUI thread before on_wj_packet runs, so that
     # handler may safely touch the status row, the interlock lamps and the log.
@@ -150,6 +155,15 @@ class ScopeDelayMainWindow(QMainWindow):
         self.rigol1 = RigolScope(resource_name=scope_resource(1))  # Physical scope 1 (192.168.10.51)
         self.rigol2 = RigolScope(resource_name=scope_resource(2))  # Physical scope 2 (192.168.10.52)
         self.rigol3 = RigolScope(resource_name=scope_resource(3))  # Physical scope 3 (192.168.10.53)
+
+        # A per-channel read failure used to be print()ed and never reached
+        # the session log: grep of every gui_log for "Could not read channel"
+        # returns nothing, including for the runs that certainly failed.
+        self.scope_error_ready.connect(self._on_scope_error)
+        for _sid in (1, 2, 3):
+            _scope = getattr(self, f"rigol{_sid}")
+            _scope.error_hook = (
+                lambda ch, msg, sid=_sid: self.scope_error_ready.emit(sid, ch or 0, msg))
     
         # Multiple WJ supplies
         self.wj_units = [
@@ -1189,10 +1203,28 @@ class ScopeDelayMainWindow(QMainWindow):
         if self.auto_save_delay_sec and self.auto_save_delay_sec > 0:
             self._auto_save_timer.start(int(self.auto_save_delay_sec * 1000))
 
+    def _export_in_progress(self):
+        """True while any CSV export worker is still running."""
+        return any(w is not None and w.isRunning()
+                   for w in (getattr(self, "export_workers", None) or []))
+
     def _auto_save_fire(self):
         """Auto-save timer elapsed — silently write captures if still unsaved."""
         if not self._captures_dirty or not self.captured_scopes:
             return
+
+        # Never export while a scope is still reading. The export writes
+        # whatever happens to be in captured_scopes at that instant, which is
+        # how a three-scope shot came out as a single rigol1 CSV: scope 1
+        # finished, the debounce elapsed, and 2 and 3 were still transferring.
+        pending = getattr(self, "_pending_capture_ids", None)
+        if pending:
+            waiting = ", ".join(f"Rigol #{sid}" for sid in sorted(pending))
+            self.log(f"[AUTO-SAVE] Holding: {waiting} still reading.")
+            if self.auto_save_delay_sec and self.auto_save_delay_sec > 0:
+                self._auto_save_timer.start(int(self.auto_save_delay_sec * 1000))
+            return
+
         self.log(f"[AUTO-SAVE] {self.auto_save_delay_sec:.0f}s elapsed — saving captured waveforms...")
         self._start_async_export(silent=True)
 
@@ -1201,6 +1233,17 @@ class ScopeDelayMainWindow(QMainWindow):
         the completion popup (used for auto-save). Clears the dirty flag once
         every file is written."""
         if not self.captured_scopes:
+            return
+
+        # An export already in flight owns export_workers and _export_pending.
+        # Starting a second one would drop the only references to running
+        # QThreads - Qt can collect them mid-write - and let the wrong export
+        # decide that everything has been saved. Stay dirty and come back.
+        if self._export_in_progress():
+            self._captures_dirty = True
+            self.log("[EXPORT] An export is still running; will save again after it finishes.")
+            if self.auto_save_delay_sec and self.auto_save_delay_sec > 0:
+                self._auto_save_timer.start(int(self.auto_save_delay_sec * 1000))
             return
 
         session_dir = self.data_logger.get_session_dir()
@@ -1212,14 +1255,39 @@ class ScopeDelayMainWindow(QMainWindow):
         self._export_done_paths = []
         self._export_pending = len(self.captured_scopes)
         self._export_silent = silent
+        # Which scopes this export covers. A capture that lands while it runs
+        # is not covered by it, and must not be marked saved when it finishes.
+        self._export_scope_ids = set(self.captured_scopes)
 
+        shot = self._current_shot_number if self._current_shot_number else ''
         for scope_id in sorted(self.captured_scopes):
             path = self.data_logger.scope_export_path(
                 scope_id, shot_index=self.shot_logger.session_shot_index)
+
+            # An export with no samples is a failure, not a saved file. It
+            # used to write a headers-only CSV, report it as saved and clear
+            # the unsaved flag, while the shot row named that empty file.
+            points = self._total_points(self.captured_scopes[scope_id])
+            if points == 0:
+                self._export_pending -= 1
+                self._export_scope_ids.discard(scope_id)
+                name = Path(path).name
+                self.log(f"[EXPORT] Rigol #{scope_id}: no samples, nothing written ({name})")
+                self.data_logger.log_error(
+                    f"Rigol{scope_id}", f"export skipped: capture had no samples ({name})")
+                self.data_logger.log_scope_export(
+                    scope_id, name, 0, ok=False, shot_number=shot,
+                    reason="capture had no samples")
+                continue
+
             worker = CSVExportWorker(self.captured_scopes[scope_id], path)
             worker.finished.connect(self._on_one_export_finished)
             worker.error.connect(self.on_export_error)
             self.export_workers.append(worker)
+
+        if not self.export_workers:
+            self.set_status("red", "Nothing to export - no samples captured")
+            return
 
         for worker in self.export_workers:
             worker.start()
@@ -1227,13 +1295,52 @@ class ScopeDelayMainWindow(QMainWindow):
         self.set_status("green", "Exporting...")
         self.log(f"[EXPORT] Exporting {self._export_pending} scope file(s) to {session_dir} ...")
 
+    @staticmethod
+    def _total_points(data):
+        """Total samples across a scope's channels, for the zero-sample check."""
+        try:
+            return sum(len(v) for _t, v in data)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _scope_id_for_file(filename):
+        """Map an exported filename back to its scope id (rigol<N>_...)."""
+        name = Path(filename).name
+        if name.startswith("rigol") and len(name) > 5 and name[5].isdigit():
+            return int(name[5])
+        return 0
+
     def _on_one_export_finished(self, filename):
         """One scope CSV finished; clear dirty + show summary once all are done."""
         self._export_done_paths.append(filename)
         self.log(f"[EXPORT] ✅ Saved {filename}")
+
+        # Durable proof the file was written, so the report can tell a shot
+        # row that merely NAMES a waveform file from one that has it.
+        sid = self._scope_id_for_file(filename)
+        try:
+            self.data_logger.log_scope_export(
+                sid, Path(filename).name,
+                self._total_points(self.captured_scopes.get(sid, ())),
+                ok=True,
+                shot_number=self._current_shot_number if self._current_shot_number else '')
+        except Exception as e:
+            self.log(f"[EXPORT] could not log SCOPE_EXPORT for {filename}: {e}")
+
         self._export_pending -= 1
         if self._export_pending <= 0:
-            self._captures_dirty = False  # everything written — nothing to flush on close
+            # Only the scopes this export covered are saved. If a capture
+            # landed while it was running, stay dirty and schedule another
+            # pass rather than reporting data written that never was.
+            covered = getattr(self, "_export_scope_ids", None)
+            late = set(self.captured_scopes) - (covered or set())
+            if late:
+                names = ", ".join(f"Rigol #{sid}" for sid in sorted(late))
+                self.log(f"[EXPORT] {names} finished during the export; saving again.")
+                self._mark_captures_dirty()
+            else:
+                self._captures_dirty = False  # everything written — nothing to flush on close
             if not self._export_silent:
                 files = "\n".join(self._export_done_paths)
                 QMessageBox.information(
@@ -1988,27 +2095,50 @@ class ScopeDelayMainWindow(QMainWindow):
 
 
     def on_capture_r1(self):
-        """Capture 4 channels from Rigol #1"""
+        """Read the last acquisition from Rigol #1 (does not re-arm)."""
         if not self.rigol1_connected:
             self.error_popup("Rigol #1", "Not connected.")
             return
-        self.start_four_channel_capture(self.rigol1, "Rigol #1", 1)
+        self.start_immediate_read(self.rigol1, "Rigol #1", 1)
 
 
     def on_capture_r2(self):
-        """Capture 4 channels from Rigol #2"""
+        """Read the last acquisition from Rigol #2 (does not re-arm)."""
         if not self.rigol2_connected:
             self.error_popup("Rigol #2", "Not connected.")
             return
-        self.start_four_channel_capture(self.rigol2, "Rigol #2", 2)
+        self.start_immediate_read(self.rigol2, "Rigol #2", 2)
 
 
     def on_capture_r3(self):
-        """Capture 4 channels from Rigol #3"""
+        """Read the last acquisition from Rigol #3 (does not re-arm)."""
         if not self.rigol3_connected:
             self.error_popup("Rigol #3", "Not connected.")
             return
-        self.start_four_channel_capture(self.rigol3, "Rigol #3", 3)
+        self.start_immediate_read(self.rigol3, "Rigol #3", 3)
+
+    def start_immediate_read(self, rigol, name, scope_id):
+        """Read the acquisition already sitting in the scope's memory.
+
+        Nothing in this path sends :SINGle. Arming clears the previous
+        acquisition, so a read that re-armed would destroy the very shot it
+        was asked to retrieve. Capture All still arms, which is correct:
+        that happens before the shot, not after it.
+        """
+        self.set_status("yellow", f"Reading {name} (4 channels)...")
+        self.log(f"[{name}] reading the last acquisition (no re-arm)...")
+        self._set_capture_state(scope_id, "capturing")
+
+        worker = ImmediateFourChannelWorker(rigol, name)
+        worker.finished.connect(
+            lambda data, nm: self.on_four_channel_capture_finished(data, nm, scope_id))
+        worker.error.connect(
+            lambda msg, nm, sid=scope_id: self.on_single_capture_error(msg, nm, sid))
+
+        # Hold the reference so the worker survives the read, and so
+        # closeEvent can wait for it before the session is torn down.
+        setattr(self, f'capture_worker_{scope_id}', worker)
+        worker.start()
 
     # A scope may sit armed for a long time between arming and the shot.
     _CAPTURE_TIMEOUT_S = 1800.0
@@ -2073,6 +2203,35 @@ class ScopeDelayMainWindow(QMainWindow):
             if timer is not None:
                 timer.stop()
 
+    def _on_scope_error(self, scope_id, channel, message):
+        """A driver-level read failure, marshalled onto the GUI thread."""
+        where = f"Rigol #{scope_id}" + (f" CH{channel}" if channel else "")
+        self.log(f"[{where}] {message}")
+        self.data_logger.log_error(f"Rigol{scope_id}", f"{where}: {message}")
+
+    @staticmethod
+    def _capture_outcome(scope, ch_counts):
+        """(ok, reason) for one scope's capture.
+
+        Good only when every channel the scope reports as displayed came back
+        with its full point count. A channel that failed to read is a failure,
+        not an absent channel - telling those apart is the whole point of the
+        driver's strict display query.
+        """
+        status = getattr(scope, "last_capture_status", None) or {}
+        if not status:
+            # No per-channel detail (an older driver or a stubbed scope):
+            # fall back to "something came back".
+            return (any(n > 0 for n in ch_counts), "no channel data")
+
+        bad = [f"CH{ch}: {s.get('state')}" for ch, s in sorted(status.items())
+               if s.get("state") in ("failed", "short")]
+        if bad:
+            return (False, "; ".join(bad))
+        if not any(s.get("state") == "ok" for s in status.values()):
+            return (False, "no channel displayed")
+        return (True, "")
+
     def _finish_pending_capture(self, scope_id):
         """Log SCOPE_ALL once every scope armed by Capture All has finished.
 
@@ -2086,6 +2245,13 @@ class ScopeDelayMainWindow(QMainWindow):
         if not pending:
             self.data_logger.log_scope_all_capture()
             self.log("[CAPTURE] All armed scopes have finished.")
+            # Every scope armed for this shot is now in captured_scopes, so
+            # this is the complete set. Save it now instead of waiting out
+            # another debounce - that is sooner than the old behaviour, not
+            # later, and it cannot catch a scope mid-transfer.
+            if self._captures_dirty and self.captured_scopes:
+                self._auto_save_timer.stop()
+                self._start_async_export(silent=True)
 
     def on_four_channel_capture_finished(self, data, name, scope_id):
         """Handle 4-channel capture completion"""
@@ -2111,15 +2277,28 @@ class ScopeDelayMainWindow(QMainWindow):
         self.data_logger.log_scope_capture(
             scope_id, ch_counts[0], ch_counts[1],
             shot_number=self._current_shot_number if self._current_shot_number else '')
+
+        # capture_ok is the real outcome, not the fact that the worker
+        # returned. It used to be hardcoded True, so a scope whose channels
+        # all timed out was recorded as a good capture and shown green.
+        scope = getattr(self, f"rigol{scope_id}", None)
+        ok, why = self._capture_outcome(scope, ch_counts)
         self.system_state.update(f"rigol{scope_id}", {
             "armed": False,
-            "capture_ok": True,
+            "capture_ok": ok,
             "file": Path(self.data_logger.scope_export_path(
                 scope_id, shot_index=self.shot_logger.session_shot_index)).name,
         }, source=SOURCE_READBACK)
 
-        self.set_status("green", f"{name} captured (4 ch)")
-        self._set_capture_state(scope_id, "done", f"{max(len(t1), len(t2), len(t3), len(t4))} pts")
+        if ok:
+            self.set_status("green", f"{name} captured (4 ch)")
+            self._set_capture_state(scope_id, "done",
+                                    f"{max(len(t1), len(t2), len(t3), len(t4))} pts")
+        else:
+            self.set_status("red", f"{name} capture incomplete")
+            self._set_capture_state(scope_id, "error", why)
+            self.log(f"[{name}] capture NOT ok: {why}")
+            self.data_logger.log_error(f"Rigol{scope_id}", f"capture incomplete: {why}")
         self._finish_pending_capture(scope_id)
         self.log(f"[{name}] 4-channel capture complete. Points: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)}")
 

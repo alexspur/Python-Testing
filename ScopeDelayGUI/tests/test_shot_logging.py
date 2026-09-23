@@ -132,6 +132,19 @@ class FakeScope:
     def single(self):
         self.calls.append("single")
 
+    def run(self):
+        self.calls.append("run")
+
+    def auto(self):
+        self.calls.append("auto")
+
+    def capture_four_channels(self, *a, **k):
+        """Read the acquisition already in memory. Never arms."""
+        import numpy as np
+        self.calls.append("capture_four_channels")
+        one = (np.array([0.0]), np.array([0.0]))
+        return (one, one, one, one)
+
 
 def tmc_block(payload, newline=True, declared=None):
     """Build a TMC block: #<n><length><payload>[\\n].
@@ -318,6 +331,51 @@ class TestShotCounter(unittest.TestCase):
             counter = ShotCounter(logs)
             self.assertFalse(counter.acquire_lock())
             self.assertIn(str(os.getpid()), counter.lock_message)
+
+    def test_recovers_across_a_schema_rollover(self):
+        """A schema change retires the master and starts an empty one. If
+        recovery only reads the current master, every shot fired before the
+        change is invisible and its number is handed out again."""
+        with TempLogRoot() as tmp:
+            root = tmp / "logs"
+            root.mkdir()
+
+            # A master retired by an earlier schema change, holding shot 12.
+            retired = root / "shot_log_master_schema_v1.csv"
+            with open(retired, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=["shot_number", "session_shot_index"])
+                w.writeheader()
+                w.writerow({"shot_number": 12, "session_shot_index": 1})
+
+            # The current master is post-rollover and holds nothing yet.
+            with open(root / "shot_log_master.csv", "w", newline="") as f:
+                csv.DictWriter(f, fieldnames=list(SHOT_COLUMNS)).writeheader()
+
+            # No shot_counter.json at all, as after a crash plus a rollover.
+            counter = ShotCounter(root)
+            self.assertFalse((root / "shot_counter.json").exists())
+            self.assertEqual(counter.peek_next(), 13,
+                             "must continue past the retired master, not restart")
+
+    def test_recovers_from_the_highest_number_in_any_file(self):
+        """Retired master, current master and a session log can each hold the
+        highest number; recovery takes the maximum across all of them."""
+        with TempLogRoot() as tmp:
+            root = tmp / "logs"
+            (root / "2026.09.23" / "experiment_log_x").mkdir(parents=True)
+
+            def write(path, shot):
+                with open(path, "w", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=["shot_number"])
+                    w.writeheader()
+                    w.writerow({"shot_number": shot})
+
+            write(root / "shot_log_master_schema_v1.csv", 7)
+            write(root / "shot_log_master_schema_v2.csv", 41)   # the highest
+            write(root / "shot_log_master.csv", 3)
+            write(root / "2026.09.23" / "experiment_log_x" / "shot_log_x.csv", 19)
+
+            self.assertEqual(ShotCounter(root).peek_next(), 42)
 
     def test_recovers_from_master_when_counter_missing(self):
         with TempLogRoot() as tmp:
@@ -833,6 +891,145 @@ class TestGuiShotLogging(unittest.TestCase):
         self.win.wj_packet_ready.emit(0, {"type": "R", "kv": 65.0, "ma": 2.0,
                                           "hv_on": True, "fault": False})
         self.assertIn("65.00 kV", self.win.wj_panel.rows[0].label_status.text())
+
+    # ------------------------------------------------ (h) zero-sample export
+    def test_zero_sample_capture_is_not_exported_as_saved(self):
+        """An empty capture used to write a headers-only CSV, report it as
+        saved, clear the unsaved flag, and be named by the shot row."""
+        import numpy as np
+        empty = (np.array([]), np.array([]))
+        self.win.export_workers = []
+        self.win.captured_scopes = {1: (empty, empty, empty, empty)}
+        self.win._captures_dirty = True
+
+        self.win._start_async_export(silent=True)
+
+        self.assertEqual(self.win.export_workers, [],
+                         "no writer should be started for an empty capture")
+        rows = read_rows(self.dl.get_log_file_path())
+        exports = [r for r in rows if r["event_type"] == "SCOPE_EXPORT"]
+        self.assertEqual(len(exports), 1)
+        self.assertTrue(exports[0]["notes"].startswith("FAILED"),
+                        "an export with no data is a failure, not a save")
+        self.assertIn("ERROR", event_types(self.dl.get_log_file_path()))
+
+    def test_a_real_capture_still_exports(self):
+        """The zero-sample guard must not block a capture that has data."""
+        import numpy as np
+        one = (np.array([0.0, 1.0]), np.array([0.1, 0.2]))
+        self.win.export_workers = []
+        self.win.captured_scopes = {1: (one, one, one, one)}
+        self.win._captures_dirty = True
+        self.addCleanup(lambda: [w.wait(5000) for w in self.win.export_workers])
+
+        self.win._start_async_export(silent=True)
+        self.assertEqual(len(self.win.export_workers), 1)
+
+    # ------------------------------------------------- auto-save completeness
+    def _stub_export(self):
+        """Record export calls instead of spawning CSV writer threads."""
+        calls = []
+        self.win._start_async_export = lambda silent=False: calls.append(silent)
+        return calls
+
+    def test_autosave_holds_while_scopes_are_still_reading(self):
+        """A three-scope shot exported as one rigol1 CSV: scope 1 finished,
+        the debounce elapsed, and 2 and 3 were still transferring."""
+        calls = self._stub_export()
+        self.win.captured_scopes = {1: "d1"}
+        self.win._captures_dirty = True
+        self.win._pending_capture_ids = {2, 3}
+
+        self.win._auto_save_fire()
+        self.assertEqual(calls, [], "must not export a partial set")
+
+    def test_autosave_runs_when_nothing_is_pending(self):
+        calls = self._stub_export()
+        self.win.captured_scopes = {1: "d1", 2: "d2", 3: "d3"}
+        self.win._captures_dirty = True
+        self.win._pending_capture_ids = set()
+
+        self.win._auto_save_fire()
+        self.assertEqual(calls, [True])
+
+    def test_last_scope_to_finish_triggers_the_save(self):
+        """The complete set saves as soon as the slowest scope lands."""
+        calls = self._stub_export()
+        self.win.captured_scopes = {1: "d1", 2: "d2", 3: "d3"}
+        self.win._captures_dirty = True
+        self.win._pending_capture_ids = {3}
+
+        self.win._finish_pending_capture(3)
+        self.assertEqual(calls, [True])
+
+    def test_export_does_not_start_while_another_is_running(self):
+        """Reassigning export_workers would drop references to running
+        QThreads, which Qt may then collect mid-write."""
+        class RunningWorker:
+            def isRunning(self):
+                return True
+
+            def wait(self, ms=0):
+                # closeEvent waits on whatever is left in export_workers.
+                return True
+
+        self.win.captured_scopes = {1: "d1"}
+        self.win.export_workers = [RunningWorker()]
+        before = self.win.export_workers
+        self.addCleanup(lambda: setattr(self.win, "export_workers", []))
+
+        self.win._start_async_export(silent=True)
+
+        self.assertIs(self.win.export_workers, before,
+                      "a running export's workers must not be dropped")
+        self.assertTrue(self.win._captures_dirty, "must stay dirty and retry")
+
+    def test_capture_landing_mid_export_is_not_marked_saved(self):
+        self.win.export_workers = []
+        self.win.captured_scopes = {1: "d1"}
+        self.win._export_scope_ids = {1}
+        self.win._export_pending = 1
+        self.win._export_done_paths = []
+        self.win._export_silent = True
+        self.win._captures_dirty = True
+        # Scope 2 finishes while scope 1's export is still in flight.
+        self.win.captured_scopes[2] = "d2"
+
+        self.win._on_one_export_finished("rigol1.csv")
+        self.assertTrue(self.win._captures_dirty,
+                        "scope 2 was never written; it is still unsaved")
+
+    def test_export_completion_clears_dirty_when_nothing_arrived_late(self):
+        self.win.export_workers = []
+        self.win.captured_scopes = {1: "d1"}
+        self.win._export_scope_ids = {1}
+        self.win._export_pending = 1
+        self.win._export_done_paths = []
+        self.win._export_silent = True
+        self.win._captures_dirty = True
+
+        self.win._on_one_export_finished("rigol1.csv")
+        self.assertFalse(self.win._captures_dirty)
+
+    def test_read_buttons_never_rearm_the_scope(self):
+        """Arming clears the previous acquisition, so a read path that sends
+        :SINGle destroys the very shot it was asked to retrieve."""
+        for sid in (1, 2, 3):
+            scope = FakeScope()
+            setattr(self.win, f"rigol{sid}", scope)
+            setattr(self.win, f"rigol{sid}_connected", True)
+
+            getattr(self.win, f"on_capture_r{sid}")()
+
+            worker = getattr(self.win, f"capture_worker_{sid}", None)
+            self.assertIsNotNone(worker, f"scope {sid} started no read worker")
+            self.assertTrue(worker.wait(5000), f"scope {sid} read did not finish")
+
+            self.assertIn("capture_four_channels", scope.calls,
+                          f"scope {sid} did not read its memory")
+            for forbidden in ("single", "run", "auto"):
+                self.assertNotIn(forbidden, scope.calls,
+                                 f"scope {sid} re-armed with {forbidden}()")
 
     def test_window_title_is_the_shot_control_title(self):
         self.assertEqual(self.win.windowTitle(), "MultiPulse Shot Control")
@@ -1384,6 +1581,231 @@ class TestTmcBlockReads(unittest.TestCase):
         import inspect
         from instruments import rigol
         self.assertNotIn("self.instr.read_raw(", inspect.getsource(rigol))
+
+
+class FakeVisaSession:
+    """A pyvisa session stand-in for driver tests. No VISA, no socket.
+
+    read_bytes mimics pyvisa: it returns exactly n bytes, or consumes what is
+    left and raises - which is how a real timed-out read still empties the
+    socket even though it reports failure.
+    """
+
+    def __init__(self, pending=b"", idn="RIGOL TECHNOLOGIES,DS7054,FAKE,00.01"):
+        self.timeout = 30000
+        self.read_termination = "\n"
+        self.write_termination = "\n"
+        self.chunk_size = 20480
+        self.attrs = {}
+        self.closed = False
+        self.written = []
+        self.queries = []
+        self.responses = {}
+        self.idn = idn
+        self._pending = bytearray(pending)
+
+    # --- pyvisa surface used by the driver ---
+    def set_visa_attribute(self, attr, value):
+        self.attrs[attr] = value
+
+    def query(self, cmd):
+        self.queries.append(cmd)
+        if cmd == "*IDN?":
+            return self.idn
+        if cmd in self.responses:
+            return self.responses[cmd]
+        raise TimeoutError(f"no canned response for {cmd}")
+
+    def write(self, cmd):
+        self.written.append(cmd)
+
+    def read_bytes(self, n):
+        if not self._pending:
+            raise TimeoutError("stream empty")
+        if len(self._pending) < n:
+            self._pending.clear()          # consumed off the wire, then fails
+            raise TimeoutError("short read")
+        out = bytes(self._pending[:n])
+        del self._pending[:n]
+        return out
+
+    def close(self):
+        self.closed = True
+
+    @property
+    def remaining(self):
+        return len(self._pending)
+
+
+class FakeResourceManager:
+    def __init__(self, session):
+        self.session = session
+        self.opened = 0
+
+    def open_resource(self, name):
+        self.opened += 1
+        return self.session
+
+
+def make_scope(session, resource="TCPIP0::192.168.10.51::5555::SOCKET"):
+    """RigolScope with no ResourceManager and no VISA library."""
+    from instruments.rigol import RigolScope
+    scope = RigolScope.__new__(RigolScope)
+    scope.rm = FakeResourceManager(session)
+    scope.instr = None
+    scope.resource_name = resource
+    scope.error_hook = None
+    scope.last_capture_status = {}
+    return scope
+
+
+class TestScopeCaptureReliability(unittest.TestCase):
+    """Driver-level reliability: drain, keepalive, SI depth, connect guard,
+    error routing and a truthful capture outcome. No hardware."""
+
+    # ------------------------------------------------------------- (a) drain
+    def test_failed_read_drains_the_stale_block(self):
+        """A failed block read leaves the rest of it in the socket. The next
+        ASCII query then reads that as its reply, which is why only channel 1
+        ever reported an error - 2, 3 and 4 came back as 'not displayed'."""
+        # Header promises 500 bytes; only 100 arrive.
+        session = FakeVisaSession(pending=b"#3500" + b"\xAA" * 100)
+        scope = make_scope(session)
+        scope.instr = session
+
+        with self.assertRaises(Exception):
+            scope._query_binary(":WAVeform:DATA?")
+
+        self.assertEqual(session.remaining, 0,
+                         "stale bytes must not be left for the next query")
+
+    def test_drain_restores_timeout_and_termination(self):
+        session = FakeVisaSession(pending=b"leftovers")
+        scope = make_scope(session)
+        scope.instr = session
+        scope._drain()
+        self.assertEqual(session.timeout, 30000)
+        self.assertEqual(session.read_termination, "\n")
+
+    # --------------------------------------------------------- (b) keepalive
+    def test_keepalive_is_set_on_a_socket_session(self):
+        import pyvisa
+        session = FakeVisaSession()
+        scope = make_scope(session, "TCPIP0::192.168.10.51::5555::SOCKET")
+        scope.connect()
+        self.assertIn(pyvisa.constants.ResourceAttribute.tcpip_keepalive, session.attrs)
+        self.assertTrue(session.attrs[pyvisa.constants.ResourceAttribute.tcpip_keepalive])
+
+    def test_keepalive_is_not_set_on_vxi11(self):
+        session = FakeVisaSession()
+        scope = make_scope(session, "TCPIP0::192.168.10.51::INSTR")
+        scope.connect()
+        self.assertEqual(session.attrs, {}, "VXI-11 needs no keepalive")
+
+    # ------------------------------------------------- (c) SI memory depth
+    def test_memory_depth_parses_si_suffixes(self):
+        from instruments.rigol import parse_points
+        self.assertEqual(parse_points("1M"), 1_000_000)
+        self.assertEqual(parse_points("125M"), 125_000_000)
+        self.assertEqual(parse_points("250k"), 250_000)
+        self.assertEqual(parse_points("1000000"), 1_000_000)
+        self.assertIsNone(parse_points("AUTO"))
+        self.assertIsNone(parse_points("garbage"))
+
+    def test_memory_depth_uses_the_si_parser(self):
+        session = FakeVisaSession()
+        session.responses[":ACQuire:MDEPth?"] = "1M"
+        scope = make_scope(session)
+        scope.instr = session
+        self.assertEqual(scope._get_memory_depth(), 1_000_000)
+
+    # ----------------------------------------------------- (d) connect guard
+    def test_second_connect_does_not_open_a_second_session(self):
+        """Port 5555 takes one client; an orphaned session locks the scope
+        out until it is power cycled."""
+        session = FakeVisaSession()
+        scope = make_scope(session)
+        scope.connect()
+        scope.connect()
+        self.assertEqual(scope.rm.opened, 1)
+        self.assertFalse(session.closed)
+
+    def test_connecting_to_a_different_resource_closes_the_old_one(self):
+        session = FakeVisaSession()
+        scope = make_scope(session)
+        scope.connect()
+        scope.connect("TCPIP0::192.168.10.52::5555::SOCKET")
+        self.assertTrue(session.closed, "the old session must be closed first")
+        self.assertEqual(scope.rm.opened, 2)
+
+    # ------------------------------------------------- (e) error routing
+    def test_channel_failures_go_to_the_hook_not_print(self):
+        session = FakeVisaSession()
+        scope = make_scope(session)
+        scope.instr = session
+        seen = []
+        scope.error_hook = lambda ch, msg: seen.append((ch, msg))
+        scope._report("read failed: boom", channel=3)
+        self.assertEqual(seen, [(3, "read failed: boom")])
+
+    # ------------------------------------------------- (f) capture outcome
+    def test_capture_ok_false_when_a_channel_failed(self):
+        from gui.main_window import ScopeDelayMainWindow as W
+        scope = make_scope(FakeVisaSession())
+        scope.last_capture_status = {
+            1: {"state": "ok", "points": 1000},
+            2: {"state": "failed", "points": 0},
+        }
+        ok, why = W._capture_outcome(scope, [1000, 0, 0, 0])
+        self.assertFalse(ok)
+        self.assertIn("CH2", why)
+
+    def test_capture_ok_false_on_a_short_read(self):
+        from gui.main_window import ScopeDelayMainWindow as W
+        scope = make_scope(FakeVisaSession())
+        scope.last_capture_status = {
+            1: {"state": "short", "points": 500, "expected": 1000},
+        }
+        ok, why = W._capture_outcome(scope, [500, 0, 0, 0])
+        self.assertFalse(ok)
+        self.assertIn("short", why)
+
+    def test_capture_ok_true_when_every_displayed_channel_is_full(self):
+        from gui.main_window import ScopeDelayMainWindow as W
+        scope = make_scope(FakeVisaSession())
+        scope.last_capture_status = {
+            1: {"state": "ok", "points": 1000},
+            2: {"state": "ok", "points": 1000},
+            3: {"state": "not_displayed", "points": 0},
+            4: {"state": "not_displayed", "points": 0},
+        }
+        ok, why = W._capture_outcome(scope, [1000, 1000, 0, 0])
+        self.assertTrue(ok, why)
+
+    def test_capture_ok_false_when_nothing_was_displayed(self):
+        from gui.main_window import ScopeDelayMainWindow as W
+        scope = make_scope(FakeVisaSession())
+        scope.last_capture_status = {
+            ch: {"state": "not_displayed", "points": 0} for ch in (1, 2, 3, 4)}
+        ok, why = W._capture_outcome(scope, [0, 0, 0, 0])
+        self.assertFalse(ok)
+
+    # --------------------------------------------- (g) shot row honesty
+    def test_shot_row_has_a_blank_file_written_column(self):
+        """The row names the file it EXPECTS; whether it exists is separate.
+        Shots 5-8 in the master log name 19 files that were never written."""
+        from utils.shot_logger import SHOT_COLUMNS
+        for n in (1, 2, 3):
+            self.assertIn(f"rigol{n}_file", SHOT_COLUMNS)
+            self.assertIn(f"rigol{n}_file_written", SHOT_COLUMNS)
+
+        row = build_shot_row({}, shot_number=1, session_shot_index=1,
+                             datetime_str="now", timestamp_sec=0.0,
+                             session_dir="d", experiment_log_file="e.csv",
+                             gui_version="v", scope_files={1: "rigol1_x.csv"})
+        self.assertEqual(row["rigol1_file"], "rigol1_x.csv")
+        self.assertEqual(row["rigol1_file_written"], "",
+                         "the export has not run yet at t0")
 
 
 if __name__ == "__main__":

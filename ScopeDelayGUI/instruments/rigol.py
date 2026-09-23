@@ -9,7 +9,29 @@ and returns properly scaled voltage/time arrays.
 
 import pyvisa
 import numpy as np
+import re
 import time
+
+
+# ':ACQuire:MDEPth?' answers with an SI suffix ('1M', '125M') as readily as a
+# plain integer, and int(float(...)) raises on the suffixed form - which sent
+# the capture into the preamble fallback with whatever STARt/STOP window was
+# last left behind. Same parsing as bench_scope_link.py, which reads these
+# scopes correctly today.
+_SI = {"": 1, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
+
+
+def parse_points(text):
+    """Parse ':ACQuire:MDEPth?' replies: '1M', '125M', '1000000', 'AUTO'.
+
+    Returns None for AUTO or anything unparseable, so the caller can fall
+    back rather than treating a bad reply as zero points.
+    """
+    text = (text or "").strip()
+    if not text or text.upper() == "AUTO":
+        return None
+    m = re.fullmatch(r"([0-9.]+(?:[eE][+-]?\d+)?)\s*([kKMG]?)(?:pts)?", text)
+    return int(float(m.group(1)) * _SI[m.group(2)]) if m else None
 
 
 class RigolScope:
@@ -18,7 +40,7 @@ class RigolScope:
     def __init__(self, resource_name: str = None):
         """
         Initialize connection to oscilloscope.
-        
+
         Args:
             resource_name: VISA resource string (e.g., 'USB0::0x1AB1::0x0514::DS7...::INSTR')
                           If None, will try to find first available Rigol scope.
@@ -26,7 +48,25 @@ class RigolScope:
         self.rm = pyvisa.ResourceManager()
         self.instr = None
         self.resource_name = resource_name
-        
+        # Called as hook(channel_or_None, message) when a read fails, so the
+        # GUI can put it in the session log. Without it these were print()ed
+        # and left no durable record of a failed capture anywhere.
+        self.error_hook = None
+        # Per-channel outcome of the last capture_four_channels() call:
+        # {channel: {"state": ok|short|failed|not_displayed, "points": int, ...}}
+        self.last_capture_status = {}
+
+    def _report(self, message: str, channel: int = None):
+        """Surface a driver-level problem through the GUI logger if wired."""
+        hook = getattr(self, "error_hook", None)
+        if hook is not None:
+            try:
+                hook(channel, message)
+                return
+            except Exception:
+                pass
+        print(f"[RIGOL] {message}")
+
     def connect(self, resource_name: str = None):
         """
         Connect to the oscilloscope.
@@ -34,9 +74,15 @@ class RigolScope:
         Args:
             resource_name: VISA resource string. Uses stored name if not provided.
         """
+        # What the live session (if any) was actually opened with. Captured
+        # before resource_name is overwritten below, or the guard further
+        # down would compare the new address against itself and keep the old
+        # session open while believing it had switched scopes.
+        open_resource_name = self.resource_name if self.instr is not None else None
+
         if resource_name:
             self.resource_name = resource_name
-            
+
         if not self.resource_name:
             # Try to find a Rigol scope
             resources = self.rm.list_resources()
@@ -47,12 +93,31 @@ class RigolScope:
                     
         if not self.resource_name:
             raise RuntimeError("No Rigol oscilloscope found")
-            
+
+        # A second Connect press must not leak a session. Port 5555 accepts
+        # one raw-socket client, so an orphaned session locks the scope out
+        # until it is power cycled.
+        if self.instr is not None:
+            if self.resource_name == open_resource_name:
+                return                      # already connected to this scope
+            self.disconnect()               # moving to a different resource
+
         self.instr = self.rm.open_resource(self.resource_name)
         self.instr.timeout = 30000  # 30 second timeout for large transfers
         self.instr.read_termination = '\n'
         self.instr.write_termination = '\n'
-        
+
+        # A raw socket has no keepalive by default, so a scope that reboots or
+        # a link that flaps leaves a half-open session that still reports
+        # connected and costs a full 30 s timeout on every read. VXI-11 fails
+        # faster on its own; the socket needs to be told.
+        if '::SOCKET' in self.resource_name.upper():
+            try:
+                self.instr.set_visa_attribute(
+                    pyvisa.constants.ResourceAttribute.tcpip_keepalive, True)
+            except Exception as e:
+                self._report(f"TCP keepalive not set on {self.resource_name}: {e}")
+
         # Verify connection
         idn = self.instr.query('*IDN?')
         print(f"Connected to: {idn.strip()}")
@@ -106,8 +171,51 @@ class RigolScope:
             finally:
                 self.instr.timeout = old_timeout
             return data
+        except Exception:
+            # Resync before anything else is asked of this session. A failed
+            # block read leaves the rest of that block in the socket, and the
+            # next ASCII query reads those bytes as its reply: ':CHANnel2:
+            # DISPlay?' comes back as garbage, the channel is taken for "not
+            # displayed", and it is dropped with no warning. That is why only
+            # channel 1 ever reported an error.
+            self._drain()
+            raise
         finally:
             self.instr.read_termination = old_term
+
+    def _drain(self, settle_ms: int = 300) -> int:
+        """Discard whatever is still in flight after a failed transfer.
+
+        Deliberately not flush() or clear(): discard_read_buffer_no_io does no
+        I/O so it leaves the queued bytes exactly where they are, and
+        discard_read_buffer reads until an END indicator a raw socket never
+        sends. A timed read is transport-agnostic and costs settle_ms once.
+        """
+        dropped = 0
+        old_timeout = self.instr.timeout
+        old_term = self.instr.read_termination
+        self.instr.timeout = settle_ms
+        self.instr.read_termination = None
+        try:
+            while True:
+                try:
+                    chunk = self.instr.read_bytes(self.instr.chunk_size)
+                except Exception:
+                    break               # nothing left within settle_ms
+                if not chunk:
+                    break
+                dropped += len(chunk)
+        finally:
+            self.instr.timeout = old_timeout
+            self.instr.read_termination = old_term
+        if dropped:
+            self._report(f"drained {dropped} stale bytes after a failed read")
+        return dropped
+
+    @staticmethod
+    def parse_points(text):
+        """Kept as a method for callers that already hold a scope."""
+        return parse_points(text)
 
     def get_trigger_status(self) -> str:
         """
@@ -150,6 +258,17 @@ class RigolScope:
         except:
             return False
     
+    def _query_channel_displayed(self, channel: int) -> bool:
+        """Strict display query: a transport failure raises.
+
+        is_channel_displayed() answers False for both "the operator turned
+        this channel off" and "the query failed", which made a desynced socket
+        look like three disabled channels. The capture path needs to tell
+        those apart, so it uses this instead.
+        """
+        resp = self._query(f':CHANnel{channel}:DISPlay?')
+        return resp.strip() in ('1', 'ON')
+
     def get_displayed_channels(self) -> list:
         """
         Get list of currently displayed channel numbers.
@@ -276,10 +395,14 @@ class RigolScope:
         """Return the acquisition memory depth (total RAW points available).
 
         Falls back to the preamble's point count if :ACQuire:MDEPth? is 'AUTO'
-        or unparseable."""
+        or unparseable. The reply may be SI-suffixed ('1M', '125M'), which
+        int(float(...)) cannot parse - it raised and silently dropped the
+        capture into the preamble fallback."""
         try:
-            resp = self._query(':ACQuire:MDEPth?')
-            return int(float(resp))
+            depth = parse_points(self._query(':ACQuire:MDEPth?'))
+            if depth:
+                return depth
+            raise ValueError("AUTO or unparseable memory depth")
         except Exception:
             try:
                 return int(self._get_waveform_preamble()['points'])
@@ -455,22 +578,50 @@ class RigolScope:
         """
         # Stop acquisition to ensure data is stable for RAW mode reading
         self.stop()
-        
+
+        try:
+            expected = self._get_memory_depth()
+        except Exception:
+            expected = 0
+
+        empty = (np.array([]), np.array([]))
         results = []
+        status = {}
+
         for ch in [ch1, ch2, ch3, ch4]:
+            # A failed display query is a failure, not a disabled channel.
             try:
-                # Check if channel is displayed before trying to read
-                if self.is_channel_displayed(ch):
-                    t, v = self._read_channel_data_raw(ch)
-                    results.append((t, v))
-                else:
-                    # Channel not displayed, return empty arrays
-                    results.append((np.array([]), np.array([])))
+                displayed = self._query_channel_displayed(ch)
             except Exception as e:
-                # If channel read fails, return empty arrays
-                print(f"[RIGOL] Warning: Could not read channel {ch}: {e}")
-                results.append((np.array([]), np.array([])))
-        
+                status[ch] = {"state": "failed", "points": 0,
+                              "expected": expected, "error": f"display query failed: {e}"}
+                self._report(f"channel {ch}: display query failed: {e}", channel=ch)
+                results.append(empty)
+                continue
+
+            if not displayed:
+                status[ch] = {"state": "not_displayed", "points": 0,
+                              "expected": expected, "error": ""}
+                results.append(empty)
+                continue
+
+            try:
+                t, v = self._read_channel_data_raw(ch)
+                n = len(v)
+                short = bool(expected) and n < expected
+                status[ch] = {"state": "short" if short else "ok", "points": n,
+                              "expected": expected, "error": ""}
+                if short:
+                    self._report(f"channel {ch}: short read, {n} of {expected} points",
+                                 channel=ch)
+                results.append((t, v))
+            except Exception as e:
+                status[ch] = {"state": "failed", "points": 0,
+                              "expected": expected, "error": str(e)}
+                self._report(f"channel {ch}: read failed: {e}", channel=ch)
+                results.append(empty)
+
+        self.last_capture_status = status
         return tuple(results)
     def capture_channels(self, channels: list = None) -> tuple:
         """

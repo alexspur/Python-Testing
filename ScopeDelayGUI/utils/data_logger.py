@@ -402,6 +402,27 @@ class DataLogger:
                   + (f" for shot {shot_number}" if shot_number != '' else "")
         )
 
+    def log_scope_export(self, scope_id, filename, points, ok, shot_number='',
+                         reason=''):
+        """Log the outcome of writing one scope's waveform CSV.
+
+        param1 = scope id, param2 = filename, param3 = total points written,
+        param4 = shot number. notes begins "OK" or "FAILED" so the session
+        report can tell whether the file named in the shot row actually
+        exists with data in it.
+        """
+        self._log_event(
+            event_type='SCOPE_EXPORT',
+            source=f'Rigol{scope_id}',
+            param1=scope_id,
+            param2=filename,
+            param3=points,
+            param4=shot_number,
+            notes=(f"OK: {points} pts written to {filename}" if ok
+                   else f"FAILED: {filename} not written"
+                        + (f" ({reason})" if reason else ""))
+        )
+
     def log_scope_all_capture(self):
         """Log master capture event (all scopes triggered)"""
         self._log_event(
