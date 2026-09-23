@@ -309,6 +309,13 @@ class ScopeDelayMainWindow(QMainWindow):
         self._read_workers = []
         self._read_export_points = {}
 
+        # Laser prep is consumed by a shot. In EXT/EXT the laser stays
+        # physically armed after firing - the DG535 drives it every shot - so
+        # is_armed() keeps returning True and the checklist would re-latch
+        # step 1 on the next timer tick. This latch is what makes a second
+        # shot wait for an explicit re-prep.
+        self._laser_prep_consumed = False
+
         
     def refresh_wj_ports(self):
         """Populate COM lists for each WJ unit, selecting last used port."""
@@ -613,6 +620,12 @@ class ScopeDelayMainWindow(QMainWindow):
         # address one laser at a time.
         self.laser_panel = self.laser_frame.laser1
         self.laser_panel2 = self.laser_frame.laser2
+
+        # Pressing Prep System is the only thing that clears a consumed prep.
+        # Hooked on the button rather than on prep completion because the
+        # gate that actually decides is _check_lasers_armed(): this only
+        # re-opens the question, it does not answer it.
+        self.laser_frame.btn_prep.clicked.connect(self._on_laser_prep_requested)
 
         # --------------------------------
         # GRID LAYOUT (2x2 + laser row)
@@ -1689,9 +1702,16 @@ class ScopeDelayMainWindow(QMainWindow):
         """Timer tick: evaluate the auto-checked steps and honor manual
         overrides. Latched (green) steps are skipped so they never re-lock."""
         # Step 1 - both lasers armed (reads widget state only, no serial).
+        # A prep consumed by a shot blocks the latch: the laser is still
+        # physically armed in EXT/EXT, so is_armed() alone would re-pass this
+        # step immediately and let a second shot fire on a stale prep. Only
+        # pressing Prep System re-opens it. A manual override still wins,
+        # because that is what the override is for.
         if not self.interlock_passed.get(1):
             if self.interlock_manual[1].isChecked():
                 self._mark_interlock(1, "manual")
+            elif self._laser_prep_consumed:
+                pass        # waiting for an explicit re-prep
             elif self._check_lasers_armed():
                 self._mark_interlock(1, "both lasers armed")
 
@@ -1729,6 +1749,27 @@ class ScopeDelayMainWindow(QMainWindow):
                               getattr(self, "laser_panel2", None))
                   if p is not None]
         return bool(panels) and all(p.is_armed() for p in panels)
+
+    def _on_laser_prep_requested(self):
+        """Prep System was pressed: a new prep is under way.
+
+        Clears the consumed latch only. Whether the lasers actually come up
+        armed is still decided by _check_lasers_armed() on the next poll, so a
+        failed prep re-opens the question without answering it yes.
+        """
+        if self._laser_prep_consumed:
+            self.log("[INTERLOCK] Laser prep restarted - step 1 can latch again.")
+        self._laser_prep_consumed = False
+
+    def _laser_prep_ready(self):
+        """True when the lasers are prepped for a shot that has not fired yet.
+
+        A manual override on step 1 counts, matching the checklist.
+        """
+        if self.interlock_manual.get(1) is not None and \
+                self.interlock_manual[1].isChecked():
+            return True
+        return bool(self._check_lasers_armed()) and not self._laser_prep_consumed
 
     def _check_pressure_ok(self):
         psi = getattr(self, "_latest_psi", None)
@@ -2053,6 +2094,24 @@ class ScopeDelayMainWindow(QMainWindow):
                 "again.")
             return
 
+        # LASER PREP GATE. Unlike the rest of the checklist, this one blocks.
+        # A shot consumes the prep: in EXT/EXT the laser stays armed after
+        # firing, so without this latch a second press would fire on a stale
+        # prep with no fresh flashlamp/Q-switch sequence behind it.
+        if not self._laser_prep_ready():
+            if self._laser_prep_consumed:
+                detail = "laser prep was consumed by the last shot"
+                hint = ("The last shot used this prep.\n\nPress Prep System to "
+                        "prep both lasers again before firing.")
+            else:
+                detail = "lasers are not prepped/armed"
+                hint = ("The lasers are not prepped.\n\nPress Prep System and "
+                        "wait for both to report ARMED before firing.")
+            self.log(f"[BNC575] Fire BLOCKED - {detail}")
+            self.data_logger.log_fire_blocked("laser_not_prepped", detail)
+            self.error_popup("Lasers not prepped", hint)
+            return
+
         # SAFETY INTERLOCK: Ensure WJ HV supplies are OFF before firing.
         # The WJs charge the Marx and must be off at t0; the charge values
         # cached while HV was on are what the shot row reports.
@@ -2074,6 +2133,21 @@ class ScopeDelayMainWindow(QMainWindow):
             self.log(f"[BNC575] WARNING: {notes} - they will miss this shot")
             self.data_logger.log_error("Shot", notes)
 
+        # The direct Fire button deliberately bypasses the rest of the
+        # checklist, so the only record that a step was red at t0 was a column
+        # in the shot row. Name them in the timeline as well, where the shot is
+        # actually reconstructed from. Warning only: this does not block.
+        labels = dict(self._INTERLOCK_STEPS)
+        failed_steps = [labels.get(i, str(i))
+                        for i, ok in self.interlock_passed.items() if not ok]
+        if failed_steps:
+            detail = ", ".join(failed_steps)
+            self.log(f"[BNC575] WARNING: firing with failed interlocks: {detail}")
+            self.data_logger.log_interlock(
+                "FAIL", detail=f"fired with failed interlocks: {detail}",
+                passed=False)
+            notes = "; ".join(filter(None, [notes, f"failed interlocks at t0: {detail}"]))
+
         try:
             self.set_status("yellow", "Firing BNC575 internal pulse...")
             # ================= MASTER SHOT (t0) =================
@@ -2093,6 +2167,13 @@ class ScopeDelayMainWindow(QMainWindow):
             self.data_logger.log_bnc575_pulse(mode='INTERNAL')
             self.set_status("green", "BNC575 internal fired")
             self.log("[BNC575] Internal pulse fired.")
+
+            # The shot has consumed the prep. Drop step 1 and latch it shut
+            # until Prep System runs again, so the next shot cannot ride on
+            # this one's prep.
+            self._laser_prep_consumed = True
+            self._unmark_interlock(1, "prep consumed by the shot")
+            self.log("[INTERLOCK] Laser prep consumed - re-prep before the next shot.")
         except Exception as e:
             self.set_status("red", "BNC575 fire failed")
             self.log(f"[BNC575 ERROR] {e}")

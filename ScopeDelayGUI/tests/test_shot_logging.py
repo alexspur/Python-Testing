@@ -565,11 +565,20 @@ class TestGuiShotLogging(unittest.TestCase):
             pass
 
     def _arm_fire_path(self):
-        """Make on_bnc_fire reach the trigger without hardware."""
+        """Make on_bnc_fire reach the trigger without hardware.
+
+        Includes a prepped laser pair: the direct Fire button now hard-blocks
+        on laser prep (the rest of the checklist only warns), and every test
+        that fires goes through here."""
         self.win.bnc = FakeBNC()
         self.win.bnc_connected = True
         self.win.ensure_wj_hv_off = lambda *a, **k: True
+        self.win._check_lasers_armed = lambda: True
         return self.win.bnc
+
+    def _reprep(self):
+        """A shot consumes the prep; tests that fire twice must re-prep."""
+        self.win._on_laser_prep_requested()
 
     # -------------------------------------------------- existing behavior
     def test_session_folder_and_experiment_log_still_work(self):
@@ -677,6 +686,7 @@ class TestGuiShotLogging(unittest.TestCase):
     def test_two_fires_in_one_session(self):
         self._arm_fire_path()
         self.win.on_bnc_fire()
+        self._reprep()                      # the first shot consumed the prep
         self.win.on_bnc_fire()
         rows = read_rows(self.win.shot_logger.session_file)
         self.assertEqual([r["shot_number"] for r in rows], ["1", "2"])
@@ -854,6 +864,7 @@ class TestGuiShotLogging(unittest.TestCase):
         self.win.rigol1_connected = True
         self.win.on_bnc_fire()
         first = read_rows(self.win.shot_logger.session_file)[0]["rigol1_file"]
+        self._reprep()                      # the first shot consumed the prep
         self.win.on_bnc_fire()
         second = read_rows(self.win.shot_logger.session_file)[1]["rigol1_file"]
         self.assertNotEqual(first, second, "the second shot must not reuse the name")
@@ -1084,6 +1095,75 @@ class TestGuiShotLogging(unittest.TestCase):
         self.assertTrue(Path(self.dl.scope_read_path(1, 1)).exists())
         self.assertTrue(Path(self.dl.scope_read_path(1, 2)).exists(),
                         "the second Read must get its own _read02 file")
+
+    # ----------------------------------------------------- laser prep gate
+    # _arm_fire_path() preps the lasers; each test below then adjusts that.
+    def test_fire_is_blocked_until_the_lasers_are_prepped(self):
+        bnc = self._arm_fire_path()
+        self.win._check_lasers_armed = lambda: False
+
+        self.win.on_bnc_fire()
+
+        self.assertEqual(bnc.fired, 0, "fired with the lasers unprepped")
+        self.assertTrue(any("prep" in f"{t} {x}".lower() for t, x in self.popups),
+                        f"operator was not told why: {self.popups}")
+
+    def test_a_shot_consumes_the_prep_and_the_next_fire_is_blocked(self):
+        """In EXT/EXT the laser stays armed after firing - the DG535 drives it
+        every shot - so is_armed() alone would let a second shot ride on the
+        first shot's prep."""
+        bnc = self._arm_fire_path()
+        self.win._check_lasers_armed = lambda: True
+
+        self.win.on_bnc_fire()
+        self.assertEqual(bnc.fired, 1, "the first shot should fire")
+        self.assertTrue(self.win._laser_prep_consumed)
+        self.assertFalse(self.win.interlock_passed.get(1),
+                         "step 1 must drop once the prep is consumed")
+
+        self.win.on_bnc_fire()
+        self.assertEqual(bnc.fired, 1, "second shot fired on a consumed prep")
+
+    def test_the_checklist_cannot_relatch_step1_on_a_consumed_prep(self):
+        bnc = self._arm_fire_path()
+        self.win._check_lasers_armed = lambda: True
+        self.win.on_bnc_fire()
+
+        # The lasers are still physically armed, so a poll would re-pass
+        # step 1 if the consumed latch were not checked.
+        self.win._poll_interlocks()
+
+        self.assertFalse(self.win.interlock_passed.get(1),
+                         "a consumed prep must not re-latch on a timer tick")
+
+    def test_pressing_prep_system_re_opens_the_gate(self):
+        bnc = self._arm_fire_path()
+        self.win._check_lasers_armed = lambda: True
+        self.win.on_bnc_fire()
+        self.assertEqual(bnc.fired, 1)
+
+        self.win._on_laser_prep_requested()
+
+        self.assertFalse(self.win._laser_prep_consumed)
+        self.win.on_bnc_fire()
+        self.assertEqual(bnc.fired, 2, "a fresh prep should allow the next shot")
+
+    def test_fire_names_the_failed_interlocks_in_the_timeline(self):
+        """The direct Fire button bypasses the checklist by design, so the
+        only record that a step was red at t0 was a shot-row column."""
+        bnc = self._arm_fire_path()
+        self.win._check_lasers_armed = lambda: True
+        for idx in self.win.interlock_passed:
+            self.win.interlock_passed[idx] = False
+
+        self.win.on_bnc_fire()
+
+        self.assertEqual(bnc.fired, 1, "the warning must not block the shot")
+        blob = " ".join(
+            " ".join(str(v) for v in r.values())
+            for r in read_rows(self.dl.get_log_file_path()))
+        self.assertIn("failed interlocks", blob.lower())
+        self.assertIn("2. Relay Connection", blob)
 
     def test_window_title_is_the_shot_control_title(self):
         self.assertEqual(self.win.windowTitle(), "MultiPulse Shot Control")
