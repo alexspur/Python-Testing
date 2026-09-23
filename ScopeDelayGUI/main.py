@@ -33,7 +33,7 @@ OPTA_POLL_MS = 200
 # saves the captured waveform(s) to the session folder. Anything still unsaved
 # is also flushed when the app closes. Set to 0 to disable the timed auto-save
 # (the save-on-close safety net still runs).
-AUTO_SAVE_DELAY_SEC = 10.0
+AUTO_SAVE_DELAY_SEC = 2.0
 
 # Marx pressure gauge scale (PSI). Matches the fitted transducer, which is a
 # 0-10 V / 0-100 psi unit.

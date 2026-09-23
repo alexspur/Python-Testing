@@ -24,7 +24,7 @@ from utils.logger import LogPanel
 from utils.status_lamp import StatusLamp
 from utils.serial_tools import list_serial_ports
 from utils.capture_single_worker import CaptureSingleWorker, CaptureFourChannelWorker
-from utils.connect_memory import load_memory, save_memory
+from utils.connect_memory import load_memory, save_memory, scope_resource, SCOPE_TRANSPORT
 from utils.data_logger import DataLogger
 from utils.csv_export_worker import CSVExportWorker
 from utils.pressure_worker import PressureWorker
@@ -74,7 +74,7 @@ class ScopeDelayMainWindow(QMainWindow):
         "laser":  True,   # Quantel CFR laser (RS-232 over USB)
     }
 
-    def __init__(self, auto_connect=None, auto_save_delay_sec=10.0,
+    def __init__(self, auto_connect=None, auto_save_delay_sec=2.0,
                  pressure_gauge_min=0.0, pressure_gauge_max=100.0,
                  startup_charge_kv=60.0, opta_host="192.168.10.20",
                  opta_port=502, opta_poll_ms=200):
@@ -145,9 +145,11 @@ class ScopeDelayMainWindow(QMainWindow):
         #   192.168.10.51  Rigol 1
         #   192.168.10.52  Rigol 2
         #   192.168.10.53  Rigol 3
-        self.rigol1 = RigolScope(resource_name="TCPIP0::192.168.10.51::INSTR")  # Physical scope 1 (192.168.10.51)
-        self.rigol2 = RigolScope(resource_name="TCPIP0::192.168.10.52::INSTR")  # Physical scope 2 (192.168.10.52)
-        self.rigol3 = RigolScope(resource_name="TCPIP0::192.168.10.53::INSTR")  # Physical scope 3 (192.168.10.53)
+        # Transport (raw socket or VXI-11) comes from SCOPE_TRANSPORT in
+        # utils/connect_memory.py. Never write a resource string here.
+        self.rigol1 = RigolScope(resource_name=scope_resource(1))  # Physical scope 1 (192.168.10.51)
+        self.rigol2 = RigolScope(resource_name=scope_resource(2))  # Physical scope 2 (192.168.10.52)
+        self.rigol3 = RigolScope(resource_name=scope_resource(3))  # Physical scope 3 (192.168.10.53)
     
         # Multiple WJ supplies
         self.wj_units = [
@@ -816,7 +818,8 @@ class ScopeDelayMainWindow(QMainWindow):
                 idn = scope._query("*IDN?")
 
                 setattr(self, flag_name, True)
-                save_memory(key, scope.resource_name)
+                # Not saved: the resource string is derived from
+                # SCOPE_TRANSPORT and must not be pinned by an old run.
 
                 self.log(f"[AutoConnect] {key} CONNECTED → {idn}")
                 if key == "Rigol1_VISA":
@@ -1939,7 +1942,6 @@ class ScopeDelayMainWindow(QMainWindow):
             self.set_status("yellow", "Connecting Rigol #1...")
             self.rigol1.connect()
             idn = self.rigol1._query("*IDN?")
-            save_memory("Rigol1_VISA", self.rigol1.resource_name)
             self.rigol1_connected = True
 
             self.set_status("green", "Rigol #1 connected")
@@ -1949,6 +1951,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self.rigol1_connected = False
             self.set_status("red", "Rigol #1 connection failed")
             self.log(f"[Rigol1 ERROR] {e}")
+            self._log_scope_connect_hint(1)
             self.error_popup("Rigol #1 Error", str(e))
 
     def on_rigol2_connect(self):
@@ -1956,7 +1959,6 @@ class ScopeDelayMainWindow(QMainWindow):
             self.set_status("yellow", "Connecting Rigol #2...")
             self.rigol2.connect()
             idn = self.rigol2._query("*IDN?")
-            save_memory("Rigol2_VISA", self.rigol2.resource_name)
             self.rigol2_connected = True
             self.set_status("green", "Rigol #2 connected")
             self.log(f"[Rigol2] {idn}")
@@ -1965,6 +1967,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self.rigol2_connected = False
             self.set_status("red", "Rigol #2 connection failed")
             self.log(f"[Rigol2 ERROR] {e}")
+            self._log_scope_connect_hint(2)
             self.error_popup("Rigol #2 Error", str(e))
 
     def on_rigol3_connect(self):
@@ -1972,7 +1975,6 @@ class ScopeDelayMainWindow(QMainWindow):
             self.set_status("yellow", "Connecting Rigol #3...")
             self.rigol3.connect()
             idn = self.rigol3._query("*IDN?")
-            save_memory("Rigol3_VISA", self.rigol3.resource_name)
             self.rigol3_connected = True
             self.set_status("green", "Rigol #3 connected")
             self.log(f"[Rigol3] {idn}")
@@ -1981,6 +1983,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self.rigol3_connected = False
             self.set_status("red", "Rigol #3 connection failed")
             self.log(f"[Rigol3 ERROR] {e}")
+            self._log_scope_connect_hint(3)
             self.error_popup("Rigol #3 Error", str(e))
 
 
@@ -2788,6 +2791,10 @@ class ScopeDelayMainWindow(QMainWindow):
         if getattr(self, "_capture_countdown_timer", None) is not None:
             self._capture_countdown_timer.stop()
 
+        # Let any transfer finish before the process goes away. Waiting comes
+        # first so a capture that lands during the wait is still flushed below.
+        self._wait_for_scope_work(timeout_s=30.0)
+
         if self._captures_dirty and self.captured_scopes:
             try:
                 saved_files = self._save_captures_sync()
@@ -2834,4 +2841,77 @@ class ScopeDelayMainWindow(QMainWindow):
             except Exception as e:
                 self.log(f"[Lasers] shutdown error: {e}")
 
+        self._close_scope_sessions()
+
         event.accept()
+
+    # ------------------------------------------------------------------
+    #  Scope shutdown
+    # ------------------------------------------------------------------
+    def _log_scope_connect_hint(self, scope_id):
+        """Explain a refused connection when the transport is raw socket.
+
+        A socket left half-open by an interrupted transfer is not cleaned up
+        the way VXI-11 cleans itself up, so the next launch is the one that
+        sees the refusal.
+        """
+        if SCOPE_TRANSPORT != "socket":
+            return
+        self.log(
+            f"[Rigol{scope_id}] Connection refused on raw socket. An "
+            "interrupted transfer can leave the scope's socket open. Power "
+            "cycle that scope, or set SCOPE_TRANSPORT = \"instr\" in "
+            "utils/connect_memory.py to fall back to VXI-11.")
+
+    def _wait_for_scope_work(self, timeout_s=30.0):
+        """Block until any running capture or export finishes.
+
+        This GUI is usually closed within seconds of a shot, so a transfer cut
+        off by the close is exactly what would break the next launch. Raw
+        socket does not recover from that on its own.
+        """
+        import time
+        from PyQt6.QtWidgets import QApplication
+
+        jobs = []
+        for sid in (1, 2, 3):
+            worker = getattr(self, f"capture_worker_{sid}", None)
+            if worker is not None and worker.isRunning():
+                jobs.append((f"Rigol #{sid} capture", worker))
+        for i, worker in enumerate(getattr(self, "export_workers", None) or [], start=1):
+            if worker is not None and worker.isRunning():
+                jobs.append((f"CSV export {i}", worker))
+
+        if not jobs:
+            return
+
+        names = ", ".join(name for name, _ in jobs)
+        self.set_status("yellow", f"Finishing {len(jobs)} scope transfer(s)...")
+        self.log(f"[CLOSE] Waiting up to {timeout_s:.0f}s for: {names}")
+        QApplication.processEvents()   # repaint before the blocking wait
+
+        deadline = time.monotonic() + timeout_s
+        for name, worker in jobs:
+            remaining_ms = int(max(0.0, deadline - time.monotonic()) * 1000)
+            if not worker.wait(remaining_ms):
+                self.log(
+                    f"[CLOSE WARNING] {name} still running after "
+                    f"{timeout_s:.0f}s. Closing anyway; if that scope refuses "
+                    "the next connection, power cycle it or set "
+                    "SCOPE_TRANSPORT = \"instr\".")
+
+    def _close_scope_sessions(self):
+        """Close each scope's VISA session explicitly.
+
+        Leaving the process to tear down an open raw socket is what leaves a
+        scope refusing the next connection.
+        """
+        for sid in (1, 2, 3):
+            scope = getattr(self, f"rigol{sid}", None)
+            if scope is None:
+                continue
+            try:
+                scope.disconnect()
+            except Exception as e:
+                self.log(f"[CLOSE] Rigol #{sid} session close error: {e}")
+            setattr(self, f"rigol{sid}_connected", False)

@@ -6,6 +6,45 @@ import serial.tools.list_ports
 
 MEM_FILE = "connection_memory.json"
 
+# --------------------------------------------------------------------------
+# Scope transport. One switch here changes all three Rigols.
+#
+# "socket" is a raw TCP socket on the scope's port 5555; "instr" is VXI-11.
+# Measured on Rigol 1, same 1,000,000 points and the same chunking:
+#
+#               query latency   throughput   4-channel read
+#   instr          9.96 ms       0.31 MB/s      13.37 s
+#   socket         1.04 ms       2.60 MB/s       1.595 s
+#
+# Switch to "instr" if a scope refuses connections after an interrupted
+# transfer, which raw socket does not clean up as gracefully as VXI-11.
+# --------------------------------------------------------------------------
+SCOPE_TRANSPORT = "socket"   # "socket" or "instr"
+
+SCOPE_IPS = {
+    1: "192.168.10.51",   # Physical scope 1
+    2: "192.168.10.52",   # Physical scope 2
+    3: "192.168.10.53",   # Physical scope 3
+}
+
+
+def scope_resource(n):
+    """VISA resource string for scope `n`, honouring SCOPE_TRANSPORT.
+
+    This is the only place a scope resource string is built, so the transport
+    cannot drift between the defaults, the GUI and the saved memory file.
+    """
+    ip = SCOPE_IPS[n]
+    if SCOPE_TRANSPORT == "socket":
+        return f"TCPIP0::{ip}::5555::SOCKET"
+    return f"TCPIP0::{ip}::INSTR"
+
+
+# Rigol<N>_VISA is derived from SCOPE_TRANSPORT, never remembered. A string
+# saved by an earlier run would outlive the switch and silently win.
+_DERIVED_KEYS = {f"Rigol{n}_VISA" for n in SCOPE_IPS}
+
+
 default_data = {
     "DG535_COM": "COM4",
     "BNC575_COM": "COM5",
@@ -15,10 +54,11 @@ default_data = {
     "CFR_LASER_COM": "COM6",
     "CFR_LASER2_COM": "COM8",
 
-    # The scopes are on the instrument network (VXI-11 over Ethernet), not USB.
-    "Rigol1_VISA": "TCPIP0::192.168.10.51::INSTR",
-    "Rigol2_VISA": "TCPIP0::192.168.10.52::INSTR",
-    "Rigol3_VISA": "TCPIP0::192.168.10.53::INSTR",
+    # The scopes are on the instrument network, not USB. Built from
+    # scope_resource() so SCOPE_TRANSPORT is the single switch.
+    "Rigol1_VISA": scope_resource(1),
+    "Rigol2_VISA": scope_resource(2),
+    "Rigol3_VISA": scope_resource(3),
 }
 
 # --------------------------------------------------------------------------
@@ -134,6 +174,12 @@ def load_memory(resolve=True):
         except Exception:
             data = default_data.copy()
 
+    # The scope transport is decided by SCOPE_TRANSPORT, never by whatever a
+    # previous run saved. Without this, flipping SCOPE_TRANSPORT would look
+    # like it did nothing, because the JSON still held the old string.
+    for n in SCOPE_IPS:
+        data[f"Rigol{n}_VISA"] = scope_resource(n)
+
     if resolve:
         data = resolve_ports(data)
     return data
@@ -145,10 +191,21 @@ def save_memory(key, value):
     Note: we save the resolved COM number as a fallback for when the device
     isn't connected, but on next load the live USB match takes priority.
     """
+    # Scope resources are derived, not remembered: persisting one would let it
+    # override SCOPE_TRANSPORT on the next launch. Refused here as well as at
+    # the call sites, so a future caller cannot reintroduce the problem.
+    if key in _DERIVED_KEYS:
+        return
+
     # Load WITHOUT resolving so we persist the raw remembered table, then
     # overwrite the single key the caller asked us to save.
     data = load_memory(resolve=False)
     data[key] = value
+    # load_memory() injects the derived scope resources into every read, so
+    # strip them back out here. Without this, saving an unrelated port writes
+    # them into the file again and the JSON looks like it pins the transport.
+    for derived in _DERIVED_KEYS:
+        data.pop(derived, None)
     with open(MEM_FILE, "w") as f:
         json.dump(data, f, indent=2)
 

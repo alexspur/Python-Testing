@@ -855,11 +855,15 @@ class TestGuiShotLogging(unittest.TestCase):
         self.assertIn("42.37", self.win.sf6_window.sf6_panel.lbl_psi.text())
 
     def test_connection_memory_writes_go_to_the_temp_copy(self):
-        """Every connect handler ends in save_memory(). With the path patched,
-        the write lands in the temp folder."""
-        save_memory("Rigol1_VISA", "TCPIP0::192.0.2.1::INSTR")
+        """Connect handlers end in save_memory(). With the path patched, the
+        write lands in the temp folder.
+
+        Uses a port key: scope resources are derived from SCOPE_TRANSPORT and
+        save_memory refuses them outright.
+        """
+        save_memory("DG535_COM", "COM41")
         written = json.loads((self.tmp / "connection_memory.json").read_text())
-        self.assertEqual(written["Rigol1_VISA"], "TCPIP0::192.0.2.1::INSTR")
+        self.assertEqual(written["DG535_COM"], "COM41")
 
     def test_real_connection_memory_is_untouched(self):
         """Building the window and saving ports must leave the operator's real
@@ -867,34 +871,81 @@ class TestGuiShotLogging(unittest.TestCase):
         if not REAL_MEMORY_FILE.exists():
             self.skipTest("no real connection_memory.json in this checkout")
         before = REAL_MEMORY_FILE.read_bytes()
-        save_memory("Rigol1_VISA", "TCPIP0::192.0.2.1::INSTR")
         save_memory("DG535_COM", "COM99")
+        save_memory("BNC575_COM", "COM98")
         self.assertEqual(REAL_MEMORY_FILE.read_bytes(), before,
                          "a test wrote to the real connection_memory.json")
 
 
 class TestRigolAddresses(unittest.TestCase):
-    """The three scopes moved from USB to the instrument network.
+    """The three scopes are on the instrument network, addressed by number.
 
-    Mapped by scope number: rigol1 -> .51, rigol2 -> .52, rigol3 -> .53.
+    rigol1 -> .51, rigol2 -> .52, rigol3 -> .53, in either transport.
     """
 
-    EXPECTED = {
-        "Rigol1_VISA": "TCPIP0::192.168.10.51::INSTR",
-        "Rigol2_VISA": "TCPIP0::192.168.10.52::INSTR",
-        "Rigol3_VISA": "TCPIP0::192.168.10.53::INSTR",
-    }
+    IPS = {1: "192.168.10.51", 2: "192.168.10.52", 3: "192.168.10.53"}
 
     def test_defaults_are_the_ethernet_addresses(self):
-        from utils.connect_memory import default_data
-        for key, expected in self.EXPECTED.items():
-            self.assertEqual(default_data[key], expected, f"{key} must be the TCPIP address")
+        from utils.connect_memory import default_data, scope_resource
+        for n in (1, 2, 3):
+            self.assertEqual(default_data[f"Rigol{n}_VISA"], scope_resource(n),
+                             f"Rigol{n}_VISA must come from scope_resource()")
+            self.assertIn(self.IPS[n], default_data[f"Rigol{n}_VISA"])
 
     def test_no_usb_visa_address_remains_in_the_defaults(self):
         from utils.connect_memory import default_data
         leftovers = {k: v for k, v in default_data.items()
                      if isinstance(v, str) and "USB0::" in v}
         self.assertEqual(leftovers, {}, "a saved USB address would override the default")
+
+    def test_each_transport_keeps_the_scope_numbering(self):
+        """Switching transport must not renumber or re-address a scope."""
+        import utils.connect_memory as cm
+        for transport, suffix in (("socket", "::5555::SOCKET"), ("instr", "::INSTR")):
+            with patch.object(cm, "SCOPE_TRANSPORT", transport):
+                for n in (1, 2, 3):
+                    self.assertEqual(cm.scope_resource(n),
+                                     f"TCPIP0::{self.IPS[n]}{suffix}",
+                                     f"scope {n} wrong in {transport} mode")
+
+    def test_saved_memory_cannot_override_the_transport(self):
+        """A Rigol string left in the JSON by an older run must be ignored,
+        or flipping SCOPE_TRANSPORT would appear to do nothing."""
+        import utils.connect_memory as cm
+        with tempfile.TemporaryDirectory() as tmp:
+            mem = Path(tmp) / "connection_memory.json"
+            mem.write_text(json.dumps({
+                "DG535_COM": "COM4",
+                "Rigol1_VISA": "TCPIP0::10.0.0.1::INSTR",
+                "Rigol2_VISA": "USB0::0x1AB1::0x0514::XYZ::0::INSTR",
+                "Rigol3_VISA": "nonsense",
+            }))
+            with patch.object(cm, "MEM_FILE", str(mem)):
+                data = cm.load_memory(resolve=False)
+        for n in (1, 2, 3):
+            self.assertEqual(data[f"Rigol{n}_VISA"], cm.scope_resource(n))
+        # Everything else in the file is still honoured.
+        self.assertEqual(data["DG535_COM"], "COM4")
+
+    def test_scope_resources_are_never_written_to_memory(self):
+        import utils.connect_memory as cm
+        with tempfile.TemporaryDirectory() as tmp:
+            mem = Path(tmp) / "connection_memory.json"
+            with patch.object(cm, "MEM_FILE", str(mem)):
+                cm.save_memory("Rigol1_VISA", "TCPIP0::10.0.0.9::INSTR")
+                self.assertFalse(mem.exists(),
+                                 "saving a scope resource must write nothing")
+                # A real port still saves normally.
+                cm.save_memory("DG535_COM", "COM41")
+                saved = json.loads(mem.read_text())
+        self.assertEqual(saved["DG535_COM"], "COM41")
+        # Saving an unrelated port must not write the derived scope keys back
+        # into the file either. load_memory() injects them on every read, so
+        # without an explicit strip they reappear the first time any other
+        # device saves its port.
+        for n in (1, 2, 3):
+            self.assertNotIn(f"Rigol{n}_VISA", saved,
+                             "scope resources must never be persisted")
 
 
 class TestSimplifiedPanels(unittest.TestCase):
