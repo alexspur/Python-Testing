@@ -1031,6 +1031,60 @@ class TestGuiShotLogging(unittest.TestCase):
                 self.assertNotIn(forbidden, scope.calls,
                                  f"scope {sid} re-armed with {forbidden}()")
 
+    # ------------------------------------------- a Read is not a shot capture
+    def _run_read(self, sid=1):
+        """Press Read R<sid> and wait for both the read and its export.
+
+        The worker's finished signal is queued to the GUI thread, so the
+        capture handler only runs when the event loop spins. With no loop in
+        tests, processEvents() is what delivers it - without that the handler
+        never runs and every assertion about it is vacuous."""
+        from PyQt6.QtWidgets import QApplication
+        scope = FakeScope()
+        setattr(self.win, f"rigol{sid}", scope)
+        setattr(self.win, f"rigol{sid}_connected", True)
+        getattr(self.win, f"on_capture_r{sid}")()
+        worker = getattr(self.win, f"capture_worker_{sid}", None)
+        self.assertIsNotNone(worker, "no read worker started")
+        self.assertTrue(worker.wait(5000), "read did not finish")
+        QApplication.processEvents()            # deliver finished -> handler
+        for w in list(self.win._read_workers):
+            self.assertTrue(w.wait(5000), "read export did not finish")
+        QApplication.processEvents()            # deliver the export's finished
+        return scope
+
+    def test_a_read_never_enters_captured_scopes_or_marks_dirty(self):
+        """Pressing Read after a shot used to trip auto-save and rewrite all
+        three of that shot's rigol<N>_<session ts>.csv files with re-read
+        data, because a Read was stored exactly like a capture."""
+        self.win.captured_scopes = {}
+        self.win._captures_dirty = False
+
+        self._run_read(1)
+
+        self.assertNotIn(1, self.win.captured_scopes,
+                         "a Read must not be stored as a capture")
+        self.assertFalse(self.win._captures_dirty,
+                         "a Read must not mark the shot's captures unsaved")
+
+    def test_a_read_writes_its_own_file_and_not_the_shots(self):
+        shot_file = Path(self.dl.scope_export_path(1, shot_index=1))
+        read_file = Path(self.dl.scope_read_path(1, 1))
+        self.assertTrue(read_file.name.endswith("_read01.csv"), read_file.name)
+
+        self._run_read(1)
+
+        self.assertTrue(read_file.exists(), f"{read_file.name} was not written")
+        self.assertFalse(shot_file.exists(),
+                         "a Read must never write the shot's filename")
+
+    def test_a_second_read_does_not_overwrite_the_first(self):
+        self._run_read(1)
+        self._run_read(1)
+        self.assertTrue(Path(self.dl.scope_read_path(1, 1)).exists())
+        self.assertTrue(Path(self.dl.scope_read_path(1, 2)).exists(),
+                        "the second Read must get its own _read02 file")
+
     def test_window_title_is_the_shot_control_title(self):
         self.assertEqual(self.win.windowTitle(), "MultiPulse Shot Control")
 

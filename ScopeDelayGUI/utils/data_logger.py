@@ -504,6 +504,22 @@ class DataLogger:
             stem += f"_shot{int(shot_index):02d}"
         return str(self.session_dir / f"{stem}.csv")
 
+    def scope_read_path(self, scope_id, read_index):
+        r"""Build the export path for a manual Read, never a shot.
+
+        A Read pulls back the acquisition already in the scope's memory. It
+        must never land on the shot's filename: pressing Read R1 after a shot
+        used to rewrite all three rigol<N>_<session ts>.csv files through the
+        auto-save path, replacing the shot's own data.
+
+        The _read<NN> suffix also keeps these files away from
+        Post Test Analysis/parse_test_log.py, whose
+        re.findall(r"(rigol\d_\d{8}_\d{6}\.csv)") only matches a name ending
+        right after the 6-digit time.
+        """
+        stem = f"rigol{scope_id}_{self.session_timestamp}_read{int(read_index):02d}"
+        return str(self.session_dir / f"{stem}.csv")
+
     def close(self):
         """Close logger (placeholder for future cleanup if needed)"""
         print(f"[DataLogger] Log saved to: {self.log_file}")

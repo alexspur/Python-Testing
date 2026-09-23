@@ -300,6 +300,15 @@ class ScopeDelayMainWindow(QMainWindow):
         self._auto_save_timer.setSingleShot(True)
         self._auto_save_timer.timeout.connect(self._auto_save_fire)
 
+        # A Read is not a capture. Its data never enters captured_scopes and
+        # never marks the shot dirty, so it cannot be picked up by auto-save
+        # and written over the shot's own rigol<N>_<session ts>.csv files.
+        # Each Read gets its own rigol<N>_<session ts>_read<NN>.csv instead.
+        self._read_only_scopes = set()
+        self._read_counts = {}
+        self._read_workers = []
+        self._read_export_points = {}
+
         
     def refresh_wj_ports(self):
         """Populate COM lists for each WJ unit, selecting last used port."""
@@ -1299,6 +1308,51 @@ class ScopeDelayMainWindow(QMainWindow):
         self.set_status("green", "Exporting...")
         self.log(f"[EXPORT] Exporting {self._export_pending} scope file(s) to {session_dir} ...")
 
+    def _start_read_export(self, scope_id, data):
+        """Write one Read to its own rigol<N>_<ts>_read<NN>.csv.
+
+        Deliberately separate from _start_async_export, which walks
+        captured_scopes, owns the shot's filenames and clears the unsaved
+        flag. A Read touches none of that, so it can never overwrite a shot.
+        """
+        read_index = self._read_counts.get(scope_id, 1)
+        path = self.data_logger.scope_read_path(scope_id, read_index)
+        name = Path(path).name
+        points = self._total_points(data)
+
+        if points == 0:
+            self.log(f"[READ] Rigol #{scope_id}: no samples, nothing written ({name})")
+            self.data_logger.log_scope_export(
+                scope_id, name, 0, ok=False, reason="read had no samples")
+            return
+
+        self._read_export_points[name] = points
+        worker = CSVExportWorker(data, path)
+        # Bound methods, not lambdas: a lambda has no receiver QObject, so Qt
+        # would run it on the worker thread and these touch the GUI.
+        worker.finished.connect(self._on_read_export_finished)
+        worker.error.connect(self._on_read_export_error)
+        self._read_workers.append(worker)
+        worker.start()
+        self.log(f"[READ] Writing {name} ...")
+
+    def _on_read_export_finished(self, filename):
+        """One Read CSV finished. Does not touch the shot's saved state."""
+        name = Path(filename).name
+        self.log(f"[READ] ✅ Saved {filename}")
+        try:
+            self.data_logger.log_scope_export(
+                self._scope_id_for_file(filename), name,
+                self._read_export_points.pop(name, 0), ok=True,
+                reason="manual read (not a shot capture)")
+        except Exception:
+            pass
+        self._read_workers = [w for w in self._read_workers if w.isRunning()]
+
+    def _on_read_export_error(self, msg):
+        self.log(f"[READ ERROR] {msg}")
+        self.data_logger.log_error("Read", str(msg))
+
     @staticmethod
     def _total_points(data):
         """Total samples across a scope's channels, for the zero-sample check."""
@@ -2129,6 +2183,13 @@ class ScopeDelayMainWindow(QMainWindow):
         was asked to retrieve. Capture All still arms, which is correct:
         that happens before the shot, not after it.
         """
+        # Mark this scope read-only for the duration, so the shared capture
+        # handler keeps the result out of captured_scopes and out of the
+        # auto-save path. Set before the worker starts: the worker can finish
+        # before start() returns on a fast link.
+        self._read_only_scopes.add(scope_id)
+        self._read_counts[scope_id] = self._read_counts.get(scope_id, 0) + 1
+
         self.set_status("yellow", f"Reading {name} (4 channels)...")
         self.log(f"[{name}] reading the last acquisition (no re-arm)...")
         self._set_capture_state(scope_id, "capturing")
@@ -2258,13 +2319,22 @@ class ScopeDelayMainWindow(QMainWindow):
                 self._start_async_export(silent=True)
 
     def on_four_channel_capture_finished(self, data, name, scope_id):
-        """Handle 4-channel capture completion"""
+        """Handle 4-channel capture completion.
+
+        A Read (start_immediate_read) finishes here too, and must not be
+        treated as a capture. Storing it in captured_scopes and marking the
+        captures dirty is exactly what let a Read after a shot trip auto-save
+        and rewrite all three of that shot's rigol<N>_<session ts>.csv files
+        with the re-read data.
+        """
+        is_read = scope_id in self._read_only_scopes
         self._stop_capture_countdown(scope_id)
         (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
-        # Store data for export
-        self.current_data = data  # ← ADD THIS LINE
-        self.captured_scopes[scope_id] = data
-        self._mark_captures_dirty()
+        if not is_read:
+            # Store data for export
+            self.current_data = data
+            self.captured_scopes[scope_id] = data
+            self._mark_captures_dirty()
 
         # Update the appropriate plot
         if scope_id == 1:
@@ -2287,12 +2357,16 @@ class ScopeDelayMainWindow(QMainWindow):
         # all timed out was recorded as a good capture and shown green.
         scope = getattr(self, f"rigol{scope_id}", None)
         ok, why = self._capture_outcome(scope, ch_counts)
-        self.system_state.update(f"rigol{scope_id}", {
-            "armed": False,
-            "capture_ok": ok,
-            "file": Path(self.data_logger.scope_export_path(
-                scope_id, shot_index=self.shot_logger.session_shot_index)).name,
-        }, source=SOURCE_READBACK)
+        if not is_read:
+            # A Read must not rewrite the shot's recorded outcome or filename:
+            # the shot row names the file the shot wrote, not the one a later
+            # Read produced.
+            self.system_state.update(f"rigol{scope_id}", {
+                "armed": False,
+                "capture_ok": ok,
+                "file": Path(self.data_logger.scope_export_path(
+                    scope_id, shot_index=self.shot_logger.session_shot_index)).name,
+            }, source=SOURCE_READBACK)
 
         if ok:
             self.set_status("green", f"{name} captured (4 ch)")
@@ -2303,6 +2377,15 @@ class ScopeDelayMainWindow(QMainWindow):
             self._set_capture_state(scope_id, "error", why)
             self.log(f"[{name}] capture NOT ok: {why}")
             self.data_logger.log_error(f"Rigol{scope_id}", f"capture incomplete: {why}")
+        if is_read:
+            # Its own file, written directly. Never through the shot's
+            # auto-save, and never onto the shot's filename.
+            self._read_only_scopes.discard(scope_id)
+            self.log(f"[{name}] read complete (no re-arm). Points: "
+                     f"CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)}")
+            self._start_read_export(scope_id, data)
+            return
+
         self._finish_pending_capture(scope_id)
         self.log(f"[{name}] 4-channel capture complete. Points: CH1={len(t1)}, CH2={len(t2)}, CH3={len(t3)}, CH4={len(t4)}")
 
