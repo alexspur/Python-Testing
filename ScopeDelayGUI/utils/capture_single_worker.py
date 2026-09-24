@@ -159,6 +159,36 @@ Both modes now capture full memory depth (RAW mode).
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from utils.downsample import downsample_four
+
+
+class CaptureResult(tuple):
+    """A 4-channel capture with its display copy attached.
+
+    Unpacks, indexes and iterates exactly like the plain ((t, v), ...) tuple
+    it replaces, so captured_scopes, the exporters and every existing caller
+    see the full-resolution data unchanged. `display` is the peak-preserving
+    min/max downsample the worker computed for the plot, so the GUI thread
+    never touches a million-point array to draw it.
+    """
+
+    def __new__(cls, pairs, display=None):
+        obj = super().__new__(cls, tuple(pairs))
+        obj.display = display
+        return obj
+
+
+def with_display(scope, data):
+    """Attach the display copy on THIS (worker) thread, stamped if the scope
+    keeps timing stamps."""
+    stamp = getattr(scope, "_stamp", None)
+    if stamp is not None:
+        stamp("display_downsample_start")
+    result = CaptureResult(data, display=downsample_four(data))
+    if stamp is not None:
+        stamp("display_downsample_end")
+    return result
+
 
 class CaptureSingleWorker(QThread):
     """
@@ -269,7 +299,8 @@ class CaptureFourChannelWorker(QThread):
             data = self.scope.wait_and_capture_four(
                 ch1=1, ch2=2, ch3=3, ch4=4, timeout=self.timeout
             )
-            self.finished.emit(data, self.scope_name)
+            # The display copy is made here, on the worker, not on the GUI.
+            self.finished.emit(with_display(self.scope, data), self.scope_name)
             
         except Exception as e:
             self.error.emit(str(e), self.scope_name)
@@ -308,7 +339,8 @@ class ImmediateFourChannelWorker(QThread):
             # Capture all four channels with full memory depth (no trigger wait)
             # Scope is automatically stopped during capture
             data = self.scope.capture_four_channels()
-            self.finished.emit(data, self.scope_name)
+            # Same display path as a shot capture: downsampled here, not on the GUI.
+            self.finished.emit(with_display(self.scope, data), self.scope_name)
             
         except Exception as e:
             self.error.emit(str(e), self.scope_name)

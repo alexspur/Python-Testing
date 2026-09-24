@@ -9,10 +9,13 @@ Uses pyqtgraph for fast plotting with 4 separate Y-axes:
 """
 
 import pyqtgraph as pg
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton, QHBoxLayout, QCheckBox, QGroupBox
 from PyQt6.QtGui import QFont
 from pyqtgraph import ViewBox, PlotCurveItem, AxisItem
 import numpy as np
+
+from utils.downsample import visible_downsample
 
 
 class ScopePlotWindow(QWidget):
@@ -69,6 +72,25 @@ class ScopePlotWindow(QWidget):
         self.r1_ch1, self.r1_ch2, self.r1_ch3, self.r1_ch4 = self.r1_curves
         self.r2_ch1, self.r2_ch2, self.r2_ch3, self.r2_ch4 = self.r2_curves
         self.r3_ch1, self.r3_ch2, self.r3_ch3, self.r3_ch4 = self.r3_curves
+
+        # The curves only ever hold a display copy: two points per pixel
+        # column, min and max per bin, computed on the capture worker. The
+        # full 1,000,000 points per channel are kept here (and in
+        # main_window.captured_scopes, which is what every export writes) so
+        # a zoom can re-downsample just the visible range and show real
+        # samples once few enough are in view.
+        self._full = {1: None, 2: None, 3: None}
+        self._display = {1: None, 2: None, 3: None}
+        self._refreshing = False
+        self._zoom_timers = {}
+        for sid, pw in ((1, self.plot1), (2, self.plot2), (3, self.plot3)):
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(50)                 # settle a drag before re-downsampling
+            timer.timeout.connect(lambda s=sid: self._refresh_visible(s))
+            self._zoom_timers[sid] = timer
+            pw.getViewBox().sigXRangeChanged.connect(
+                lambda vb, rng, s=sid: self._zoom_timers[s].start())
 
         # CLEAR button
         self.btn_clear = QPushButton("Clear All Plots")
@@ -321,10 +343,68 @@ class ScopePlotWindow(QWidget):
                     item.setStyle(tickFont=font)
 
     # ------------------------------------------------------------
+    # Full-resolution data and zoom (peak-preserving at every level)
+    # ------------------------------------------------------------
+    def set_full_data(self, scope_id, data):
+        """Keep the full-resolution channels of one scope for zooming.
+
+        data: ((t, v), (t, v), (t, v), (t, v)) at full length. Not copied -
+        the same arrays main_window holds in captured_scopes.
+        """
+        self._full[scope_id] = tuple((np.asarray(t), np.asarray(v)) for t, v in data)
+
+    def _remember_display(self, scope_id, *pairs):
+        """The display copy last handed to update_r<N>, restored on View All."""
+        self._display[scope_id] = tuple(
+            (np.asarray(t) if t is not None else np.array([]),
+             np.asarray(v) if v is not None else np.array([]))
+            for t, v in pairs)
+
+    def _curves_for(self, scope_id):
+        return {1: self.r1_curves, 2: self.r2_curves, 3: self.r3_curves}[scope_id]
+
+    def _plot_for(self, scope_id):
+        return {1: self.plot1, 2: self.plot2, 3: self.plot3}[scope_id]
+
+    def _refresh_visible(self, scope_id):
+        """Re-downsample the visible range of one scope from its full arrays.
+
+        Only while X auto-range is OFF, i.e. after the user zoomed or
+        panned. With auto-range on, setData here would re-autorange to the
+        slice, widen the view by its padding, fire this again, and drift
+        outward forever; in that state the full display copy is right anyway,
+        so it is restored instead.
+        """
+        if self._refreshing:
+            return
+        full = self._full.get(scope_id)
+        curves = self._curves_for(scope_id)
+        vb = self._plot_for(scope_id).getViewBox()
+        self._refreshing = True
+        try:
+            if vb.autoRangeEnabled()[0]:
+                display = self._display.get(scope_id)
+                if display:
+                    for curve, (t, v) in zip(curves, display):
+                        curve.setData(t, v)
+                return
+            if not full:
+                return
+            x0, x1 = vb.viewRange()[0]
+            for curve, (t, v) in zip(curves, full):
+                if len(v) == 0:
+                    continue
+                td, vd = visible_downsample(t, v, x0, x1)
+                curve.setData(td, vd)
+        finally:
+            self._refreshing = False
+
+    # ------------------------------------------------------------
     # Plot update functions (called by main_window)
     # ------------------------------------------------------------
     def update_r1(self, t1, v1, t2, v2, t3=None, v3=None, t4=None, v4=None, **kwargs):
         """Update Rigol #1 plot with up to 4 channels"""
+        self._remember_display(1, (t1, v1), (t2, v2), (t3, v3), (t4, v4))
         self.r1_ch1.setData(t1, v1)
         self.r1_ch2.setData(t2, v2)
 
@@ -340,6 +420,7 @@ class ScopePlotWindow(QWidget):
 
     def update_r2(self, t1, v1, t2, v2, t3=None, v3=None, t4=None, v4=None, **kwargs):
         """Update Rigol #2 plot with up to 4 channels"""
+        self._remember_display(2, (t1, v1), (t2, v2), (t3, v3), (t4, v4))
         self.r2_ch1.setData(t1, v1)
         self.r2_ch2.setData(t2, v2)
 
@@ -355,6 +436,7 @@ class ScopePlotWindow(QWidget):
 
     def update_r3(self, t1, v1, t2, v2, t3=None, v3=None, t4=None, v4=None, **kwargs):
         """Update Rigol #3 plot with up to 4 channels"""
+        self._remember_display(3, (t1, v1), (t2, v2), (t3, v3), (t4, v4))
         self.r3_ch1.setData(t1, v1)
         self.r3_ch2.setData(t2, v2)
 
@@ -393,6 +475,9 @@ class ScopePlotWindow(QWidget):
             for curve in curves:
                 if curve is not None:
                     curve.setData([], [])
+        for sid in (1, 2, 3):
+            self._full[sid] = None
+            self._display[sid] = None
 
     def full_clear_plots(self):
         """Full clear with plot reconstruction (use if clear_plots doesn't work)"""

@@ -36,6 +36,7 @@ from utils.shot_logger import ShotLogger
 from utils.shot_snapshot import (
     build_shot_row, channel_name, fmt_us, resolve_absolute_delays,
 )
+from utils.downsample import downsample_four
 
 from serial.tools import list_ports
 
@@ -1366,6 +1367,9 @@ class ScopeDelayMainWindow(QMainWindow):
         scope = getattr(self, f"rigol{scope_id}", None)
         stamps = list(getattr(scope, "timing", None) or [])
         if not stamps:
+            # No worker stamps (a fake, or a direct call): the plot cost is
+            # still worth a line.
+            self.log(f"[TIMING] {name} {kind} plot_setData {plot_s:.3f}s (no worker stamps)")
             return
         t0 = stamps[0]["t"]
 
@@ -1391,6 +1395,9 @@ class ScopeDelayMainWindow(QMainWindow):
                          f"hold {r - a:.3f}s")
         ce = at("capture_end")
         parts.append(f"capture_end {fmt(ce)}")
+        ds0, ds1 = at("display_downsample_start"), at("display_downsample_end")
+        if ds0 is not None and ds1 is not None:
+            parts.append(f"display_ds {ds1 - ds0:.3f}s")
         h = t_handler - t0
         parts.append(f"handler +{h:.3f}s" + (f" (queued {h - ce:.3f}s)" if ce is not None else ""))
         parts.append(f"plot_setData {plot_s:.3f}s")
@@ -2577,16 +2584,27 @@ class ScopeDelayMainWindow(QMainWindow):
             self.captured_scopes[scope_id] = data
             self._mark_captures_dirty()
 
-        # Update the appropriate plot. Timed: this is the synchronous setData
-        # cost only. The repaint it schedules runs after this handler returns
-        # and shows up as the NEXT scope's handler delay, not here.
+        # Plot the DISPLAY copy - two points per pixel column, min and max
+        # per bin, computed on the worker - never the million-point arrays.
+        # The full arrays go to the plot window for zooming, and stay in
+        # captured_scopes, which is what every export writes. A caller that
+        # hands over a plain tuple (tests, direct calls) gets the same
+        # downsample done here.
+        display = getattr(data, "display", None)
+        if display is None:
+            display = downsample_four(data)
+        (d1, d2, d3, d4) = display
+        # Timed: the synchronous setData cost only. The repaint it schedules
+        # runs after this handler returns and shows up as the NEXT scope's
+        # handler delay, not here.
         t_plot = time.monotonic()
+        self.scope_window.set_full_data(scope_id, data)
         if scope_id == 1:
-            self.scope_window.update_r1(t1, v1, t2, v2, t3, v3, t4, v4)
+            self.scope_window.update_r1(d1[0], d1[1], d2[0], d2[1], d3[0], d3[1], d4[0], d4[1])
         elif scope_id == 2:
-            self.scope_window.update_r2(t1, v1, t2, v2, t3, v3, t4, v4)
+            self.scope_window.update_r2(d1[0], d1[1], d2[0], d2[1], d3[0], d3[1], d4[0], d4[1])
         elif scope_id == 3:
-            self.scope_window.update_r3(t1, v1, t2, v2, t3, v3, t4, v4)
+            self.scope_window.update_r3(d1[0], d1[1], d2[0], d2[1], d3[0], d3[1], d4[0], d4[1])
         plot_s = time.monotonic() - t_plot
         self._log_capture_timing(scope_id, name, t_handler, plot_s,
                                  "read" if is_read else "capture")

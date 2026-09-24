@@ -1482,6 +1482,68 @@ class TestGuiShotLogging(unittest.TestCase):
         text = Path(self.dl.gui_log_file).read_text(encoding="utf-8")
         self.assertIn("[TIMING] Rigol #1 capture", text)
 
+    # -------------------------------------------- downsampled scope plots
+    def test_export_is_full_resolution_while_the_plot_is_downsampled(self):
+        """The plot holds two points per pixel column; the export holds all
+        1,000,000 rows; a single-sample spike is in the plotted data; and the
+        plot update time is logged."""
+        import numpy as np
+        from utils.capture_single_worker import CaptureResult
+        from utils.downsample import DISPLAY_BINS, downsample_four
+
+        n = 1_000_000
+        t = np.arange(n) * 1e-9
+        chans = []
+        for k in range(4):
+            v = np.full(n, float(k))
+            if k == 0:
+                v[500_000] = 40.0                       # one sample, 1 ns wide
+            chans.append((t, v))
+        data = CaptureResult(chans, display=downsample_four(chans))   # as the worker emits it
+        self.win.rigol1 = FakeScope()
+
+        self.win.on_four_channel_capture_finished(data, "Rigol #1", 1)
+
+        curve = self.win.scope_window.r1_ch1
+        self.assertLessEqual(len(curve.xData), 2 * DISPLAY_BINS + 2,
+                             "the curve must hold the display copy, not a million points")
+        self.assertGreaterEqual(curve.yData.max(), 40.0, "the spike must be in the plotted data")
+        self.assertIs(self.win.captured_scopes[1], data, "captured_scopes keeps the full data")
+        self.assertEqual(len(self.win.captured_scopes[1][0][1]), n)
+
+        self.win._captures_dirty = True
+        saved, failed = self.win._save_captures_sync()
+        self.assertEqual(failed, [])
+        self.assertIsNone(self.win._verify_csv(saved[0], n), "all 1,000,000 rows must be on disk")
+
+        text = Path(self.dl.gui_log_file).read_text(encoding="utf-8")
+        self.assertRegex(text, r"\[TIMING\] Rigol #1 capture .*plot_setData \d+\.\d{3}s")
+
+    def test_the_capture_worker_attaches_a_display_copy(self):
+        from utils.capture_single_worker import CaptureFourChannelWorker, CaptureResult
+        from utils.downsample import DISPLAY_BINS
+        import numpy as np
+
+        class BigFake(FakeScope):
+            def capture_four_channels(self, *a, **k):
+                self.calls.append("capture_four_channels")
+                t = np.arange(1_000_000) * 1e-9
+                one = (t, np.zeros(1_000_000))
+                return (one, one, one, one)
+
+        got = []
+        worker = CaptureFourChannelWorker(BigFake(), "Rigol #1", timeout=1.0)
+        worker.finished.connect(lambda data, nm: got.append(data))
+        worker.run()                                     # inline, same thread
+
+        self.assertEqual(len(got), 1)
+        data = got[0]
+        self.assertIsInstance(data, CaptureResult)
+        self.assertEqual(len(data), 4, "still unpacks as four (t, v) pairs")
+        self.assertEqual(len(data[0][1]), 1_000_000, "full resolution is what is carried")
+        self.assertLessEqual(len(data.display[0][1]), 2 * DISPLAY_BINS + 2,
+                             "the display copy is the worker's, not the GUI's")
+
     # ------------------------------------------- a Read is not a shot capture
     def _run_read(self, sid=1):
         """Press Read R<sid> and wait for both the read and its export.
