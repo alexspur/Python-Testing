@@ -1692,8 +1692,60 @@ class ScopeDelayMainWindow(QMainWindow):
             strip.addWidget(lbl)
             self._set_capture_state(sid, "idle")
 
+        strip.addSpacing(16)
+        self.btn_session_report = QPushButton("Build Session Report")
+        self.btn_session_report.setToolTip(
+            "Write session_report_<ts>.xlsx from this session's logs. "
+            "It is also written automatically when the window closes.")
+        self.btn_session_report.clicked.connect(self.on_build_session_report)
+        strip.addWidget(self.btn_session_report)
+
         strip.addStretch()
         parent_layout.addLayout(strip)
+
+    def on_build_session_report(self):
+        """Operator-requested report for this session. Synchronous, a few
+        seconds at most, and not part of any fire path."""
+        from PyQt6.QtWidgets import QApplication
+        self.set_status("yellow", "Building session report...")
+        QApplication.processEvents()
+        out = self._build_session_report("button")
+        if out is not None:
+            self.set_status("green", f"Report: {Path(out).name}")
+        else:
+            self.set_status("red", "Session report NOT built - see the log")
+
+    def _build_session_report(self, reason):
+        """Write session_report_<ts>.xlsx from this session's CSV and text
+        logs. Returns the path, or None. Never raises: a report failure must
+        not stop a close, so it is reported and logged instead.
+
+        On close the session logs have already been closed and the report
+        has just read them, so the outcome goes to the console rather than
+        into those files.
+        """
+        say = print if reason == "close" else self.log
+        session_dir = self.data_logger.get_session_dir()
+        t0 = time.monotonic()
+        try:
+            from utils.session_report import build
+            out = build(session_dir)
+        except Exception as e:
+            say(f"[REPORT] NOT built ({reason}): {type(e).__name__}: {e}")
+            if reason != "close":
+                try:
+                    self.data_logger.log_error("Report", f"session report failed: {e}")
+                except Exception:
+                    pass
+            return None
+        say(f"[REPORT] Wrote {Path(out).name} in {time.monotonic() - t0:.1f}s ({reason})")
+        if reason != "close":
+            try:
+                self.data_logger.log_info(
+                    "Report", f"session report written: {Path(out).name}")
+            except Exception:
+                pass
+        return out
 
     def _set_capture_state(self, scope_id: int, state: str, detail: str = ""):
         """Update one scope's capture indicator (idle/armed/capturing/done/error)."""
@@ -2545,6 +2597,41 @@ class ScopeDelayMainWindow(QMainWindow):
             return (False, "no channel displayed")
         return (True, "")
 
+    def _log_channel_stats(self, scope, scope_id, name):
+        """After a capture or Read: one SCOPE_CHANNEL row per channel with
+        its clip counts and preamble, and a CLIP_WARNING in the timeline and
+        the GUI log for any channel with samples on the ADC rails.
+
+        Runs on the GUI thread after the worker has returned, never in the
+        fire path. A scope without per-channel status (an older driver, a
+        stub) logs nothing rather than guessing.
+        """
+        status = getattr(scope, "last_capture_status", None) or {}
+        shot = self._current_shot_number if self._current_shot_number else ''
+        for ch in sorted(status):
+            entry = status[ch] or {}
+            points = entry.get("points", 0)
+            try:
+                self.data_logger.log_scope_channel(
+                    scope_id, ch, points, entry, shot_number=shot)
+            except Exception as e:
+                self.log(f"[{name}] could not log CH{ch} capture stats: {e}")
+            try:
+                clipped = int(entry.get("clipped") or 0)
+            except (TypeError, ValueError):
+                clipped = 0
+            if not clipped:
+                continue
+            self.log(f"[{name}] CLIP WARNING: CH{ch} {clipped} of {points} samples on "
+                     f"the ADC rails (codes {entry.get('code_min')}..{entry.get('code_max')})")
+            try:
+                self.data_logger.log_clip_warning(
+                    scope_id, ch, clipped, points, shot_number=shot,
+                    low=entry.get("clipped_low", 0), high=entry.get("clipped_high", 0),
+                    code_min=entry.get("code_min"), code_max=entry.get("code_max"))
+            except Exception as e:
+                self.log(f"[{name}] could not log CLIP_WARNING for CH{ch}: {e}")
+
     def _finish_pending_capture(self, scope_id):
         """Log SCOPE_ALL once every scope armed by Capture All has finished.
 
@@ -2623,6 +2710,7 @@ class ScopeDelayMainWindow(QMainWindow):
         # all timed out was recorded as a good capture and shown green.
         scope = getattr(self, f"rigol{scope_id}", None)
         ok, why = self._capture_outcome(scope, ch_counts)
+        self._log_channel_stats(scope, scope_id, name)
         if not is_read:
             # A Read must not rewrite the shot's recorded outcome or filename:
             # the shot row names the file the shot wrote, not the one a later
@@ -3556,6 +3644,10 @@ class ScopeDelayMainWindow(QMainWindow):
 
         if hasattr(self, 'data_logger') and self.data_logger:
             self.data_logger.close()
+
+        # The workbook is a derived view of the logs closed just above, so
+        # it is built last. It never raises, so it can never stop the close.
+        self._build_session_report("close")
 
         if hasattr(self, 'laser_frame') and self.laser_frame:
             try:

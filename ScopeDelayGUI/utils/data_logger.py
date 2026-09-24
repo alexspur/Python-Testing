@@ -22,7 +22,11 @@ class DataLogger:
     - DG535_PULSE: DG535 pulse fired (param1=delay, param2=width)
     - BNC575_PULSE: BNC575 pulse fired (param1=mode, notes=settings)
     - BNC575_ARM: BNC575 armed (param1=trigger_level)
-    - SCOPE_CAPTURE: Scope capture (param1=scope_id)
+    - SCOPE_CAPTURE: Scope capture (param1=scope_id, param4=shot number)
+    - SCOPE_EXPORT: one waveform CSV written or not (param2=file, notes OK/FAILED)
+    - SCOPE_CHANNEL: per-channel capture stats and preamble (param2=channel)
+    - CLIP_WARNING: samples on the ADC rails (param2=channel, param3=count)
+    - CONFIG / CONNECT / DISCONNECT / TIMING: device settings, links, capture timing
     - SCOPE_ALL: All scopes captured
     - RELAY_COMMAND / RELAY_STATE: relay switching (param1=name, param2=requested,
       param3=confirmed or UNKNOWN, param4=ok/failed)
@@ -438,6 +442,57 @@ class DataLogger:
             source=f'Rigol{scope_id}',
             param1=scope_id,
             notes=f"Rigol #{scope_id} armed (SINGLE mode)"
+        )
+
+    def log_scope_channel(self, scope_id, channel, points, stats, shot_number=''):
+        """One row per channel per capture, after the read: the outcome, the
+        clip counts and the waveform preamble the volts were scaled with.
+
+        param1 = scope id, param2 = channel, param3 = points read, param4 =
+        shot number. notes is 'key=value; ...' in this order: state, clipped,
+        clipped_low, clipped_high, code_min, code_max, v_min, v_max (the
+        capturable range, ADC rail to rail, from the preamble), then the
+        preamble fields format, xincrement, xorigin, yincrement, yorigin,
+        yreference. A value the driver did not supply is omitted, not invented.
+        """
+        stats = stats or {}
+        pairs = []
+        for key in ("state", "clipped", "clipped_low", "clipped_high",
+                    "code_min", "code_max", "v_min", "v_max"):
+            if stats.get(key) is not None:
+                pairs.append(f"{key}={stats[key]}")
+        preamble = stats.get("preamble") or {}
+        for key in ("format", "xincrement", "xorigin", "yincrement",
+                    "yorigin", "yreference"):
+            if preamble.get(key) is not None:
+                pairs.append(f"{key}={preamble[key]}")
+        self._log_event(
+            event_type='SCOPE_CHANNEL',
+            source=f'Rigol{scope_id}',
+            param1=scope_id,
+            param2=channel,
+            param3=points,
+            param4=shot_number,
+            notes="; ".join(pairs)
+        )
+
+    def log_clip_warning(self, scope_id, channel, clipped, points, shot_number='',
+                         low=0, high=0, code_min=None, code_max=None):
+        """Samples on the ADC rails in one channel of one capture.
+
+        param1 = scope id, param2 = channel, param3 = clipped sample count,
+        param4 = shot number. notes says how many of how many, split by
+        rail, with the raw code range that was seen.
+        """
+        self._log_event(
+            event_type='CLIP_WARNING',
+            source=f'Rigol{scope_id}',
+            param1=scope_id,
+            param2=channel,
+            param3=clipped,
+            param4=shot_number,
+            notes=(f"CH{channel}: {clipped} of {points} samples on the ADC rails "
+                   f"(low rail {low}, high rail {high}, codes {code_min}..{code_max})")
         )
 
     # ================================================================

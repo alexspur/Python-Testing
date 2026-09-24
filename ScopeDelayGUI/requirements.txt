@@ -5,3 +5,4 @@ pyvisa
 numpy
 pandas
 pymodbus>=3.6,<4
+openpyxl

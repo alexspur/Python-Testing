@@ -553,6 +553,10 @@ class TestGuiShotLogging(unittest.TestCase):
         self.dl = self.win.data_logger
         # error_popup is the window's own wrapper around QMessageBox.critical.
         self.win.error_popup = lambda title, text: self.popups.append((title, text))
+        # The session report is built on close, and tested on its own. Every
+        # other test closes without paying for an xlsx; a report test deletes
+        # this instance attribute to get the real method back.
+        self.win._build_session_report = lambda reason=None: None
 
     def _stub_dialogs(self):
         def record(kind, default):
@@ -1238,6 +1242,89 @@ class TestGuiShotLogging(unittest.TestCase):
         self.assertFalse(self.win._auto_save_timer.isActive(),
                          "a failed write must not be retried on the timer")
         self.assertTrue(any("rigol1_x.csv" in x for _t, x in self.popups), self.popups)
+
+    # ------------------------------------------- session report and clipping
+    def _report_path(self):
+        return (Path(self.dl.get_session_dir())
+                / f"session_report_{self.dl.session_timestamp}.xlsx")
+
+    def test_clipped_capture_logs_clip_warning_and_channel_stats(self):
+        """A channel with samples on the ADC rails gets a CLIP_WARNING in the
+        timeline and the GUI log; every channel gets a SCOPE_CHANNEL row with
+        its clip counts, capturable range and preamble, tied to the shot."""
+        import numpy as np
+        pre = {"format": 0, "points": 4, "xincrement": 4e-10, "xorigin": -2e-4,
+               "yincrement": 0.04, "yorigin": 0.0, "yreference": 128.0}
+        scope = FakeScope()
+        scope.last_capture_status = {
+            1: {"state": "ok", "points": 4, "clipped": 3, "clipped_low": 3, "clipped_high": 0,
+                "code_min": 0, "code_max": 200, "v_min": -5.12, "v_max": 5.08, "preamble": pre},
+            2: {"state": "ok", "points": 4, "clipped": 0, "clipped_low": 0, "clipped_high": 0,
+                "code_min": 90, "code_max": 160, "v_min": -5.12, "v_max": 5.08, "preamble": pre},
+        }
+        self.win.rigol1 = scope
+        self._arm_fire_path()
+        self.win.on_bnc_fire()                      # shot 1, so the rows carry it
+        one = (np.array([0.0, 1.0, 2.0, 3.0]), np.array([-5.12, 0.0, 0.0, 0.0]))
+        self.win.on_four_channel_capture_finished((one, one, one, one), "Rigol #1", 1)
+
+        clips = self._events("CLIP_WARNING")
+        self.assertEqual(len(clips), 1)
+        self.assertEqual((clips[0]["param1"], clips[0]["param2"],
+                          clips[0]["param3"], clips[0]["param4"]), ("1", "1", "3", "1"))
+        chans = self._events("SCOPE_CHANNEL", "Rigol1")
+        self.assertEqual([c["param2"] for c in chans], ["1", "2"])
+        self.assertEqual([c["param4"] for c in chans], ["1", "1"])
+        self.assertIn("yincrement=0.04", chans[0]["notes"])
+        self.assertIn("v_min=-5.12", chans[0]["notes"])
+        self.assertIn("clipped=3", chans[0]["notes"])
+        self.assertIn("clipped=0", chans[1]["notes"])
+        gui = self.dl.gui_log_file.read_text(encoding="utf-8")
+        self.assertIn("CLIP WARNING: CH1 3 of 4 samples", gui)
+
+    def test_a_scope_without_channel_status_logs_no_stats(self):
+        """A stubbed or older scope has no per-channel status: nothing is
+        invented, and the capture path still completes."""
+        self.win.rigol1 = FakeScope()
+        self.win.on_four_channel_capture_finished(
+            (([0.0], [0.0]), ([], []), ([], []), ([], [])), "Rigol #1", 1)
+        self.assertEqual(self._events("SCOPE_CHANNEL"), [])
+        self.assertEqual(self._events("CLIP_WARNING"), [])
+
+    def test_close_builds_the_session_report_after_session_end(self):
+        del self.win._build_session_report          # the fixture stubs it
+        self._arm_fire_path()
+        self.win.on_bnc_fire()
+        self.win.close()
+        out = self._report_path()
+        self.assertTrue(out.exists(), "closeEvent must write the session report")
+        from openpyxl import load_workbook
+        wb = load_workbook(out)
+        self.assertIn("Scope Settings", wb.sheetnames)
+        self.assertEqual(wb["Shots"]["B1"].value, "Shot 1")
+        # Built after the logs were closed, so SESSION_END is in it.
+        events = [r[2] for r in wb["Events"].iter_rows(min_row=2, values_only=True)]
+        self.assertIn("SESSION_END", events)
+
+    def test_report_failure_does_not_stop_the_close(self):
+        import utils.session_report as sr
+        del self.win._build_session_report
+        with patch.object(sr, "build", side_effect=RuntimeError("no disk")):
+            self.assertTrue(self.win.close(), "close must proceed when the report fails")
+        self.assertFalse(self._report_path().exists())
+        self.assertIn("SESSION_END", event_types(self.dl.get_log_file_path()))
+
+    def test_build_session_report_button_writes_the_file_and_logs(self):
+        del self.win._build_session_report
+        self.win.btn_session_report.click()
+        self.assertTrue(self._report_path().exists())
+        gui = self.dl.gui_log_file.read_text(encoding="utf-8")
+        self.assertIn("[REPORT] Wrote session_report_", gui)
+        self.assertTrue(self._events("INFO", "Report"))
+        # Logs stay byte-for-byte what the GUI wrote; the workbook is derived.
+        before = self.dl.log_file.read_bytes()
+        self.win.btn_session_report.click()
+        self.assertTrue(self.dl.log_file.read_bytes().startswith(before))
 
     # ------------------------------------ CONFIG, CONNECT and the settings row
     def _events(self, event_type, source=None):
