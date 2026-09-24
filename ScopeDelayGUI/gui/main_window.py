@@ -34,7 +34,7 @@ from utils.system_state import (
 )
 from utils.shot_logger import ShotLogger
 from utils.shot_snapshot import (
-    build_shot_row, channel_name, resolve_absolute_delays,
+    build_shot_row, channel_name, fmt_us, resolve_absolute_delays,
 )
 
 from serial.tools import list_ports
@@ -309,6 +309,9 @@ class ScopeDelayMainWindow(QMainWindow):
         self._read_counts = {}
         self._read_workers = []
         self._read_export_points = {}
+        # Monotonic 'begin' stamp of each scope's last capture, so the export
+        # completion can be placed on the same timeline as the worker's stamps.
+        self._capture_t0 = {}
 
         # Laser prep is consumed by a shot. In EXT/EXT the laser stays
         # physically armed after firing - the DG535 drives it every shot - so
@@ -374,6 +377,7 @@ class ScopeDelayMainWindow(QMainWindow):
         self.pressure_worker.request_disconnect.emit()
         self.sf6_window.sf6_panel.set_link_state("down")
         self.log("[Opta] Disconnected")
+        self.data_logger.log_disconnect("Opta")
 
     def _invalidate_pressure(self):
         """Forget the last reading so nothing (interlock, logs) trusts it."""
@@ -386,7 +390,10 @@ class ScopeDelayMainWindow(QMainWindow):
         self.sf6_window.sf6_panel.set_link_state("up")
         self.set_status("green", "Opta pressure connected")
         self.log(f"[Opta] Connected to {where}")
-        self.data_logger.log_info("Opta", f"connected to {where}")
+        # The worker's link-up signal is the confirmation for BOTH the
+        # auto-connect and the manual Connect button, so this is the one
+        # place the Opta CONNECT row belongs.
+        self.data_logger.log_connect("Opta", where)
 
     def _on_pressure_link_lost(self, reason):
         self._opta_link_up = False
@@ -441,6 +448,7 @@ class ScopeDelayMainWindow(QMainWindow):
                    f"averaging {cal['avg_samples']}")
         self.log(f"[Opta] Calibration loaded: {summary}")
         self.data_logger.log_info("Opta", f"calibration {summary}")
+        self.data_logger.log_config("Opta", "calibration", dict(cal))
 
     def _on_pressure_calibration_mismatch(self, detail: str):
         """The Opta did not report back what was just written to it.
@@ -751,6 +759,7 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.dg.connect(port=port, gpib_addr=15)
                 save_memory("DG535_COM", port)
                 self.log(f"[DG535] Connected on {port}")
+                self.data_logger.log_connect("DG535", port)
                 self.dg_panel.lamp.set_status("green", "Connected")
                 self._dg_read_all_settings()
                 self.dg_panel.set_status(f"Connected on {port}")
@@ -770,6 +779,7 @@ class ScopeDelayMainWindow(QMainWindow):
                 save_memory("BNC575_COM", port)
                 idn = self.bnc.identify()
                 self.log(f"[BNC575] Connected on {port}: {idn}")
+                self.data_logger.log_connect("BNC575", port, idn)
                 self.bnc_panel.lamp.set_status("green", "Connected")
                 self.bnc_panel.set_connected(True, idn)
 
@@ -800,6 +810,7 @@ class ScopeDelayMainWindow(QMainWindow):
                     self.numato_relay.connect(relay_port)
                     self.relay_panel.set_connected(True, relay_port)
                     self.log(f"[Relay] Connected on {relay_port}")
+                    self.data_logger.log_connect("Relay", relay_port)
             except Exception as e:
                 self.log(f"[Relay] NOT CONNECTED: {e}")
                 self.relay_panel.set_connected(False)
@@ -829,6 +840,7 @@ class ScopeDelayMainWindow(QMainWindow):
                 claimed_ports.add(port)
                 row.lamp.set_status("green", "Connected")
                 self.log(f"[WJ{i+1}] Connected on {port}, firmware {fw}")
+                self.data_logger.log_connect(f"WJ{i+1}", port, f"firmware {fw}")
             except Exception as e:
                 row.lamp.set_status("red", "Not Connected")
                 self.log(f"[WJ{i+1}] NOT CONNECTED: {e}")
@@ -859,6 +871,9 @@ class ScopeDelayMainWindow(QMainWindow):
                 # SCOPE_TRANSPORT and must not be pinned by an old run.
 
                 self.log(f"[AutoConnect] {key} CONNECTED → {idn}")
+                sid = int(key[5])                       # "Rigol1_VISA" -> 1
+                self.data_logger.log_connect(f"Rigol{sid}", scope.resource_name, idn)
+                self._read_scope_settings(scope, sid, when="connect")
                 if key == "Rigol1_VISA":
                     self.rigol_panel.lamp_r1.set_status("green", "Connected")
                 elif key == "Rigol2_VISA":
@@ -885,6 +900,7 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.laser_panel.port_edit.setText(laser_port)
                 if self.laser_panel.connect_to(laser_port):
                     self.log(f"[Laser1] Connected on {laser_port}")
+                    self.data_logger.log_connect("Laser1", laser_port)
                 else:
                     self.log(f"[Laser1] NOT CONNECTED on {laser_port}")
             except Exception as e:
@@ -895,6 +911,7 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.laser_panel2.port_edit.setText(laser2_port)
                 if self.laser_panel2.connect_to(laser2_port):
                     self.log(f"[Laser2] Connected on {laser2_port}")
+                    self.data_logger.log_connect("Laser2", laser2_port)
                 else:
                     self.log(f"[Laser2] NOT CONNECTED on {laser2_port}")
             except Exception as e:
@@ -969,6 +986,13 @@ class ScopeDelayMainWindow(QMainWindow):
             }, source=SOURCE_READBACK)
 
             self.log("[BNC575] Read all settings from device")
+            flat = {"period_s": UNKNOWN if period is None else period,
+                    "system_mode": mode.value if mode else UNKNOWN,
+                    "trigger_mode": trigger_mode}
+            for ch, entry in channels.items():
+                for k, v in entry.items():
+                    flat[f"{ch}_{k}"] = v
+            self.data_logger.log_config("BNC575", "all", flat)
         except Exception as e:
             self.log(f"[BNC575] Error reading settings: {e}")
 
@@ -1027,6 +1051,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self.numato_relay.connect(port)
             relay_panel.set_connected(True, port)
             self.log(f"[Relay] Connected to {port}")
+            self.data_logger.log_connect("Relay", port)
             # The module reports no relay states, and this GUI has issued no
             # commands yet, so the physical state is genuinely unknown.
             self.system_state.update(
@@ -1054,6 +1079,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self.numato_relay.close()
             relay_panel.set_connected(False)
             self.log("[Relay] Disconnected")
+            self.data_logger.log_disconnect("Relay")
 
         except Exception as e:
             self.log(f"[Relay ERROR] {e}")
@@ -1328,6 +1354,54 @@ class ScopeDelayMainWindow(QMainWindow):
         self.set_status("green", "Exporting...")
         self.log(f"[EXPORT] Exporting {self._export_pending} scope file(s) to {session_dir} ...")
 
+    def _log_capture_timing(self, scope_id, name, t_handler, plot_s, kind):
+        """One TIMING line per scope from the worker's own stamps.
+
+        Every offset is from the worker's 'begin' stamp, on time.monotonic(),
+        the same clock as t_handler, so 'handler' minus 'capture_end' is how
+        long this result sat in the GUI's queue - the number that says
+        whether the scopes are serialized by the GUI thread rather than by
+        the transfer.
+        """
+        scope = getattr(self, f"rigol{scope_id}", None)
+        stamps = list(getattr(scope, "timing", None) or [])
+        if not stamps:
+            return
+        t0 = stamps[0]["t"]
+
+        def at(event):
+            for s in stamps:
+                if s["event"] == event:
+                    return s["t"] - t0
+            return None
+
+        def fmt(v):
+            return "-" if v is None else f"+{v:.3f}s"
+
+        tids = sorted({s["tid"] for s in stamps})
+        parts = [f"tid={'/'.join(str(t) for t in tids)}",
+                 f"arm {fmt(at('arm'))}", f"trigger_seen {fmt(at('trigger_seen'))}",
+                 f"capture_start {fmt(at('capture_start'))}"]
+        for ch in (1, 2, 3, 4):
+            w, a, r = at(f"ch{ch}:lock_wait"), at(f"ch{ch}:lock_acquired"), at(f"ch{ch}:lock_released")
+            rs, re_ = at(f"ch{ch}:read_start"), at(f"ch{ch}:read_end")
+            if a is None or r is None:
+                continue
+            parts.append(f"ch{ch} lock_wait {a - w:.3f}s read {fmt(rs)}..{fmt(re_)} "
+                         f"hold {r - a:.3f}s")
+        ce = at("capture_end")
+        parts.append(f"capture_end {fmt(ce)}")
+        h = t_handler - t0
+        parts.append(f"handler +{h:.3f}s" + (f" (queued {h - ce:.3f}s)" if ce is not None else ""))
+        parts.append(f"plot_setData {plot_s:.3f}s")
+        line = f"{kind} " + " | ".join(parts)
+
+        self._capture_t0[scope_id] = t0
+        self.log(f"[TIMING] {name} {line}")
+        self.data_logger.log_timing(
+            f"Rigol{scope_id}", line,
+            shot_number=self._current_shot_number if self._current_shot_number else '')
+
     def _start_read_export(self, scope_id, data):
         """Write one Read to its own rigol<N>_<ts>_read<NN>.csv.
 
@@ -1397,6 +1471,9 @@ class ScopeDelayMainWindow(QMainWindow):
         # Durable proof the file was written, so the report can tell a shot
         # row that merely NAMES a waveform file from one that has it.
         sid = self._scope_id_for_file(filename)
+        t0 = self._capture_t0.get(sid)
+        if t0 is not None:
+            self.log(f"[TIMING] Rigol #{sid} export_done +{time.monotonic() - t0:.3f}s")
         try:
             self.data_logger.log_scope_export(
                 sid, Path(filename).name,
@@ -1873,6 +1950,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self.log("[DG535] Connected.")
             self.dg_panel.lamp.set_status("green", "Connected")
             self.dg_panel.set_status(f"Connected on {port}")
+            self.data_logger.log_connect("DG535", port)
             self._dg_read_all_settings()
         except Exception as e:
             self.set_status("red", "DG535 connection failed")
@@ -2031,6 +2109,7 @@ class ScopeDelayMainWindow(QMainWindow):
         self.dg_panel.lamp.set_status("red", "Disconnected")
         self.dg_panel.set_status("Not connected")
         self.log("[DG535] Disconnected")
+        self.data_logger.log_disconnect("DG535")
 
 
     # ------------------------------------------------------------------
@@ -2049,6 +2128,7 @@ class ScopeDelayMainWindow(QMainWindow):
 
             self.set_status("green", "BNC575 connected")
             self.log(f"[BNC575] Connected: {idn}")
+            self.data_logger.log_connect("BNC575", port, idn)
             self.bnc_panel.lamp.set_status("green", "Connected")
             self.bnc_panel.set_connected(True, idn)
 
@@ -2070,6 +2150,7 @@ class ScopeDelayMainWindow(QMainWindow):
         self.bnc_panel.lamp.set_status("red", "Disconnected")
         self.bnc_panel.set_connected(False)
         self.log("[BNC575] Disconnected")
+        self.data_logger.log_disconnect("BNC575")
         self.bnc_connected = False
 
     def on_bnc_apply(self):
@@ -2251,6 +2332,8 @@ class ScopeDelayMainWindow(QMainWindow):
 
             self.set_status("green", "Rigol #1 connected")
             self.log(f"[Rigol1] {idn}")
+            self.data_logger.log_connect("Rigol1", self.rigol1.resource_name, idn)
+            self._read_scope_settings(self.rigol1, 1, when="connect")
             self.rigol_panel.lamp_r1.set_status("green", "Connected")
         except Exception as e:
             self.rigol1_connected = False
@@ -2267,6 +2350,8 @@ class ScopeDelayMainWindow(QMainWindow):
             self.rigol2_connected = True
             self.set_status("green", "Rigol #2 connected")
             self.log(f"[Rigol2] {idn}")
+            self.data_logger.log_connect("Rigol2", self.rigol2.resource_name, idn)
+            self._read_scope_settings(self.rigol2, 2, when="connect")
             self.rigol_panel.lamp_r2.set_status("green", "Connected")
         except Exception as e:
             self.rigol2_connected = False
@@ -2283,6 +2368,8 @@ class ScopeDelayMainWindow(QMainWindow):
             self.rigol3_connected = True
             self.set_status("green", "Rigol #3 connected")
             self.log(f"[Rigol3] {idn}")
+            self.data_logger.log_connect("Rigol3", self.rigol3.resource_name, idn)
+            self._read_scope_settings(self.rigol3, 3, when="connect")
             self.rigol_panel.lamp_r3.set_status("green", "Connected")
         except Exception as e:
             self.rigol3_connected = False
@@ -2467,6 +2554,7 @@ class ScopeDelayMainWindow(QMainWindow):
         and rewrite all three of that shot's rigol<N>_<session ts>.csv files
         with the re-read data.
         """
+        t_handler = time.monotonic()        # when the GUI actually got to this
         is_read = scope_id in self._read_only_scopes
         self._stop_capture_countdown(scope_id)
         (t1, v1), (t2, v2), (t3, v3), (t4, v4) = data
@@ -2476,13 +2564,19 @@ class ScopeDelayMainWindow(QMainWindow):
             self.captured_scopes[scope_id] = data
             self._mark_captures_dirty()
 
-        # Update the appropriate plot
+        # Update the appropriate plot. Timed: this is the synchronous setData
+        # cost only. The repaint it schedules runs after this handler returns
+        # and shows up as the NEXT scope's handler delay, not here.
+        t_plot = time.monotonic()
         if scope_id == 1:
             self.scope_window.update_r1(t1, v1, t2, v2, t3, v3, t4, v4)
         elif scope_id == 2:
             self.scope_window.update_r2(t1, v1, t2, v2, t3, v3, t4, v4)
         elif scope_id == 3:
             self.scope_window.update_r3(t1, v1, t2, v2, t3, v3, t4, v4)
+        plot_s = time.monotonic() - t_plot
+        self._log_capture_timing(scope_id, name, t_handler, plot_s,
+                                 "read" if is_read else "capture")
 
         # Log capture (count non-empty channels). A capture that finishes
         # after the shot row was written is tied to the shot by this event's
@@ -2536,6 +2630,7 @@ class ScopeDelayMainWindow(QMainWindow):
             pass
         self.rigol_panel.lamp_r1.set_status("red", "Disconnected")
         self.log("[Rigol1] Disconnected")
+        self.data_logger.log_disconnect("Rigol1")
         self.rigol1_connected = False
 
     def on_r2_disconnect(self):
@@ -2545,6 +2640,7 @@ class ScopeDelayMainWindow(QMainWindow):
             pass
         self.rigol_panel.lamp_r2.set_status("red", "Disconnected")
         self.log("[Rigol2] Disconnected")
+        self.data_logger.log_disconnect("Rigol2")
         self.rigol2_connected = False
 
     def on_r3_disconnect(self):
@@ -2554,6 +2650,7 @@ class ScopeDelayMainWindow(QMainWindow):
             pass
         self.rigol_panel.lamp_r3.set_status("red", "Disconnected")
         self.log("[Rigol3] Disconnected")
+        self.data_logger.log_disconnect("Rigol3")
         self.rigol3_connected = False
 
 
@@ -2569,6 +2666,41 @@ class ScopeDelayMainWindow(QMainWindow):
         self.error_popup(f"{name} Capture Error", msg)
         self.log(f"[{name} ERROR] {msg}")
 
+
+    def _read_scope_settings(self, scope, scope_id, when):
+        """Query-only settings read into the state and the timeline.
+
+        Never blocks a connect or an arm: a failure costs the settings for
+        this shot (row source UNKNOWN, an ERROR event) and nothing else.
+        """
+        getter = getattr(scope, "get_settings", None)
+        if getter is None:
+            return None
+        try:
+            settings = getter()
+        except Exception as e:
+            self.log(f"[Rigol #{scope_id}] settings read failed at {when}: {e}")
+            self.data_logger.log_error(f"Rigol{scope_id}", f"settings read failed at {when}: {e}")
+            self.system_state.update(f"rigol{scope_id}", {"settings": {}}, source=SOURCE_READBACK)
+            return None
+
+        self.system_state.update(f"rigol{scope_id}", {"settings": settings},
+                                 source=SOURCE_READBACK)
+        scope_part = settings.get("scope") or {}
+        channels = settings.get("channels") or {}
+        count = len(scope_part) + sum(len(c) for c in channels.values())
+        self.log(f"[Rigol #{scope_id}] settings read at {when}: {count} values "
+                 f"in {settings.get('read_seconds', 0.0):.3f} s")
+        unsupported = settings.get("unsupported") or []
+        if unsupported:
+            # Those keys are UNKNOWN in the row and the CONFIG rows, and the
+            # driver will not ask for them again on this scope this session.
+            self.log(f"[Rigol #{scope_id}] not answered by this firmware, skipped "
+                     f"from now on: {', '.join(unsupported)}")
+        self.data_logger.log_config(f"Rigol{scope_id}", f"scope@{when}", scope_part)
+        for ch in sorted(channels, key=int):
+            self.data_logger.log_config(f"Rigol{scope_id}", f"channel{ch}@{when}", channels[ch])
+        return settings
 
     def on_capture_all_scopes(self):
         """Arm all three scopes for the next shot. Arming only.
@@ -2604,6 +2736,11 @@ class ScopeDelayMainWindow(QMainWindow):
                 scope.stop()
                 scope.single()
                 self.data_logger.log_scope_arm(scope_id)
+                # The settings this shot will be captured with, read while the
+                # scope sits armed. Query-only; the worker re-sends :SINGle
+                # before it waits, so a trigger that lands during this read
+                # would be discarded - that window is the read time below.
+                self._read_scope_settings(scope, scope_id, when="arm")
                 # Starts the background worker and marks the scope armed.
                 self.start_four_channel_capture(
                     scope, f"Rigol #{scope_id}", scope_id)
@@ -2785,6 +2922,7 @@ class ScopeDelayMainWindow(QMainWindow):
             save_memory(f"WJ{index+1}_COM", port)
             row.lamp.set_status("green", "Connected")
             self.log(f"[WJ{index+1}] Connected on {port}, firmware {fw}")
+            self.data_logger.log_connect(f"WJ{index+1}", port, f"firmware {fw}")
         except Exception as e:
             self.log(f"[WJ{index+1} ERROR] {e}")
             row.lamp.set_status("red", "Error")
@@ -2853,6 +2991,8 @@ class ScopeDelayMainWindow(QMainWindow):
             try:
                 resp = wj.set_program(kv, ma)
                 self.data_logger.log_wj_command(i+1, "SET_PROGRAM", f"{kv}kV_{ma}mA")
+                self.data_logger.log_config(f"WJ{i+1}", "program",
+                                            {"kv": kv, "ma": ma}, origin="commanded")
                 self.log(f"[WJ{i+1}] Set → {kv} kV, {ma} mA ({resp})")
             except Exception as e:
                 self.log(f"[WJ{i+1} ERROR] {e}")
@@ -2867,6 +3007,7 @@ class ScopeDelayMainWindow(QMainWindow):
 
         self.wj_panel.rows[index].lamp.set_status("red", "Disconnected")
         self.log(f"[WJ{index+1}] Disconnected")
+        self.data_logger.log_disconnect(f"WJ{index+1}")
 
 
     # ------------------------------------------------------------------
@@ -3032,6 +3173,11 @@ class ScopeDelayMainWindow(QMainWindow):
                 "trigger_mode": mode_name,
             }, source=SOURCE_READBACK)
             self._dg_last_readback = {n: dict(c) for n, c in channels.items()}
+            flat = {"trigger_mode": mode_name}
+            for n, c in channels.items():
+                flat[f"{n}_delay_us"] = fmt_us(c.get("delay_s"))
+                flat[f"{n}_ref"] = channel_name(c.get("ref")) or ""
+            self.data_logger.log_config("DG535_laser", "channels", flat)
 
             # Fill the panel with what the instrument actually holds, and let
             # Apply compare against it.
@@ -3070,6 +3216,13 @@ class ScopeDelayMainWindow(QMainWindow):
                   if k in payload}
         if event == "ARM":
             values.setdefault("armed", True)
+            # The mode the laser was prepped in is a setting worth a CONFIG
+            # row of its own; the LASER_ARM event carries the state string.
+            try:
+                self.data_logger.log_config(
+                    tag, "mode", {"mode": values.get("mode", ""), "state": values.get("state", "")})
+            except Exception:
+                pass
         elif event == "DISARM":
             values["armed"] = False
         try:

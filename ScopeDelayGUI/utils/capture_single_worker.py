@@ -264,6 +264,12 @@ class CaptureFourChannelWorker(QThread):
     def run(self):
         """Execute the 4-channel capture operation (trigger + full memory)."""
         try:
+            # A fresh stamp list for this capture, written on THIS thread, so
+            # the GUI can later tell arm, trigger and transfer times apart
+            # from when its own handler ran.
+            begin = getattr(self.scope, "timing_begin", None)
+            if begin is not None:
+                begin()
             # Wait for trigger and capture all four channels with full memory depth
             data = self.scope.wait_and_capture_four(
                 ch1=1, ch2=2, ch3=3, ch4=4, timeout=self.timeout
@@ -306,6 +312,9 @@ class ImmediateFourChannelWorker(QThread):
         try:
             # Capture all four channels with full memory depth (no trigger wait)
             # Scope is automatically stopped during capture
+            begin = getattr(self.scope, "timing_begin", None)
+            if begin is not None:
+                begin()
             data = self.scope.capture_four_channels()
             self.finished.emit(data, self.scope_name)
             

@@ -37,6 +37,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from utils.shot_snapshot import rigol_setting_columns
+
 COUNTER_FILENAME = "shot_counter.json"
 LOCK_FILENAME = "shot_counter.lock"
 MASTER_FILENAME = "shot_log_master.csv"
@@ -204,6 +206,12 @@ SHOT_COLUMNS = (
         "rigol3_capture_ok",
         "rigol3_file",
         "rigol3_file_written",
+    ]
+    # --- Rigol settings read back at arm time (query-only, per channel) ---
+    + rigol_setting_columns(1)
+    + rigol_setting_columns(2)
+    + rigol_setting_columns(3)
+    + [
         "gui_version",
         "notes",
     ]

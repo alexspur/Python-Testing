@@ -472,6 +472,51 @@ class DataLogger:
         )
 
     # ================================================================
+    # Device configuration, links and timing
+    # ================================================================
+    def log_config(self, source, group, settings, origin='readback'):
+        """One CONFIG row per settings group, e.g. ('Rigol1', 'channel2', {...}).
+
+        notes is 'key=value; key=value' in key order, so a device's whole
+        configuration reads straight off the timeline. param2 records
+        whether it was read back from the instrument or commanded by us.
+        """
+        rendered = "; ".join(f"{k}={settings[k]}" for k in sorted(settings, key=str))
+        self._log_event(
+            event_type='CONFIG',
+            source=source,
+            param1=group,
+            param2=origin,
+            notes=rendered
+        )
+
+    def log_connect(self, source, target, idn=''):
+        """A device link came up. param1 = port or VISA resource, notes = *IDN?."""
+        self._log_event(
+            event_type='CONNECT',
+            source=source,
+            param1=target,
+            notes=idn
+        )
+
+    def log_disconnect(self, source, reason=''):
+        """A device link went down, by request or by failure."""
+        self._log_event(
+            event_type='DISCONNECT',
+            source=source,
+            notes=reason
+        )
+
+    def log_timing(self, source, summary, shot_number=''):
+        """Per-scope capture timing, stamped inside the worker. param4 = shot."""
+        self._log_event(
+            event_type='TIMING',
+            source=source,
+            param4=shot_number,
+            notes=summary
+        )
+
+    # ================================================================
     # File Management
     # ================================================================
     def get_log_file_path(self):

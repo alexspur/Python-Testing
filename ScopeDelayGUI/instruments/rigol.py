@@ -12,6 +12,7 @@ import numpy as np
 import re
 import threading
 import time
+from contextlib import contextmanager
 
 
 # Matches utils.system_state.UNKNOWN. Kept as a local constant so the
@@ -149,6 +150,49 @@ class RigolScope:
         # session to these three and can write :ACQuire:MDEPth. Running that
         # during a shot is unsafe, lock or no lock.
         self._lock = threading.RLock()
+        # Timing stamps for the capture in progress: [{t, tid, event, ...}].
+        # Written by whichever thread does the work - the capture worker, or
+        # the GUI thread for an arm-time settings read - and read by the GUI
+        # once the worker has finished. This is what says what a scope waited
+        # on (the trigger, its lock, or the transfer) rather than only when
+        # the GUI's own completion handler happened to run.
+        self.timing = []
+        # Settings keys this scope has failed to answer. On a raw socket an
+        # unsupported query gets no reply at all, so every attempt costs the
+        # full timeout: R2's firmware (01.01.02.00.06) does not answer
+        # :CHANnel<n>:LABel?, and asking it four times per read at the 30 s
+        # capture timeout froze the GUI for two minutes at connect.
+        self._unsupported = set()
+
+    def timing_begin(self):
+        """Start a fresh stamp list for one capture. Called by the worker."""
+        self.timing = []
+        self._stamp("begin")
+
+    def _stamp(self, event, **detail):
+        """Record when something happened and on which thread."""
+        if not hasattr(self, "timing"):
+            self.timing = []
+        entry = {"t": time.monotonic(), "tid": threading.get_ident(), "event": event}
+        entry.update(detail)
+        self.timing.append(entry)
+
+    @contextmanager
+    def _transaction(self, label):
+        """Hold the lock for one transaction, stamping the wait and the hold.
+
+        The lock is per scope object, so three workers on three scopes can
+        never contend on it. A long wait here means a Read or a settings read
+        on the SAME scope got in first.
+        """
+        self._stamp(f"{label}:lock_wait")
+        self._lock.acquire()
+        try:
+            self._stamp(f"{label}:lock_acquired")
+            yield
+        finally:
+            self._lock.release()
+            self._stamp(f"{label}:lock_released")
 
     def _report(self, message: str, channel: int = None):
         """Surface a driver-level problem through the GUI logger if wired."""
@@ -247,18 +291,6 @@ class RigolScope:
         with self._lock:
             return self.instr.query(cmd).strip()
 
-    def _safe_query(self, cmd: str) -> str:
-        """Query that records UNKNOWN instead of raising.
-
-        A settings read must never stop a connect or an arm, so one dead
-        query costs that one value and nothing else.
-        """
-        try:
-            return self._query(cmd)
-        except Exception as e:
-            self._report(f"{cmd} failed: {e}")
-            return UNKNOWN
-        
     def _query_binary(self, cmd: str) -> bytes:
         """Send a query and read one TMC block by its declared length.
 
@@ -367,31 +399,67 @@ class RigolScope:
 
         A failed query records UNKNOWN and the pass continues.
         """
-        out = {"scope": {}, "channels": {}, "read_seconds": 0.0}
+        out = {"scope": {}, "channels": {}, "read_seconds": 0.0, "unsupported": []}
         started = time.monotonic()
-        with self._lock:
-            for name, cmd in SCOPE_QUERIES.items():
-                out["scope"][name] = self._safe_query(cmd)
+        with self._transaction("settings"):
+            # A settings query answers in milliseconds or never. The capture
+            # timeout (30 s, for 1M-point transfers) is the wrong scale here:
+            # one key this firmware does not have would freeze the GUI for it.
+            saved_timeout = getattr(self.instr, "timeout", None)
+            try:
+                self.instr.timeout = self.SETTINGS_QUERY_TIMEOUT_MS
+                for name, cmd in SCOPE_QUERIES.items():
+                    out["scope"][name] = self._settings_query(name, cmd)
 
-            # *IDN? is vendor,model,serial,firmware - same split compare_scopes
-            # uses. Parsed here so nobody has to re-parse it downstream.
-            idn = out["scope"].get("idn") or ""
-            parts = [p.strip() for p in idn.split(",")]
-            out["scope"]["model"] = parts[1] if len(parts) > 1 else UNKNOWN
-            out["scope"]["serial"] = parts[2] if len(parts) > 2 else UNKNOWN
-            out["scope"]["firmware"] = parts[3] if len(parts) > 3 else UNKNOWN
+                # *IDN? is vendor,model,serial,firmware - same split
+                # compare_scopes uses. Parsed here so nobody has to re-parse
+                # it downstream.
+                idn = out["scope"].get("idn") or ""
+                parts = [p.strip() for p in idn.split(",")]
+                out["scope"]["model"] = parts[1] if len(parts) > 1 else UNKNOWN
+                out["scope"]["serial"] = parts[2] if len(parts) > 2 else UNKNOWN
+                out["scope"]["firmware"] = parts[3] if len(parts) > 3 else UNKNOWN
 
-            for ch in channels:
-                out["channels"][ch] = {
-                    name: self._safe_query(tmpl.format(ch=ch))
-                    for name, tmpl in CHANNEL_QUERIES.items()
-                }
+                for ch in channels:
+                    out["channels"][ch] = {
+                        name: self._settings_query(name, tmpl.format(ch=ch))
+                        for name, tmpl in CHANNEL_QUERIES.items()
+                    }
+            finally:
+                if saved_timeout is not None:
+                    self.instr.timeout = saved_timeout
         out["read_seconds"] = time.monotonic() - started
+        out["unsupported"] = sorted(self._unsupported)
         return out
+
+    # Per-query timeout for settings reads. R1 answers all 60 in ~0.5 s, so
+    # ~8 ms each; 2 s is a wide margin and still 15x cheaper than the capture
+    # timeout when a key is simply not there.
+    SETTINGS_QUERY_TIMEOUT_MS = 2000
+
+    def _settings_query(self, name, cmd):
+        """One settings query, by key name.
+
+        A key this scope has not answered is never asked again this session,
+        on any channel: a firmware that lacks :CHANnel1:LABel? lacks it for
+        every channel, and each ask costs the full timeout. Reported once.
+        """
+        if not hasattr(self, "_unsupported"):
+            self._unsupported = set()
+        if name in self._unsupported:
+            return UNKNOWN
+        try:
+            return self._query(cmd)
+        except Exception as e:
+            self._unsupported.add(name)
+            self._report(f"{cmd} failed: {e}; '{name}' will not be asked "
+                         f"again on this scope this session")
+            return UNKNOWN
         
     def single(self):
         """Set oscilloscope to single trigger mode and arm."""
         self._write(':SINGle')
+        self._stamp("arm")
         
     def stop(self):
         """Stop acquisition."""
@@ -470,15 +538,18 @@ class RigolScope:
         # with the lock free, so a settings read or a disconnect can get in
         # between polls instead of waiting out the whole trigger wait - which
         # can be 30 minutes.
+        self._stamp("wait_start")
         while (time.time() - start_time) < timeout:
             status = self.get_trigger_status()
 
             # STOP or TD means acquisition is complete and ready to read
             if status in ('STOP', 'TD'):
+                self._stamp("trigger_seen", status=status)
                 return True
 
             time.sleep(poll_interval)
 
+        self._stamp("wait_timeout")
         return False
         
     def _stash_channel_stats(self, channel, codes, preamble):
@@ -556,7 +627,7 @@ class RigolScope:
         # One channel's read is a single transaction: source, mode, format,
         # preamble and data belong together, or another caller could change
         # :WAVeform:SOURce between them and this would return that channel.
-        with self._lock:
+        with self._transaction(f"ch{channel}"):
             # Set waveform source to the specified channel
             self._write(f':WAVeform:SOURce CHANnel{channel}')
 
@@ -639,7 +710,8 @@ class RigolScope:
         # anything else changed :WAVeform:SOURce partway through, the later
         # chunks would come from a different channel and be concatenated onto
         # this one's samples without any error.
-        with self._lock:
+        with self._transaction(f"ch{channel}"):
+            self._stamp(f"ch{channel}:read_start")
             # Set waveform source, RAW mode (internal memory), BYTE format.
             self._write(f':WAVeform:SOURce CHANnel{channel}')
             self._write(':WAVeform:MODE RAW')
@@ -649,6 +721,7 @@ class RigolScope:
             total = self._get_memory_depth()
             if total <= 0:
                 self._stash_channel_stats(channel, None, None)
+                self._stamp(f"ch{channel}:read_end", points=0)
                 return np.array([]), np.array([])
 
             # Read the scaling preamble once (yinc/xinc are constant across chunks).
@@ -692,6 +765,7 @@ class RigolScope:
             xorig = preamble['xorigin']
             time_array = xorig + np.arange(len(voltage)) * xinc
 
+            self._stamp(f"ch{channel}:read_end", points=int(len(voltage)))
             return time_array, voltage
         
     def capture_two_channels(self, ch1: int = 1, ch2: int = 2) -> tuple:
@@ -797,6 +871,7 @@ class RigolScope:
         """
         # Stop acquisition to ensure data is stable for RAW mode reading
         self.stop()
+        self._stamp("capture_start")
 
         try:
             expected = self._get_memory_depth()
@@ -848,7 +923,9 @@ class RigolScope:
             entry.update(stats)
 
         self.last_capture_status = status
+        self._stamp("capture_end")
         return tuple(results)
+
     def capture_channels(self, channels: list = None) -> tuple:
         """
         Capture full memory waveform data from specified channels.

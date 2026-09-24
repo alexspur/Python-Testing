@@ -116,12 +116,27 @@ class FakeDG:
 class FakeScope:
     """Stands in for RigolScope so no VISA session is ever opened."""
 
-    def __init__(self, resource_name=None):
+    def __init__(self, resource_name=None, settings=None):
         self.resource_name = resource_name
         self.calls = []
+        self.timing = []
+        self._channel_overrides = dict(settings or {})
 
     def connect(self, *a, **k):
         raise RuntimeError("FakeScope never connects in tests")
+
+    def get_settings(self, channels=(1, 2, 3, 4)):
+        """Canned settings in the driver's exact shape. `settings` passed to
+        the constructor overrides per-channel values (e.g. probe_ratio)."""
+        from utils.shot_snapshot import (RIGOL_SCOPE_SETTING_KEYS,
+                                         RIGOL_CHANNEL_SETTING_KEYS)
+        self.calls.append("get_settings")
+        scope = {k: "0" for k in RIGOL_SCOPE_SETTING_KEYS}
+        scope.update({"model": "DS7054", "serial": "FAKE", "firmware": "00.01",
+                      "memory_depth": "1M"})
+        chans = {ch: dict({k: "0" for k in RIGOL_CHANNEL_SETTING_KEYS},
+                          **self._channel_overrides) for ch in channels}
+        return {"scope": scope, "channels": chans, "read_seconds": 0.012}
 
     def disconnect(self):
         pass
@@ -849,7 +864,10 @@ class TestGuiShotLogging(unittest.TestCase):
         self.win.on_capture_all_scopes()
 
         self.assertEqual(dg.calls, [], "Capture All must not touch the DG535")
-        self.assertEqual(scope.calls, ["stop", "single"], "it only arms the scope")
+        self.assertEqual(scope.calls[:2], ["stop", "single"], "it arms the scope first")
+        # The arm-time settings read is query-only; nothing else may be sent.
+        self.assertEqual([c for c in scope.calls if c not in ("stop", "single", "get_settings")],
+                         [], "arming sends nothing but stop/single and a settings query")
         self.assertEqual(started, [("Rigol #1", 1)])
 
     def test_capture_all_does_not_touch_hv(self):
@@ -1211,6 +1229,194 @@ class TestGuiShotLogging(unittest.TestCase):
         self.assertFalse(self.win._auto_save_timer.isActive(),
                          "a failed write must not be retried on the timer")
         self.assertTrue(any("rigol1_x.csv" in x for _t, x in self.popups), self.popups)
+
+    # ------------------------------------ CONFIG, CONNECT and the settings row
+    def _events(self, event_type, source=None):
+        return [r for r in read_rows(self.dl.get_log_file_path())
+                if r["event_type"] == event_type and (source is None or r["source"] == source)]
+
+    def test_settings_columns_mirror_the_driver_query_tables(self):
+        """The row's settings columns and the driver's query tables are two
+        lists; this is what keeps them from drifting apart silently."""
+        from instruments.rigol import SCOPE_QUERIES, CHANNEL_QUERIES
+        from utils.shot_snapshot import (RIGOL_SCOPE_SETTING_KEYS,
+                                         RIGOL_CHANNEL_SETTING_KEYS)
+        expected = ((set(SCOPE_QUERIES) - {"idn", "trigger_status", "waveform_format"})
+                    | {"model", "serial", "firmware"})
+        self.assertEqual(set(RIGOL_SCOPE_SETTING_KEYS), expected)
+        self.assertEqual(set(RIGOL_CHANNEL_SETTING_KEYS), set(CHANNEL_QUERIES))
+        from utils.shot_logger import SHOT_COLUMNS
+        self.assertIn("rigol1_ch1_probe_ratio", SHOT_COLUMNS)
+        self.assertIn("rigol3_trigger_level_v", SHOT_COLUMNS)
+        self.assertEqual(len(SHOT_COLUMNS), len(set(SHOT_COLUMNS)), "duplicate column")
+
+    def test_arm_reads_scope_settings_into_the_timeline_and_the_shot_row(self):
+        self._arm_fire_path()
+        scope = FakeScope(settings={"probe_ratio": "10", "scale_v_div": "2"})
+        self.win.rigol1 = scope
+        self.win.rigol1_connected = True
+        self.win.start_four_channel_capture = lambda *a, **k: None
+
+        self.win.on_capture_all_scopes()
+
+        self.assertIn("get_settings", scope.calls)
+        self.assertLess(scope.calls.index("single"), scope.calls.index("get_settings"),
+                        "settings are read AFTER the scope is armed")
+        configs = self._events("CONFIG", "Rigol1")
+        self.assertEqual([r["param1"] for r in configs],
+                         ["scope@arm", "channel1@arm", "channel2@arm",
+                          "channel3@arm", "channel4@arm"])
+        self.assertIn("probe_ratio=10", configs[1]["notes"])
+        self.assertIn("memory_depth=1M", configs[0]["notes"])
+        text = Path(self.dl.gui_log_file).read_text(encoding="utf-8")
+        self.assertIn("settings read at arm", text)
+
+        self.win.on_bnc_fire()
+        row = read_rows(self.win.shot_logger.session_file)[0]
+        self.assertEqual(row["rigol1_settings_source"], "readback")
+        self.assertEqual(row["rigol1_settings_read_s"], "0.012")
+        self.assertEqual(row["rigol1_memory_depth"], "1M")
+        self.assertEqual(row["rigol1_ch1_probe_ratio"], "10")
+        self.assertEqual(row["rigol1_ch4_scale_v_div"], "2")
+        self.assertEqual(row["rigol2_settings_source"], "UNKNOWN",
+                         "a scope that was never read must say so, not default")
+        self.assertEqual(row["rigol2_ch1_probe_ratio"], "")
+
+    def test_a_failed_settings_read_never_blocks_the_arm(self):
+        class BrokenSettings(FakeScope):
+            def get_settings(self, channels=(1, 2, 3, 4)):
+                raise TimeoutError("scope did not answer")
+        scope = BrokenSettings()
+        self.win.rigol1 = scope
+        self.win.rigol1_connected = True
+        started = []
+        self.win.start_four_channel_capture = lambda *a, **k: started.append(a)
+
+        self.win.on_capture_all_scopes()
+
+        self.assertEqual(len(started), 1, "the worker must still start")
+        self.assertTrue(any("settings read failed" in r["notes"]
+                            for r in self._events("ERROR", "Rigol1")))
+        self.assertEqual(self._events("CONFIG", "Rigol1"), [])
+
+    def test_keys_a_firmware_does_not_answer_are_logged_once_and_left_unknown(self):
+        """What R2 (firmware 01.01.02.00.06) does: it never answers LABel?."""
+        class R2Like(FakeScope):
+            def get_settings(self, channels=(1, 2, 3, 4)):
+                out = super().get_settings(channels)
+                for ch in channels:
+                    out["channels"][ch]["label"] = "UNKNOWN"
+                out["unsupported"] = ["label"]
+                return out
+
+        self._arm_fire_path()
+        self.win.rigol2 = R2Like()
+        self.win.rigol2_connected = True
+        self.win.start_four_channel_capture = lambda *a, **k: None
+
+        self.win.on_capture_all_scopes()
+
+        text = Path(self.dl.gui_log_file).read_text(encoding="utf-8")
+        self.assertIn("not answered by this firmware", text)
+        self.assertIn("label", text)
+
+        self.win.on_bnc_fire()
+        row = read_rows(self.win.shot_logger.session_file)[0]
+        self.assertEqual(row["rigol2_ch1_label"], "UNKNOWN", "never a default")
+        self.assertEqual(row["rigol2_ch1_probe_ratio"], "0", "the rest is still read")
+
+    def test_manual_connect_buttons_log_connect_too(self):
+        """Auto-connect was the only path with CONNECT rows; the manual
+        buttons for the BNC575, the relay and the Opta must log them too."""
+        # Opta: the worker's link-up signal confirms both paths.
+        self.win._on_pressure_link_up("192.168.10.20:502")
+
+        class FakeRelay:
+            is_connected = True
+
+            def connect(self, port):
+                self.port = port
+        self.win.numato_relay = FakeRelay()
+        self.win.relay_panel.port_combo.clear()
+        self.win.relay_panel.port_combo.addItem("COM7")
+        self.win.on_relay_connect()
+
+        class FakeBNCLink:
+            def connect(self, port=None):
+                pass
+
+            def identify(self):
+                return "BNC,575-4,31707,2.4.2-2.0.11"
+        self.win.bnc = FakeBNCLink()
+        self.win._bnc_read_all_settings = lambda: None
+        self.win.on_bnc_connect()
+
+        by_source = {r["source"]: r for r in self._events("CONNECT")}
+        self.assertEqual(by_source["Opta"]["param1"], "192.168.10.20:502")
+        self.assertEqual(by_source["Relay"]["param1"], "COM7")
+        self.assertEqual(by_source["BNC575"]["param1"], "COM5")
+        self.assertIn("575-4", by_source["BNC575"]["notes"])
+
+    def test_scope_connect_and_disconnect_are_in_the_timeline(self):
+        class ConnectingScope(FakeScope):
+            def connect(self, *a, **k):
+                self.calls.append("connect")
+
+            def _query(self, cmd):
+                return "RIGOL TECHNOLOGIES,DS7054,FAKE,00.01"
+
+        self.win.rigol1 = ConnectingScope(resource_name="TCPIP0::192.168.10.51::5555::SOCKET")
+
+        self.win.on_rigol1_connect()
+
+        conn = self._events("CONNECT", "Rigol1")
+        self.assertEqual(len(conn), 1)
+        self.assertIn("5555::SOCKET", conn[0]["param1"])
+        self.assertIn("DS7054", conn[0]["notes"])
+        self.assertEqual([r["param1"] for r in self._events("CONFIG", "Rigol1")][0],
+                         "scope@connect")
+
+        self.win.on_r1_disconnect()
+
+        self.assertEqual(len(self._events("DISCONNECT", "Rigol1")), 1)
+
+    def test_config_event_renders_sorted_key_values(self):
+        self.dl.log_config("BNC575", "all",
+                           {"period_s": 0.0001, "A_delay_s": 0.0, "trigger_mode": "DIS"})
+        r = self._events("CONFIG", "BNC575")[-1]
+        self.assertEqual((r["param1"], r["param2"]), ("all", "readback"))
+        self.assertEqual(r["notes"], "A_delay_s=0.0; period_s=0.0001; trigger_mode=DIS")
+
+    def test_capture_handler_logs_the_workers_timing_line(self):
+        """The TIMING line is built from the worker's stamps; the handler adds
+        only its own entry time (hence the queue delay) and the plot cost."""
+        import time as _time
+        scope = FakeScope()
+        self.win.rigol1 = scope
+        t0 = _time.monotonic() - 2.0
+        mk = lambda dt, ev, **kv: dict({"t": t0 + dt, "tid": 111, "event": ev}, **kv)
+        scope.timing = [
+            mk(0.0, "begin"), mk(0.1, "arm"), mk(0.5, "trigger_seen"),
+            mk(0.6, "capture_start"),
+            mk(0.6, "ch1:lock_wait"), mk(0.6, "ch1:lock_acquired"),
+            mk(0.6, "ch1:read_start"), mk(1.1, "ch1:read_end", points=4),
+            mk(1.1, "ch1:lock_released"), mk(1.2, "capture_end"),
+        ]
+        one = ([0.0], [0.0])
+
+        self.win.on_four_channel_capture_finished((one, one, one, one), "Rigol #1", 1)
+
+        timing = self._events("TIMING", "Rigol1")
+        self.assertEqual(len(timing), 1)
+        notes = timing[0]["notes"]
+        for piece in ("capture tid=111", "arm +0.100s", "trigger_seen +0.500s",
+                      "ch1 lock_wait 0.000s", "hold 0.500s", "capture_end +1.200s",
+                      "queued", "plot_setData"):
+            self.assertIn(piece, notes)
+        # The handler ran ~2 s after 'begin' by construction: queued ~0.8 s.
+        self.assertRegex(notes, r"queued 0\.[6-9]\d\ds")
+        text = Path(self.dl.gui_log_file).read_text(encoding="utf-8")
+        self.assertIn("[TIMING] Rigol #1 capture", text)
 
     # ------------------------------------------- a Read is not a shot capture
     def _run_read(self, sid=1):
@@ -1971,6 +2177,8 @@ def make_scope(session, resource="TCPIP0::192.168.10.51::5555::SOCKET"):
     scope.last_capture_status = {}
     scope._last_channel_stats = {}
     scope._lock = threading.RLock()
+    scope.timing = []
+    scope._unsupported = set()
     return scope
 
 
@@ -2125,6 +2333,124 @@ class TestScopeSettingsReadback(unittest.TestCase):
         self.assertIsNone(bnc.get_channel_width(1))
         self.assertIsNone(bnc.get_channel_delay(1))
         self.assertIsNone(bnc.get_channel_amplitude(1))
+
+    # ---------------------------------------------- capture timing stamps
+    def test_timing_stamps_come_from_the_worker_thread_in_order(self):
+        """Every stamp of a capture is written by the thread doing the work
+        and carries its id, so the GUI can tell arm, trigger, lock and
+        transfer times apart from when its own handler happened to run."""
+        import threading
+        session = canned_session(**{
+            ":TRIGger:STATus?": "STOP",
+            ":ACQuire:MDEPth?": "16",
+            ":WAVeform:PREamble?": "0,2,16,1,1e-9,0,0,0.01,0,128",
+            ":CHANnel1:DISPlay?": "1",          # only CH1 has data
+        })
+        session._pending = bytearray(tmc_block(bytes(range(16))))
+        scope = make_scope(session)
+        scope.instr = session
+        scope.error_hook = lambda ch, msg: None
+
+        done = {}
+
+        def worker():
+            scope.timing_begin()
+            done["data"] = scope.wait_and_capture_four(timeout=2.0)
+            done["tid"] = threading.get_ident()
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join(10)
+        self.assertFalse(t.is_alive(), "capture did not finish")
+
+        events = [s["event"] for s in scope.timing]
+        for ev in ("begin", "arm", "wait_start", "trigger_seen", "capture_start",
+                   "ch1:lock_wait", "ch1:lock_acquired", "ch1:read_start",
+                   "ch1:read_end", "ch1:lock_released", "capture_end"):
+            self.assertIn(ev, events, f"missing stamp {ev}: {events}")
+        self.assertLess(events.index("ch1:lock_acquired"), events.index("ch1:read_start"))
+        self.assertLess(events.index("ch1:read_end"), events.index("ch1:lock_released"))
+        self.assertLess(events.index("trigger_seen"), events.index("capture_start"))
+
+        self.assertTrue(all(s["tid"] == done["tid"] for s in scope.timing),
+                        "stamps must carry the worker thread's id")
+        times = [s["t"] for s in scope.timing]
+        self.assertEqual(times, sorted(times), "stamps must be monotonic")
+        self.assertEqual(len(done["data"][0][1]), 16, "CH1 must still read fully")
+        read_end = next(s for s in scope.timing if s["event"] == "ch1:read_end")
+        self.assertEqual(read_end["points"], 16)
+
+    # ------------------------------------- keys a firmware does not answer
+    def test_an_unanswered_settings_key_is_never_asked_again(self):
+        """R2's firmware (01.01.02.00.06) does not answer :CHANnel<n>:LABel?.
+        On a raw socket that is silence, not an error, so every ask costs the
+        full timeout; asking four channels per read froze the GUI at connect."""
+        from instruments.rigol import UNKNOWN
+        session = canned_session()
+        for ch in (1, 2, 3, 4):
+            del session.responses[f":CHANnel{ch}:LABel?"]      # never answered
+        scope = make_scope(session)
+        scope.instr = session
+        reported = []
+        scope.error_hook = lambda ch, msg: reported.append(msg)
+
+        first = scope.get_settings()
+
+        asked = [q for q in session.queries if "LABel" in q]
+        self.assertEqual(asked, [":CHANnel1:LABel?"],
+                         "after one no-reply the key is skipped for the other channels")
+        self.assertEqual(first["channels"][1]["label"], UNKNOWN)
+        self.assertEqual(first["channels"][4]["label"], UNKNOWN)
+        self.assertEqual(first["channels"][4]["probe_ratio"], "0",
+                         "the other keys are still read")
+        self.assertEqual(first["unsupported"], ["label"])
+        self.assertEqual(len(reported), 1, "reported once")
+
+        session.queries.clear()
+        scope.get_settings()
+
+        self.assertEqual([q for q in session.queries if "LABel" in q], [],
+                         "not asked again this session")
+        self.assertEqual(len(reported), 1, "and not reported again")
+
+    def test_settings_queries_use_a_short_timeout_and_restore_the_capture_one(self):
+        from instruments.rigol import RigolScope
+
+        class TimeoutSpy(FakeVisaSession):
+            def __init__(self):
+                super().__init__()
+                self.seen = []
+
+            def query(self, cmd):
+                self.seen.append(self.timeout)
+                return super().query(cmd)
+
+        session = TimeoutSpy()
+        session.responses.update(canned_session().responses)
+        session.timeout = 30000
+        scope = make_scope(session)
+        scope.instr = session
+
+        scope.get_settings()
+
+        self.assertTrue(session.seen)
+        self.assertTrue(all(t == RigolScope.SETTINGS_QUERY_TIMEOUT_MS for t in session.seen),
+                        f"settings queries must not wait the capture timeout: {set(session.seen)}")
+        self.assertLess(RigolScope.SETTINGS_QUERY_TIMEOUT_MS, 30000)
+        self.assertEqual(session.timeout, 30000,
+                         "the 30 s capture timeout must be back before any transfer")
+
+    def test_capture_timeout_is_restored_even_when_a_settings_query_fails(self):
+        session = canned_session()
+        del session.responses[":TIMebase:MAIN:SCALe?"]
+        session.timeout = 30000
+        scope = make_scope(session)
+        scope.instr = session
+        scope.error_hook = lambda ch, msg: None
+
+        scope.get_settings()
+
+        self.assertEqual(session.timeout, 30000)
 
     def test_bnc575_getters_still_parse_a_good_reply(self):
         from instruments.bnc575 import BNC575Controller

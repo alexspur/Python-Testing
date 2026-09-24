@@ -22,6 +22,32 @@ DG535_CHANNEL_NAMES = {1: "T0", 2: "A", 3: "B", 4: "AB", 5: "C", 6: "D", 7: "CD"
 LASER1_QSWITCH = "B"
 LASER2_QSWITCH = "D"
 
+# Rigol settings read back at arm time, one shot column each. These mirror
+# instruments.rigol.SCOPE_QUERIES / CHANNEL_QUERIES: the three scope keys that
+# are not acquisition settings (idn, trigger_status, waveform_format) are
+# dropped and idn is split into model/serial/firmware. A test holds the two
+# lists in step, so the row and the driver cannot drift apart silently.
+RIGOL_SCOPE_SETTING_KEYS = (
+    "model", "serial", "firmware",
+    "memory_depth", "acquisition_type", "average_count", "sample_rate_sa_s",
+    "timebase_scale_s_div", "timebase_offset_s", "timebase_mode",
+    "trigger_mode", "trigger_sweep", "trigger_source", "trigger_slope",
+    "trigger_level_v", "trigger_coupling", "trigger_holdoff_s",
+)
+RIGOL_CHANNEL_SETTING_KEYS = (
+    "display", "scale_v_div", "offset_v", "probe_ratio", "coupling",
+    "impedance", "bandwidth_limit", "invert", "units", "label",
+)
+
+
+def rigol_setting_columns(n):
+    """Column names for scope n's arm-time settings, in row order."""
+    cols = [f"rigol{n}_settings_source", f"rigol{n}_settings_read_s"]
+    cols += [f"rigol{n}_{k}" for k in RIGOL_SCOPE_SETTING_KEYS]
+    for ch in (1, 2, 3, 4):
+        cols += [f"rigol{n}_ch{ch}_{k}" for k in RIGOL_CHANNEL_SETTING_KEYS]
+    return cols
+
 
 def fmt(value, blank=""):
     """Render a scalar for CSV: None becomes blank, bools become 1/0."""
@@ -258,6 +284,21 @@ def build_shot_row(snapshot, shot_number, session_shot_index, datetime_str,
             # in from SCOPE_EXPORT events and a check against the disk.
             f"rigol{scope_id}_file_written": "",
         })
+
+        # Settings read back when the scope was armed for this shot. Blank
+        # (with source UNKNOWN) if no read happened, never a default.
+        settings = sec.get("settings") or {}
+        scope_settings = settings.get("scope") or {}
+        channel_settings = settings.get("channels") or {}
+        row[f"rigol{scope_id}_settings_source"] = "readback" if scope_settings else UNKNOWN
+        row[f"rigol{scope_id}_settings_read_s"] = (
+            fmt_float(settings.get("read_seconds"), 3) if settings else "")
+        for key in RIGOL_SCOPE_SETTING_KEYS:
+            row[f"rigol{scope_id}_{key}"] = fmt(scope_settings.get(key, ""))
+        for ch in (1, 2, 3, 4):
+            entry = channel_settings.get(ch) or channel_settings.get(str(ch)) or {}
+            for key in RIGOL_CHANNEL_SETTING_KEYS:
+                row[f"rigol{scope_id}_ch{ch}_{key}"] = fmt(entry.get(key, ""))
 
     row["notes"] = "; ".join(p for p in notes_parts if p)
     return row
