@@ -10,12 +10,14 @@ Uses pyqtgraph for fast plotting with 4 separate Y-axes:
 
 import pyqtgraph as pg
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton, QHBoxLayout, QCheckBox, QGroupBox
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QHBoxLayout, QCheckBox,
+                             QGroupBox, QComboBox)
 from PyQt6.QtGui import QFont
 from pyqtgraph import ViewBox, PlotCurveItem, AxisItem
 import numpy as np
 
 from utils.downsample import visible_downsample
+from gui.scope_screen import ScopeScreen, CH_COLORS
 
 
 class ScopePlotWindow(QWidget):
@@ -91,6 +93,19 @@ class ScopePlotWindow(QWidget):
             self._zoom_timers[sid] = timer
             pw.getViewBox().sigXRangeChanged.connect(
                 lambda vb, rng, s=sid: self._zoom_timers[s].start())
+
+        # Scope-style screens, one per Rigol, fed the same display copy as
+        # the engineering plots plus the arm-time settings from the main
+        # window's system_state. The two views are shown one at a time.
+        self.screens = {}
+        for sid in (1, 2, 3):
+            screen = ScopeScreen(f"Rigol #{sid}")
+            screen.vb.sigXRangeChanged.connect(
+                lambda vb, rng, s=sid: self._zoom_timers[s].start())
+            layout.addWidget(screen)
+            self.screens[sid] = screen
+        self.view_mode = None
+        self._set_view_mode("scope")
 
         # CLEAR button
         self.btn_clear = QPushButton("Clear All Plots")
@@ -183,17 +198,30 @@ class ScopePlotWindow(QWidget):
         self.ch_visible = [True, True, True, True]
         self.ch_checkboxes = []
 
-        ch_names = ['CH1 (Yellow)', 'CH2 (Cyan)', 'CH3 (Magenta)', 'CH4 (Indigo)']
-
-        for i, name in enumerate(ch_names):
-            cb = QCheckBox(name)
+        # Rigol order and colours, the same ones the traces, the channel
+        # markers and the info bar use.
+        for i in range(4):
+            cb = QCheckBox(f"CH{i + 1}")
             cb.setChecked(True)
+            cb.setStyleSheet(f"QCheckBox {{ color: {CH_COLORS[i + 1]}; font-weight: bold; "
+                             f"background-color: white; }}")
             cb.stateChanged.connect(lambda state, idx=i: self._toggle_channel(idx, state))
 
             control_layout.addWidget(cb)
             self.ch_checkboxes.append(cb)
 
         control_layout.addStretch()
+
+        # Scope view (the default) draws each plot like that scope's screen,
+        # from the settings read at arm time; Engineering view is the older
+        # one-voltage-axis-per-channel layout.
+        self.view_toggle = QComboBox()
+        self.view_toggle.addItems(["Scope view", "Engineering view"])
+        self.view_toggle.setToolTip("Scope view: divisions, graticule and markers as on the "
+                                    "scope's screen. Engineering view: one voltage axis per channel.")
+        self.view_toggle.currentIndexChanged.connect(
+            lambda idx: self._set_view_mode("scope" if idx == 0 else "engineering"))
+        control_layout.addWidget(self.view_toggle)
         layout.addWidget(control_box)
 
 
@@ -207,6 +235,8 @@ class ScopePlotWindow(QWidget):
         for curves in [self.r1_curves, self.r2_curves, self.r3_curves]:
             if curves[channel_idx] is not None:
                 curves[channel_idx].setVisible(visible)
+        for screen in getattr(self, "screens", {}).values():
+            screen.set_user_visible(channel_idx + 1, visible)
 
     def _setup_four_channel_plot(self, pw):
         """
@@ -377,6 +407,9 @@ class ScopePlotWindow(QWidget):
         """
         if self._refreshing:
             return
+        screen = getattr(self, "screens", {}).get(scope_id)
+        if screen is not None:
+            screen.refresh_visible()
         full = self._full.get(scope_id)
         curves = self._curves_for(scope_id)
         vb = self._plot_for(scope_id).getViewBox()
@@ -400,11 +433,83 @@ class ScopePlotWindow(QWidget):
             self._refreshing = False
 
     # ------------------------------------------------------------
+    # Scope view: settings, placement check and the view toggle
+    # ------------------------------------------------------------
+    def _set_view_mode(self, mode):
+        """'scope' (default) or 'engineering'. One set of plots is shown."""
+        self.view_mode = mode
+        scope = mode == "scope"
+        for pw in (self.plot1, self.plot2, self.plot3):
+            pw.setVisible(not scope)
+        for screen in self.screens.values():
+            screen.setVisible(scope)
+        if hasattr(self, "view_toggle"):
+            self.view_toggle.blockSignals(True)
+            self.view_toggle.setCurrentIndex(0 if scope else 1)
+            self.view_toggle.blockSignals(False)
+
+    def settings_for(self, scope_id):
+        """The arm-time settings of one scope from the main window's
+        system_state, or {} when there is no parent or no read yet."""
+        state = getattr(self.parent, "system_state", None)
+        if state is None:
+            return {}
+        try:
+            section = state.get(f"rigol{scope_id}") or {}
+        except Exception:
+            return {}
+        return section.get("settings") or {}
+
+    def _update_screen(self, scope_id):
+        """Feed one screen the display copy just given to update_r<N>, the full
+        arrays for zooming, and that shot's settings."""
+        screen = getattr(self, "screens", {}).get(scope_id)
+        display = self._display.get(scope_id)
+        if screen is None or display is None:
+            return
+        screen.set_settings(self.settings_for(scope_id))
+        screen.set_data(display, full_pairs=self._full.get(scope_id))
+        self._check_sign_convention(scope_id, screen)
+
+    def _check_sign_convention(self, scope_id, screen):
+        """Confirm position = (V + offset) / scale against the real capture.
+
+        The driver keeps each channel's preamble; the guide says
+        YORigin = VerticalOffset / YINCrement with the reference at screen
+        centre, so the preamble's centre voltage is -yorigin * yincrement and
+        must equal -offset_v from the settings. Logged either way, so a real
+        shot verifies the sign in the GUI log.
+        """
+        log = getattr(self.parent, "log", None)
+        scope = getattr(self.parent, f"rigol{scope_id}", None)
+        stats = getattr(scope, "_last_channel_stats", None) or {}
+        if log is None or not stats:
+            return
+        for ch, placement in sorted(screen.placements.items()):
+            if placement.auto:
+                continue
+            pre = (stats.get(ch) or {}).get("preamble") or {}
+            try:
+                centre_pre = -float(pre["yorigin"]) * float(pre["yincrement"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            centre_set = -placement.offset
+            tol = max(abs(placement.scale) * 0.05, 1e-12)
+            if abs(centre_pre - centre_set) <= tol:
+                log(f"[SCOPE VIEW] Rigol #{scope_id} ch{ch}: sign convention confirmed - "
+                    f"preamble centre {centre_pre:.6g} V = -offset {centre_set:.6g} V")
+            else:
+                log(f"[SCOPE VIEW] WARNING Rigol #{scope_id} ch{ch}: preamble centre "
+                    f"{centre_pre:.6g} V but -offset is {centre_set:.6g} V - the "
+                    f"(V + offset)/scale placement may be wrong for this channel")
+
+    # ------------------------------------------------------------
     # Plot update functions (called by main_window)
     # ------------------------------------------------------------
     def update_r1(self, t1, v1, t2, v2, t3=None, v3=None, t4=None, v4=None, **kwargs):
         """Update Rigol #1 plot with up to 4 channels"""
         self._remember_display(1, (t1, v1), (t2, v2), (t3, v3), (t4, v4))
+        self._update_screen(1)
         self.r1_ch1.setData(t1, v1)
         self.r1_ch2.setData(t2, v2)
 
@@ -421,6 +526,7 @@ class ScopePlotWindow(QWidget):
     def update_r2(self, t1, v1, t2, v2, t3=None, v3=None, t4=None, v4=None, **kwargs):
         """Update Rigol #2 plot with up to 4 channels"""
         self._remember_display(2, (t1, v1), (t2, v2), (t3, v3), (t4, v4))
+        self._update_screen(2)
         self.r2_ch1.setData(t1, v1)
         self.r2_ch2.setData(t2, v2)
 
@@ -437,6 +543,7 @@ class ScopePlotWindow(QWidget):
     def update_r3(self, t1, v1, t2, v2, t3=None, v3=None, t4=None, v4=None, **kwargs):
         """Update Rigol #3 plot with up to 4 channels"""
         self._remember_display(3, (t1, v1), (t2, v2), (t3, v3), (t4, v4))
+        self._update_screen(3)
         self.r3_ch1.setData(t1, v1)
         self.r3_ch2.setData(t2, v2)
 
@@ -478,6 +585,8 @@ class ScopePlotWindow(QWidget):
         for sid in (1, 2, 3):
             self._full[sid] = None
             self._display[sid] = None
+        for screen in getattr(self, "screens", {}).values():
+            screen.clear()
 
     def full_clear_plots(self):
         """Full clear with plot reconstruction (use if clear_plots doesn't work)"""
