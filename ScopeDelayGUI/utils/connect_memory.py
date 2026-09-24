@@ -54,6 +54,11 @@ default_data = {
     "CFR_LASER_COM": "COM6",
     "CFR_LASER2_COM": "COM8",
 
+    # Remembered UI settings, booleans. Saved through save_memory() like the
+    # ports, so one file holds everything the operator has set.
+    "ANALYZE_AFTER_SHOT": True,
+    "SHOW_ANALYSIS_PLOTS": True,
+
     # The scopes are on the instrument network, not USB. Built from
     # scope_resource() so SCOPE_TRANSPORT is the single switch.
     "Rigol1_VISA": scope_resource(1),

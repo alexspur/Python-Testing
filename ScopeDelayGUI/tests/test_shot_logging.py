@@ -35,6 +35,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 faulthandler.dump_traceback_later(300, exit=True)
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import QByteArray, QObject, QProcess, pyqtSignal
 
 from utils.data_logger import DataLogger
 from utils.shot_logger import SHOT_COLUMNS, ShotCounter, ShotLogger
@@ -168,6 +169,94 @@ class FakeScope:
     def timing_begin(self):
         # Not recorded in calls: tests assert on what reaches the scope.
         self.timing = []
+
+
+class FakeQProcess(QObject):
+    """Stands in for QProcess so no GUI test can start a real analysis.
+
+    Records what the runner asked for; a test feeds it output and
+    finishes it. finish_on_wait makes waitForFinished() complete the run
+    (the close-time 'finished in time' case); otherwise the wait fails
+    and the runner kills it.
+    """
+    readyReadStandardOutput = pyqtSignal()
+    readyReadStandardError = pyqtSignal()
+    finished = pyqtSignal(int, object)
+    errorOccurred = pyqtSignal(object)
+    instances = []
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.program, self.arguments, self.working_dir, self.env = None, [], None, None
+        self.started = self.killed = self.running = False
+        self.finish_on_wait = False
+        self._out = b""
+        self._err = b""
+        FakeQProcess.instances.append(self)
+
+    def setProgram(self, program):
+        self.program = program
+
+    def setArguments(self, args):
+        self.arguments = list(args)
+
+    def setWorkingDirectory(self, path):
+        self.working_dir = path
+
+    def setProcessEnvironment(self, env):
+        self.env = env
+
+    def start(self, *args):
+        self.started = self.running = True
+
+    def state(self):
+        return (QProcess.ProcessState.Running if self.running
+                else QProcess.ProcessState.NotRunning)
+
+    def exitCode(self):
+        return 0
+
+    def errorString(self):
+        return "fake: not started"
+
+    def readAllStandardOutput(self):
+        data, self._out = self._out, b""
+        return QByteArray(data)
+
+    def readAllStandardError(self):
+        data, self._err = self._err, b""
+        return QByteArray(data)
+
+    def kill(self):
+        self.killed = True
+        self.finish(-1, crashed=True)
+
+    def terminate(self):
+        self.kill()
+
+    def waitForFinished(self, ms=-1):
+        if not self.running:
+            return True
+        if self.finish_on_wait:
+            self.finish(0)
+            return True
+        return False
+
+    # -- what a test does to it
+    def feed_stdout(self, text):
+        self._out += text.encode("utf-8")
+        self.readyReadStandardOutput.emit()
+
+    def feed_stderr(self, text):
+        self._err += text.encode("utf-8")
+        self.readyReadStandardError.emit()
+
+    def finish(self, code=0, crashed=False):
+        if not self.running:
+            return
+        self.running = False
+        self.finished.emit(code, QProcess.ExitStatus.CrashExit if crashed
+                           else QProcess.ExitStatus.NormalExit)
 
 
 def tmc_block(payload, newline=True, declared=None):
@@ -498,8 +587,9 @@ class TestShotLoggerFiles(unittest.TestCase):
 
 
 # ----------------------------------------------------------------- GUI level
-class TestGuiShotLogging(unittest.TestCase):
-    """Drives the real main window with every instrument stubbed out."""
+class GuiWindowTestCase(unittest.TestCase):
+    """The real main window with every instrument stubbed out. The base of
+    every GUI test class, here and in the other test modules."""
 
     def setUp(self):
         import gui.main_window as mw
@@ -522,6 +612,16 @@ class TestGuiShotLogging(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         p = patch.object(mw, "RigolScope", FakeScope)
+        p.start()
+        self.addCleanup(p.stop)
+        # The analysis runner must never start a real child process from a
+        # test, and nothing may open Explorer or a viewer.
+        import utils.analysis_runner as ar
+        FakeQProcess.instances = []
+        p = patch.object(ar, "QProcess", FakeQProcess)
+        p.start()
+        self.addCleanup(p.stop)
+        p = patch("gui.analysis_window.open_with_system", lambda target: None)
         p.start()
         self.addCleanup(p.stop)
 
@@ -607,6 +707,22 @@ class TestGuiShotLogging(unittest.TestCase):
     def _reprep(self):
         """A shot consumes the prep; tests that fire twice must re-prep."""
         self.win._on_laser_prep_requested()
+
+    def _events(self, event_type, source=None):
+        return [r for r in read_rows(self.dl.get_log_file_path())
+                if r["event_type"] == event_type and (source is None or r["source"] == source)]
+
+    def _exports(self):
+        return [r for r in read_rows(self.dl.get_log_file_path())
+                if r["event_type"] == "SCOPE_EXPORT"]
+
+    def _report_path(self):
+        return (Path(self.dl.get_session_dir())
+                / f"session_report_{self.dl.session_timestamp}.xlsx")
+
+
+class TestGuiShotLogging(GuiWindowTestCase):
+    """Drives the real main window with every instrument stubbed out."""
 
     # -------------------------------------------------- existing behavior
     def test_session_folder_and_experiment_log_still_work(self):
@@ -1080,10 +1196,6 @@ class TestGuiShotLogging(unittest.TestCase):
         t = np.arange(n) * 1e-9
         return tuple((t, np.full(n, float(k))) for k in range(4))
 
-    def _exports(self):
-        return [r for r in read_rows(self.dl.get_log_file_path())
-                if r["event_type"] == "SCOPE_EXPORT"]
-
     def _unwritable_paths(self):
         """Point the shot filenames into a folder that does not exist."""
         bad = self.tmp / "no_such_dir"
@@ -1244,10 +1356,6 @@ class TestGuiShotLogging(unittest.TestCase):
         self.assertTrue(any("rigol1_x.csv" in x for _t, x in self.popups), self.popups)
 
     # ------------------------------------------- session report and clipping
-    def _report_path(self):
-        return (Path(self.dl.get_session_dir())
-                / f"session_report_{self.dl.session_timestamp}.xlsx")
-
     def test_clipped_capture_logs_clip_warning_and_channel_stats(self):
         """A channel with samples on the ADC rails gets a CLIP_WARNING in the
         timeline and the GUI log; every channel gets a SCOPE_CHANNEL row with
@@ -1327,10 +1435,6 @@ class TestGuiShotLogging(unittest.TestCase):
         self.assertTrue(self.dl.log_file.read_bytes().startswith(before))
 
     # ------------------------------------ CONFIG, CONNECT and the settings row
-    def _events(self, event_type, source=None):
-        return [r for r in read_rows(self.dl.get_log_file_path())
-                if r["event_type"] == event_type and (source is None or r["source"] == source)]
-
     def test_settings_columns_mirror_the_driver_query_tables(self):
         """The row's settings columns and the driver's query tables are two
         lists; this is what keeps them from drifting apart silently."""

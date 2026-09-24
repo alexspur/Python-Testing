@@ -238,9 +238,9 @@ def describe(r):
     if e == "TIMING":
         return f"Capture timing{_for_shot(p4)}: {n}"
     if e == "ANALYSIS":
-        err = f" Error: {n}" if n and "error=" in n and not n.endswith("error=") else ""
+        detail = n[:-len("; error=")] if n.endswith("; error=") else n
         return (f"Analysis of shot {p4}: {p1}. Spacing commanded {p2} ns, "
-                f"Q-switch {p3} ns, {n}.{err}").replace("..", ".")
+                f"Q-switch {p3} ns; {detail}")
     if e == "ERROR":
         return f"ERROR: {n}" if n else "ERROR"
     if e == "INFO":

@@ -19,6 +19,7 @@ from gui.wj_panel import WJPanel
 from gui.scope_plot_window import ScopePlotWindow
 from gui.numato_relay_panel import NumatoRelayPanel
 from gui.laser_panel import DualLaserPanel
+from gui import analysis_window as analysis_view
 
 from utils.logger import LogPanel
 from utils.status_lamp import StatusLamp
@@ -37,6 +38,7 @@ from utils.shot_snapshot import (
     build_shot_row, channel_name, fmt_us, resolve_absolute_delays,
 )
 from utils.downsample import downsample_four
+from utils.analysis_runner import AnalysisRun, AnalysisRunner
 
 from serial.tools import list_ports
 
@@ -299,6 +301,7 @@ class ScopeDelayMainWindow(QMainWindow):
         self._captures_dirty = False
         self._export_silent = False
         self._export_failed = {}          # scope id -> filename, this export
+        self._export_skipped = set()      # scopes with no samples, this export
         self._auto_save_timer = QTimer(self)
         self._auto_save_timer.setSingleShot(True)
         self._auto_save_timer.timeout.connect(self._auto_save_fire)
@@ -314,6 +317,17 @@ class ScopeDelayMainWindow(QMainWindow):
         # Monotonic 'begin' stamp of each scope's last capture, so the export
         # completion can be placed on the same timeline as the worker's stamps.
         self._capture_t0 = {}
+
+        # Shot analysis: python -m analysis in a child process, one run at a
+        # time, started when the last of a shot's files is closed on disk.
+        # Never in the fire path; the only wait is at close.
+        self.analysis = AnalysisRunner(
+            repo_dir=Path(__file__).resolve().parent.parent, parent=self)
+        self.analysis.line.connect(self.log)
+        self.analysis.result.connect(self._on_analysis_result)
+        self.analysis.finished.connect(self._on_analysis_finished)
+        self.analysis_window = None
+        self._analysis_closing = False
 
         # Laser prep is consumed by a shot. In EXT/EXT the laser stays
         # physically armed after firing - the DG535 drives it every shot - so
@@ -1309,6 +1323,7 @@ class ScopeDelayMainWindow(QMainWindow):
         self.export_workers = []
         self._export_done_paths = []
         self._export_failed = {}
+        self._export_skipped = set()
         self._export_pending = len(self.captured_scopes)
         self._export_silent = silent
         # Which scopes this export covers. A capture that lands while it runs
@@ -1327,6 +1342,11 @@ class ScopeDelayMainWindow(QMainWindow):
             if points == 0:
                 self._export_pending -= 1
                 self._export_scope_ids.discard(scope_id)
+                # Handled, not late: it is logged FAILED with its reason
+                # below, and there is nothing to write. Counting it as a
+                # capture that landed mid-export re-armed the auto-save
+                # every 2 s for ever and kept the analysis from starting.
+                self._export_skipped.add(scope_id)
                 name = Path(path).name
                 self.log(f"[EXPORT] Rigol #{scope_id}: no samples, nothing written ({name})")
                 self.data_logger.log_error(
@@ -1510,7 +1530,8 @@ class ScopeDelayMainWindow(QMainWindow):
         # A capture that landed while this export ran is not covered by it
         # and must not be reported as written. A failed scope is handled
         # separately below.
-        late = set(self.captured_scopes) - covered - set(failed)
+        skipped = getattr(self, "_export_skipped", None) or set()
+        late = set(self.captured_scopes) - covered - set(failed) - skipped
 
         if failed:
             names = ", ".join(failed[sid] for sid in sorted(failed))
@@ -1525,6 +1546,9 @@ class ScopeDelayMainWindow(QMainWindow):
             self._mark_captures_dirty()
         if not failed and not late:
             self._captures_dirty = False  # everything written — nothing to flush on close
+            # Every file of this shot is closed on disk: the writer returned
+            # before its finished signal, and this is the last one.
+            self._analyze_shot_after_export()
 
         if failed:
             self.error_popup(
@@ -1544,6 +1568,129 @@ class ScopeDelayMainWindow(QMainWindow):
                 f"✅ Exported {len(self._export_done_paths)} file(s):\n\n{files}"
             )
         self.set_status("green", "Export complete")
+
+    # ------------------------------------------------------------------
+    #  Automatic shot analysis
+    # ------------------------------------------------------------------
+    def _analyze_shot_after_export(self):
+        """Queue `python -m analysis --session <dir> --shot <n>` for the shot
+        whose last waveform file has just been closed. Nothing blocks."""
+        if not self.chk_analyze.isChecked():
+            self.log("[ANALYSIS] skipped: 'Analyze after each shot' is off")
+            return
+        shot = self._current_shot_number
+        if not shot:
+            # The pipeline finds a shot by its global number; a shot fired
+            # under a locked counter has none.
+            self.log("[ANALYSIS] not started: this export has no shot number "
+                     "(counter locked?) - use Analyze all shots later")
+            return
+        session_dir = Path(self.data_logger.get_session_dir()).resolve()
+        self.analysis.enqueue(AnalysisRun(
+            f"shot {shot}", ["--session", str(session_dir), "--shot", str(shot)],
+            shot_number=shot))
+
+    def on_analyze_all_shots(self):
+        """Every session under the logs root; shots already done are skipped
+        by the pipeline's own cache. Queued behind any run in flight."""
+        root = Path(self.data_logger.get_logs_root()).resolve()
+        self.analysis.enqueue(AnalysisRun("all shots", [str(root)]))
+
+    def on_open_analysis_folder(self):
+        folder = Path(self.data_logger.get_logs_root()).resolve() / "processed_shots"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            analysis_view.open_with_system(folder)
+        except OSError as e:
+            self.log(f"[ANALYSIS] could not open {folder}: {e}")
+
+    def _on_analysis_result(self, run, result):
+        """One '[ANALYSIS] result {json}' line: an ANALYSIS event per shot."""
+        try:
+            self.data_logger.log_analysis(
+                shot_number=result.get("shot_number"),
+                status=result.get("status", ""),
+                spacing_cmd_ns=result.get("spacing_cmd_ns", ""),
+                spacing_qsw_ns=result.get("spacing_qsw_ns", ""),
+                spacing_rvm_ns=result.get("spacing_rvm_ns", ""),
+                error=result.get("error", ""))
+        except Exception as e:
+            self.log(f"[ANALYSIS] could not log the ANALYSIS event: {e}")
+
+    def _on_analysis_finished(self, run, code):
+        """Show the figure of the last result of the run, if asked to."""
+        if getattr(self, "_analysis_closing", False):
+            return          # a run ending inside the close wait opens nothing
+        if not self.chk_show_plots.isChecked() or not run.results:
+            return
+        last = run.results[-1]
+        png = last.get("analysis_png") or last.get("raw_png") or ""
+        if not png:
+            return
+        if not Path(png).exists():
+            self.log(f"[ANALYSIS] plot not found: {png}")
+            return
+        self._show_analysis_plot(png, last)
+
+    def _show_analysis_plot(self, png, result):
+        if self.analysis_window is None:
+            self.analysis_window = analysis_view.AnalysisPlotWindow()
+        shot = result.get("shot_number")
+        parts = [f"Shot {shot}: {result.get('status', '')}" if shot is not None
+                 else f"{result.get('key', '')}: {result.get('status', '')}"]
+        spacing = [f"{k} {result.get(key)}" for k, key in (
+            ("cmd", "spacing_cmd_ns"), ("Qsw", "spacing_qsw_ns"), ("RVM", "spacing_rvm_ns"))
+            if result.get(key) not in (None, "")]
+        if spacing:
+            parts.append("spacing " + " / ".join(spacing) + " ns")
+        if result.get("error"):
+            parts.append(str(result["error"]))
+        self.analysis_window.show_image(png, "   |   ".join(parts))
+        self.analysis_window.show()
+        self.analysis_window.raise_()
+
+    def _shutdown_analysis(self, timeout_s=15.0):
+        """At close, after the close-save and before SESSION_END: let a run
+        in flight finish for up to timeout_s, then kill it and say so."""
+        runner = getattr(self, "analysis", None)
+        if runner is None:
+            return
+        self._analysis_closing = True       # no plot window from here on
+        # The queue closes before any event is pumped: a finished() already
+        # pending for the run in flight would otherwise start the next
+        # queued run from inside processEvents(), to be waited on and killed.
+        dropped = runner.close_queue()
+        run = runner.current()
+        label = run.label if run is not None else ""
+        state = "idle"
+        if run is not None:
+            from PyQt6.QtWidgets import QApplication
+            self.log(f"[ANALYSIS] still running at close: waiting up to "
+                     f"{timeout_s:.0f} s for {label}")
+            QApplication.processEvents()
+            if runner.is_running():
+                state, _, _ = runner.shutdown(int(timeout_s * 1000))
+            else:
+                state = "finished"          # its exit was already pending
+        if state == "killed":
+            if run is not None and run.shot_number is not None:
+                outcome = (f"No .mat was written for shot {run.shot_number}; its "
+                           "partial file is cleaned up and the shot redone by the next run.")
+            else:
+                outcome = ("Shots it had finished are kept; the shot in flight has no "
+                           ".mat, its partial file is cleaned up and it is redone by the "
+                           "next run.")
+            self.log(f"[ANALYSIS] killed after {timeout_s:.0f} s at close: {label}. {outcome}")
+            try:
+                self.data_logger.log_error(
+                    "Analysis", f"killed at close after {timeout_s:.0f} s: {label}; {outcome}")
+            except Exception:
+                pass
+        elif state == "finished":
+            self.log(f"[ANALYSIS] finished during close: {label}")
+        if dropped:
+            self.log(f"[ANALYSIS] {len(dropped)} queued run(s) dropped at close: "
+                     + ", ".join(dropped))
 
     def on_export_finished(self, filename):
         """Handle successful CSV export."""
@@ -1699,6 +1846,30 @@ class ScopeDelayMainWindow(QMainWindow):
             "It is also written automatically when the window closes.")
         self.btn_session_report.clicked.connect(self.on_build_session_report)
         strip.addWidget(self.btn_session_report)
+
+        # Automatic shot analysis. The two checkboxes are remembered in
+        # connection_memory.json like the ports are.
+        strip.addSpacing(16)
+        self.chk_analyze = QCheckBox("Analyze after each shot")
+        self.chk_analyze.setChecked(bool(self.conn.get("ANALYZE_AFTER_SHOT", True)))
+        self.chk_analyze.setToolTip(
+            "Run python -m analysis for the shot once its last scope file is on disk.")
+        self.chk_analyze.toggled.connect(
+            lambda on: save_memory("ANALYZE_AFTER_SHOT", bool(on)))
+        strip.addWidget(self.chk_analyze)
+        self.chk_show_plots = QCheckBox("Show plots after analysis")
+        self.chk_show_plots.setChecked(bool(self.conn.get("SHOW_ANALYSIS_PLOTS", True)))
+        self.chk_show_plots.toggled.connect(
+            lambda on: save_memory("SHOW_ANALYSIS_PLOTS", bool(on)))
+        strip.addWidget(self.chk_show_plots)
+        self.btn_analyze_all = QPushButton("Analyze all shots")
+        self.btn_analyze_all.setToolTip(
+            "python -m analysis <logs root>: every session, shots already done are skipped.")
+        self.btn_analyze_all.clicked.connect(self.on_analyze_all_shots)
+        strip.addWidget(self.btn_analyze_all)
+        self.btn_open_analysis = QPushButton("Open analysis folder")
+        self.btn_open_analysis.clicked.connect(self.on_open_analysis_folder)
+        strip.addWidget(self.btn_open_analysis)
 
         strip.addStretch()
         parent_layout.addLayout(strip)
@@ -3588,6 +3759,12 @@ class ScopeDelayMainWindow(QMainWindow):
                 saved_files, failed_files = self._save_captures_sync()
                 if saved_files:
                     self.log(f"[AUTO-SAVE] Saved on close: {', '.join(saved_files)}")
+                    if self._current_shot_number:
+                        # The GUI is going away; no run is started for files
+                        # written here. The pipeline's cache picks the shot up.
+                        self.log(f"[ANALYSIS] shot {self._current_shot_number} was saved "
+                                 "on close and is not analysed now; press Analyze all "
+                                 "shots in a later session")
                 if failed_files:
                     names = [Path(p).name for p in failed_files]
                     self.log(f"[AUTO-SAVE ERROR] NOT saved on close: {', '.join(names)}")
@@ -3613,6 +3790,11 @@ class ScopeDelayMainWindow(QMainWindow):
             except Exception as e:
                 self.log(f"[AUTO-SAVE ERROR] Failed to save scope data: {e}")
 
+        # After the close-save, before SESSION_END: the analysis run in
+        # flight gets up to 15 s, then is killed, and either outcome is in
+        # the logs before they close.
+        self._shutdown_analysis()
+
         if hasattr(self, 'wj_workers'):
             for worker in self.wj_workers:
                 if worker.isRunning():
@@ -3630,6 +3812,11 @@ class ScopeDelayMainWindow(QMainWindow):
 
         if hasattr(self, 'sf6_window') and self.sf6_window:
             self.sf6_window.close()
+
+        # A top-level window of its own: left open it would keep the process
+        # alive (and the COM ports held) after the main window is gone.
+        if getattr(self, "analysis_window", None) is not None:
+            self.analysis_window.close()
 
         # Shot logs and the counter must be complete: the GUI is usually
         # closed within seconds of a shot.

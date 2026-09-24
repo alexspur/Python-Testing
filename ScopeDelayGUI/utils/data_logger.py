@@ -27,6 +27,7 @@ class DataLogger:
     - SCOPE_CHANNEL: per-channel capture stats and preamble (param2=channel)
     - CLIP_WARNING: samples on the ADC rails (param2=channel, param3=count)
     - CONFIG / CONNECT / DISCONNECT / TIMING: device settings, links, capture timing
+    - ANALYSIS: one shot's analysis result (param1=status, param4=shot number)
     - SCOPE_ALL: All scopes captured
     - RELAY_COMMAND / RELAY_STATE: relay switching (param1=name, param2=requested,
       param3=confirmed or UNKNOWN, param4=ok/failed)
@@ -493,6 +494,27 @@ class DataLogger:
             param4=shot_number,
             notes=(f"CH{channel}: {clipped} of {points} samples on the ADC rails "
                    f"(low rail {low}, high rail {high}, codes {code_min}..{code_max})")
+        )
+
+    def log_analysis(self, shot_number, status, spacing_cmd_ns='', spacing_qsw_ns='',
+                     spacing_rvm_ns='', error=''):
+        """One shot's analysis result, from a '[ANALYSIS] result' line.
+
+        param1 = status (ok, no_fire, missing_waveforms, failed), param2 =
+        commanded pulse spacing in ns, param3 = spacing measured from the
+        Q-switch monitors in ns, param4 = shot number (the per-shot key the
+        other scope events use). notes = 'spacing_rvm_ns=<RVM-measured
+        spacing>; error=<pipeline error or blank>'.
+        """
+        self._log_event(
+            event_type='ANALYSIS',
+            source='Analysis',
+            param1=status,
+            param2='' if spacing_cmd_ns is None else spacing_cmd_ns,
+            param3='' if spacing_qsw_ns is None else spacing_qsw_ns,
+            param4='' if shot_number is None else shot_number,
+            notes=f"spacing_rvm_ns={'' if spacing_rvm_ns is None else spacing_rvm_ns}; "
+                  f"error={error or ''}"
         )
 
     # ================================================================
