@@ -296,6 +296,7 @@ class ScopeDelayMainWindow(QMainWindow):
         self.auto_save_delay_sec = auto_save_delay_sec
         self._captures_dirty = False
         self._export_silent = False
+        self._export_failed = {}          # scope id -> filename, this export
         self._auto_save_timer = QTimer(self)
         self._auto_save_timer.setSingleShot(True)
         self._auto_save_timer.timeout.connect(self._auto_save_fire)
@@ -1279,6 +1280,7 @@ class ScopeDelayMainWindow(QMainWindow):
         # is written.
         self.export_workers = []
         self._export_done_paths = []
+        self._export_failed = {}
         self._export_pending = len(self.captured_scopes)
         self._export_silent = silent
         # Which scopes this export covers. A capture that lands while it runs
@@ -1307,6 +1309,11 @@ class ScopeDelayMainWindow(QMainWindow):
                 continue
 
             worker = CSVExportWorker(self.captured_scopes[scope_id], path)
+            # The error signal carries only a message. Tag the worker so
+            # on_export_error can attribute the failure to this scope and
+            # file through self.sender().
+            worker.scope_id = scope_id
+            worker.export_path = path
             worker.finished.connect(self._on_one_export_finished)
             worker.error.connect(self.on_export_error)
             self.export_workers.append(worker)
@@ -1399,27 +1406,59 @@ class ScopeDelayMainWindow(QMainWindow):
         except Exception as e:
             self.log(f"[EXPORT] could not log SCOPE_EXPORT for {filename}: {e}")
 
+        self._finish_one_export()
+
+    def _finish_one_export(self):
+        """Count one worker down; run completion when the last one lands.
+
+        Shared by the finished and error paths. on_export_error used to return
+        without counting down, so one failed writer out of three left
+        _export_pending stuck above zero: completion never ran for the scopes
+        that had succeeded, and the unsaved flag was never settled.
+        """
         self._export_pending -= 1
-        if self._export_pending <= 0:
-            # Only the scopes this export covered are saved. If a capture
-            # landed while it was running, stay dirty and schedule another
-            # pass rather than reporting data written that never was.
-            covered = getattr(self, "_export_scope_ids", None)
-            late = set(self.captured_scopes) - (covered or set())
-            if late:
-                names = ", ".join(f"Rigol #{sid}" for sid in sorted(late))
-                self.log(f"[EXPORT] {names} finished during the export; saving again.")
-                self._mark_captures_dirty()
-            else:
-                self._captures_dirty = False  # everything written — nothing to flush on close
-            if not self._export_silent:
-                files = "\n".join(self._export_done_paths)
-                QMessageBox.information(
-                    self,
-                    "Export Complete",
-                    f"✅ Exported {len(self._export_done_paths)} file(s):\n\n{files}"
-                )
-            self.set_status("green", "Export complete")
+        if self._export_pending > 0:
+            return
+
+        covered = getattr(self, "_export_scope_ids", None) or set()
+        failed = dict(getattr(self, "_export_failed", {}) or {})
+        # A capture that landed while this export ran is not covered by it
+        # and must not be reported as written. A failed scope is handled
+        # separately below.
+        late = set(self.captured_scopes) - covered - set(failed)
+
+        if failed:
+            names = ", ".join(failed[sid] for sid in sorted(failed))
+            self.log(f"[EXPORT] ❌ NOT saved: {names} - that data is still unsaved")
+            # Stay unsaved so the close-save tries again and reports it, but
+            # do not re-arm the timer: a full disk would otherwise retry every
+            # two seconds with a dialog each time.
+            self._captures_dirty = True
+        if late:
+            names = ", ".join(f"Rigol #{sid}" for sid in sorted(late))
+            self.log(f"[EXPORT] {names} finished during the export; saving again.")
+            self._mark_captures_dirty()
+        if not failed and not late:
+            self._captures_dirty = False  # everything written — nothing to flush on close
+
+        if failed:
+            self.error_popup(
+                "Export failed",
+                "These scope files were NOT written:\n\n"
+                + "\n".join(failed[sid] for sid in sorted(failed))
+                + "\n\nThe captured data is still in memory. It will be tried "
+                  "again when the window closes. See the GUI log for the reason.")
+            self.set_status("red", f"Export: {len(failed)} file(s) NOT saved")
+            return
+
+        if not self._export_silent:
+            files = "\n".join(self._export_done_paths)
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                f"✅ Exported {len(self._export_done_paths)} file(s):\n\n{files}"
+            )
+        self.set_status("green", "Export complete")
 
     def on_export_finished(self, filename):
         """Handle successful CSV export."""
@@ -1435,17 +1474,37 @@ class ScopeDelayMainWindow(QMainWindow):
         self.log(f"[EXPORT] ✅ Saved to {filename}")
 
     def on_export_error(self, error_msg):
-        """Handle CSV export error."""
+        """One CSV export failed. Record it as THAT scope's failure and let the
+        other scopes' completion run.
+
+        The worker's error signal carries only a message; the scope and file
+        come from the attributes _start_async_export tagged on the sender.
+        A direct call with no sender is attributed to scope 0.
+        """
         if self.export_progress:
             self.export_progress.close()
 
-        QMessageBox.critical(
-            self,
-            "Export Error",
-            f"❌ Failed to export CSV:\n\n{error_msg}"
-        )
-        self.set_status("red", "Export failed")
-        self.log(f"[EXPORT] ❌ Error: {error_msg}")
+        worker = self.sender()
+        sid = int(getattr(worker, "scope_id", 0) or 0)
+        path = getattr(worker, "export_path", "") or ""
+        name = Path(path).name if path else "(unknown file)"
+        shot = self._current_shot_number if self._current_shot_number else ''
+
+        self.set_status("red", f"Export failed: Rigol #{sid}" if sid else "Export failed")
+        self.log(f"[EXPORT] ❌ Rigol #{sid} {name}: {error_msg}")
+        self.data_logger.log_error(f"Rigol{sid}", f"export failed: {name}: {error_msg}")
+        self.data_logger.log_scope_export(
+            sid, name, 0, ok=False, shot_number=shot, reason=str(error_msg))
+
+        # Not covered by this export any more; completion keeps it unsaved.
+        if not hasattr(self, "_export_failed") or self._export_failed is None:
+            self._export_failed = {}
+        self._export_failed[sid] = name
+        covered = getattr(self, "_export_scope_ids", None)
+        if covered is not None:
+            covered.discard(sid)
+
+        self._finish_one_export()
 
     # def on_export_csv(self):
     #     import csv
@@ -3111,22 +3170,114 @@ class ScopeDelayMainWindow(QMainWindow):
         self.scope_window.raise_()
         self.scope_window.activateWindow()
 
+    @staticmethod
+    def _expected_rows(data):
+        """Rows the writer will produce: one shared time axis, the longest
+        channel's length (an empty channel is padded, not dropped)."""
+        try:
+            return max((len(v) for _t, v in data), default=0)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _verify_csv(path, expected_rows):
+        """None if the file is on disk with the expected row count, else why not.
+
+        Counted from the bytes on disk, not from the arrays in memory: this is
+        the check that turns "the writer returned" into "the data is saved".
+        """
+        p = Path(path)
+        if not p.exists():
+            return "file not on disk"
+        lines, size, last = 0, 0, b"\n"
+        with open(p, "rb") as f:
+            while True:
+                chunk = f.read(8 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                lines += chunk.count(b"\n")
+                last = chunk[-1:]
+        if size and last != b"\n":
+            lines += 1                      # unterminated final line
+        rows = max(lines - 1, 0)            # minus the header
+        if rows != expected_rows:
+            return f"{rows} rows on disk, expected {expected_rows}"
+        return None
+
     def _save_captures_sync(self):
         """Write all captured scopes to rigol<N>_<session ts>.csv in the session
         folder, synchronously (on the calling thread) so the files are flushed
-        before the app exits. Used by closeEvent. Returns the paths written."""
-        saved = []
+        before the app exits. Used by closeEvent.
+
+        Returns (saved, failed) path lists. A path counts as saved only if the
+        writer raised nothing AND the file is on disk with the expected row
+        count. CSVExportWorker.run() swallows every exception and reports it
+        on its error signal, which an inline instance had no receiver for: a
+        full disk, a locked file or a missing folder came back as "Saved on
+        close", the unsaved flag was cleared, and an unrepeatable shot was
+        gone with no ERROR anywhere. The flag now stays set if anything failed.
+        """
+        saved, failed = [], []
+        shot = self._current_shot_number if self._current_shot_number else ''
         for scope_id in sorted(self.captured_scopes):
+            data = self.captured_scopes[scope_id]
             path = self.data_logger.scope_export_path(
                 scope_id, shot_index=self.shot_logger.session_shot_index)
-            try:
-                # CSVExportWorker.run() is plain (no thread) when called directly.
-                CSVExportWorker(self.captured_scopes[scope_id], path).run()
+            name = Path(path).name
+
+            if self._total_points(data) == 0:
+                why = "capture had no samples"      # same rule as the async path
+            else:
+                errors = []
+                try:
+                    worker = CSVExportWorker(data, path)
+                    # Same thread as run(), so the signal is delivered
+                    # synchronously inside it: nothing can be swallowed.
+                    worker.error.connect(errors.append)
+                    # CSVExportWorker.run() is plain (no thread) when called directly.
+                    worker.run()
+                except Exception as e:
+                    errors.append(str(e))
+                why = errors[0] if errors else self._verify_csv(path, self._expected_rows(data))
+
+            if why is None:
                 saved.append(path)
-            except Exception as e:
-                self.log(f"[AUTO-SAVE] {path} failed: {e}")
-        self._captures_dirty = False
-        return saved
+                self.data_logger.log_scope_export(
+                    scope_id, name, self._total_points(data), ok=True, shot_number=shot)
+            else:
+                failed.append(path)
+                self.log(f"[AUTO-SAVE ERROR] Rigol #{scope_id}: {name} NOT saved - {why}")
+                self.data_logger.log_error(
+                    f"Rigol{scope_id}", f"close-save failed: {name}: {why}")
+                self.data_logger.log_scope_export(
+                    scope_id, name, 0, ok=False, shot_number=shot, reason=why)
+
+        # Only a clean sweep clears the flag.
+        self._captures_dirty = bool(failed)
+        return saved, failed
+
+    def _ask_close_anyway(self, names):
+        """Close-save failed: lose the data, or stay open and retry?
+
+        Returns True to close anyway. "Keep window open" is both the default
+        and the Escape action, so an accidental Enter cannot discard a shot.
+        Its own method so tests can set the choice.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("Waveforms NOT saved")
+        box.setText("These scope files could not be written on close:\n\n"
+                    + "\n".join(names)
+                    + "\n\nThat data exists only in memory. See the GUI log "
+                      "for the reason.")
+        keep = box.addButton("Keep window open", QMessageBox.ButtonRole.RejectRole)
+        lose = box.addButton("Close anyway, data will be lost",
+                             QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(keep)
+        box.setEscapeButton(keep)
+        box.exec()
+        return box.clickedButton() is lose
 
     def closeEvent(self, event):
         # Flush any captured waveforms that haven't been saved yet. The auto-save
@@ -3144,9 +3295,31 @@ class ScopeDelayMainWindow(QMainWindow):
 
         if self._captures_dirty and self.captured_scopes:
             try:
-                saved_files = self._save_captures_sync()
+                saved_files, failed_files = self._save_captures_sync()
                 if saved_files:
                     self.log(f"[AUTO-SAVE] Saved on close: {', '.join(saved_files)}")
+                if failed_files:
+                    names = [Path(p).name for p in failed_files]
+                    self.log(f"[AUTO-SAVE ERROR] NOT saved on close: {', '.join(names)}")
+                    if not self._ask_close_anyway(names):
+                        # Operator keeps the window. The data stays in memory
+                        # and unsaved; closing again retries the save. The
+                        # checklist poll was stopped above, so restart it.
+                        self.log("[AUTO-SAVE] Operator chose: keep window open - "
+                                 "close again to retry the save")
+                        self.data_logger.log_info(
+                            "AutoSave", "close cancelled by operator; unsaved: "
+                            + ", ".join(names))
+                        self._captures_dirty = True
+                        if hasattr(self, "_interlock_timer"):
+                            self._interlock_timer.start()
+                        event.ignore()
+                        return
+                    self.log("[AUTO-SAVE] Operator chose: close anyway - "
+                             f"{len(names)} file(s) LOST: {', '.join(names)}")
+                    self.data_logger.log_error(
+                        "AutoSave", "closed with unsaved waveforms, data lost: "
+                        + ", ".join(names))
             except Exception as e:
                 self.log(f"[AUTO-SAVE ERROR] Failed to save scope data: {e}")
 

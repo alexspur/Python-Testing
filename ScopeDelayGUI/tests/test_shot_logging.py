@@ -1042,6 +1042,176 @@ class TestGuiShotLogging(unittest.TestCase):
                 self.assertNotIn(forbidden, scope.calls,
                                  f"scope {sid} re-armed with {forbidden}()")
 
+    # ------------------------------------------------ truthful export on close
+    def _capture(self, n=1000):
+        """A 4-channel capture of n points per channel."""
+        import numpy as np
+        t = np.arange(n) * 1e-9
+        return tuple((t, np.full(n, float(k))) for k in range(4))
+
+    def _exports(self):
+        return [r for r in read_rows(self.dl.get_log_file_path())
+                if r["event_type"] == "SCOPE_EXPORT"]
+
+    def _unwritable_paths(self):
+        """Point the shot filenames into a folder that does not exist."""
+        bad = self.tmp / "no_such_dir"
+        self.win.data_logger.scope_export_path = (
+            lambda sid, shot_index=None: str(bad / f"rigol{sid}_x.csv"))
+
+    def test_close_save_reports_a_file_that_was_not_written(self):
+        """run() swallows every writer exception and reports it only on its
+        error signal, which the inline close-save instance had no receiver
+        for: a full disk or a missing folder came back as 'Saved on close'."""
+        self.win.captured_scopes = {1: self._capture()}
+        self.win._captures_dirty = True
+        self._unwritable_paths()
+
+        saved, failed = self.win._save_captures_sync()
+
+        self.assertEqual(saved, [])
+        self.assertEqual(len(failed), 1)
+        self.assertTrue(self.win._captures_dirty, "a failed save must stay unsaved")
+        self.assertTrue(self._exports() and self._exports()[-1]["notes"].startswith("FAILED"))
+        self.assertEqual(self._exports()[-1]["source"], "Rigol1")
+        self.assertIn("ERROR", event_types(self.dl.get_log_file_path()))
+
+    def test_close_save_failure_keep_window_open_cancels_the_close(self):
+        """The default choice. The window stays, the data stays unsaved, and
+        closing again retries the save."""
+        self.win.captured_scopes = {1: self._capture()}
+        self.win._captures_dirty = True
+        self._unwritable_paths()
+        asked = []
+        self.win._ask_close_anyway = lambda names: (asked.append(list(names)), False)[1]
+        # Let the teardown close succeed once this test is done asserting.
+        self.addCleanup(setattr, self.win, "_ask_close_anyway", lambda names: True)
+
+        closed = self.win.close()
+
+        self.assertFalse(closed, "keep window open must cancel the close event")
+        self.assertEqual(asked, [["rigol1_x.csv"]], "the operator must be asked, by file")
+        self.assertTrue(self.win._captures_dirty, "the data must stay marked unsaved")
+        self.assertNotIn("SESSION_END", event_types(self.dl.get_log_file_path()),
+                         "a cancelled close must not end the session")
+        infos = [r for r in read_rows(self.dl.get_log_file_path())
+                 if r["event_type"] == "INFO" and "close cancelled" in r["notes"]]
+        self.assertEqual(len(infos), 1, "the choice must be in the timeline")
+        text = Path(self.dl.gui_log_file).read_text(encoding="utf-8")
+        self.assertIn("keep window open", text.lower())
+
+        # Closing again retries: this time the folder exists, so it saves.
+        self.win.data_logger.scope_export_path = (
+            lambda sid, shot_index=None: str(self.tmp / f"rigol{sid}_retry.csv"))
+        self.assertTrue(self.win.close(), "the retry should close the window")
+        self.assertTrue((self.tmp / "rigol1_retry.csv").exists())
+        self.assertFalse(self.win._captures_dirty)
+
+    def test_close_save_failure_close_anyway_loses_the_data_and_says_so(self):
+        self.win.captured_scopes = {1: self._capture()}
+        self.win._captures_dirty = True
+        self._unwritable_paths()
+        self.win._ask_close_anyway = lambda names: True
+
+        closed = self.win.close()
+
+        self.assertTrue(closed, "close anyway must let the window close")
+        self.assertIn("SESSION_END", event_types(self.dl.get_log_file_path()))
+        errors = [r for r in read_rows(self.dl.get_log_file_path())
+                  if r["event_type"] == "ERROR" and "data lost" in r["notes"]]
+        self.assertEqual(len(errors), 1, "losing data must be an ERROR in the timeline")
+        self.assertIn("rigol1_x.csv", errors[0]["notes"])
+        text = Path(self.dl.gui_log_file).read_text(encoding="utf-8")
+        self.assertIn("close anyway", text.lower())
+
+    def test_close_save_checks_the_row_count_on_disk(self):
+        """A writer that returns without raising but leaves a short file is
+        not a save. This is what makes 'the writer returned' into 'the data
+        is on disk'."""
+        import gui.main_window as mw
+
+        class ShortWriter:
+            class _Sig:
+                def connect(self, fn):
+                    pass
+            error = _Sig()
+
+            def __init__(self, data, filename, parent=None):
+                self.filename = filename
+
+            def run(self):
+                with open(self.filename, "w") as f:
+                    f.write("Time (s),Voltage_CH1 (V)\n0,0\n")
+
+        self.win.captured_scopes = {2: self._capture(n=500)}
+        self.win._captures_dirty = True
+        with patch.object(mw, "CSVExportWorker", ShortWriter):
+            saved, failed = self.win._save_captures_sync()
+
+        self.assertEqual(saved, [])
+        self.assertEqual(len(failed), 1)
+        self.assertTrue(self.win._captures_dirty)
+        notes = self._exports()[-1]["notes"]
+        self.assertTrue(notes.startswith("FAILED"), notes)
+        self.assertIn("500", notes, "the expected row count must be in the reason")
+
+    def test_close_save_success_clears_dirty_and_logs_ok(self):
+        self.win.captured_scopes = {1: self._capture(n=250)}
+        self.win._captures_dirty = True
+
+        saved, failed = self.win._save_captures_sync()
+
+        self.assertEqual(failed, [])
+        self.assertEqual(len(saved), 1)
+        self.assertTrue(Path(saved[0]).exists())
+        self.assertFalse(self.win._captures_dirty)
+        self.assertTrue(self._exports()[-1]["notes"].startswith("OK"))
+
+    def test_zero_sample_close_save_is_a_failure_not_a_file(self):
+        import numpy as np
+        empty = (np.array([]), np.array([]))
+        self.win.captured_scopes = {3: (empty, empty, empty, empty)}
+        self.win._captures_dirty = True
+
+        saved, failed = self.win._save_captures_sync()
+
+        self.assertEqual(saved, [])
+        self.assertEqual(len(failed), 1)
+        self.assertFalse(Path(failed[0]).exists(), "no headers-only file may be written")
+        self.assertIn("no samples", self._exports()[-1]["notes"])
+
+    def test_export_error_counts_down_and_lets_completion_run(self):
+        """One failed writer out of three used to leave _export_pending stuck
+        above zero, so completion never ran for the scopes that succeeded and
+        the unsaved flag was never settled."""
+        import gui.main_window as mw
+        self.win.captured_scopes = {1: self._capture(n=100), 2: self._capture(n=100)}
+        self.win._export_pending = 2
+        self.win._export_scope_ids = {1, 2}
+        self.win._export_done_paths = []
+        self.win._export_failed = {}
+        self.win._export_silent = True
+        self.win._captures_dirty = True
+
+        bad = str(self.tmp / "no_such_dir" / "rigol1_x.csv")
+        worker = mw.CSVExportWorker(self.win.captured_scopes[1], bad)
+        worker.scope_id, worker.export_path = 1, bad
+        worker.error.connect(self.win.on_export_error)
+        worker.run()                    # same thread: the error lands now
+
+        self.assertEqual(self.win._export_pending, 1, "a failure must count down")
+        last = self._exports()[-1]
+        self.assertTrue(last["notes"].startswith("FAILED"), last["notes"])
+        self.assertEqual(last["source"], "Rigol1", "the failure must name its scope")
+
+        self.win._on_one_export_finished(str(self.tmp / "rigol2_x.csv"))
+
+        self.assertEqual(self.win._export_pending, 0, "completion must have run")
+        self.assertTrue(self.win._captures_dirty, "the failed scope is still unsaved")
+        self.assertFalse(self.win._auto_save_timer.isActive(),
+                         "a failed write must not be retried on the timer")
+        self.assertTrue(any("rigol1_x.csv" in x for _t, x in self.popups), self.popups)
+
     # ------------------------------------------- a Read is not a shot capture
     def _run_read(self, sid=1):
         """Press Read R<sid> and wait for both the read and its export.
