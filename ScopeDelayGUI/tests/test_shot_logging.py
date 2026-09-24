@@ -1389,6 +1389,82 @@ class TestGuiShotLogging(unittest.TestCase):
         self.assertNotIn("single", scope.calls)
         self.assertEqual(scope.calls, ["wait_for_trigger", "capture_four_channels"])
 
+    # ------------------------------------------ swapped WJ supplies refused
+    def _wj_port(self, device, serial):
+        from types import SimpleNamespace
+        return SimpleNamespace(device=device, vid=0x0451, pid=0x3410,
+                               serial_number=serial, location="1-13.1.2",
+                               description="TUSB3410")
+
+    def _wj_identity(self, ports, versions):
+        """Fake the USB table and the WJ 'V' replies the GUI would see."""
+        import gui.main_window as mw
+        p1 = patch.object(mw.list_ports, "comports", lambda: ports)
+        p2 = patch.object(mw, "wj_read_version", lambda port: versions.get(port))
+        p1.start(); p2.start()
+        self.addCleanup(p1.stop); self.addCleanup(p2.stop)
+
+        class FakeWJ:
+            def close(self):
+                pass
+        self.win.wj_units[0] = FakeWJ()
+        self.win.wj_units[1] = FakeWJ()
+
+    def test_wj_connect_accepts_right_serial_and_right_firmware(self):
+        self._wj_identity([self._wj_port("COM13", "TUSB3410________")], {"COM13": "15"})
+        self.assertEqual(self.win._identify_wj_port(0, "COM13"), "15")   # WJ1 = NEG
+
+    def test_wj_connect_refuses_right_serial_wrong_firmware(self):
+        """What happened on 2026-09-24: the NEG serial on the supply whose
+        controller answers 14 - the positive one. Yesterday this connected."""
+        self._wj_identity([self._wj_port("COM13", "TUSB3410________")], {"COM13": "14"})
+
+        with self.assertRaises(IOError) as cm:
+            self.win._identify_wj_port(0, "COM13")
+
+        msg = str(cm.exception)
+        for piece in ("COM13", "firmware 14", "firmware 15", "WJ1", "polarity LED", "USB cable"):
+            self.assertIn(piece, msg)
+        errors = [r for r in self._events("ERROR", "WJ1") if "swapped" in r["notes"]]
+        self.assertEqual(len(errors), 1, "the refusal must be in the timeline")
+
+    def test_wj_manual_connect_button_refuses_a_swapped_supply(self):
+        self._wj_identity([self._wj_port("COM13", "TUSB3410________")], {"COM13": "14"})
+        connected = []
+        self.win.wj_units[0].connect = lambda port: connected.append(port)
+
+        self.win.on_wj_connect(0, port_override="COM13")
+
+        self.assertEqual(connected, [], "the supply must not be opened")
+        self.assertEqual(self._events("CONNECT", "WJ1"), [], "no CONNECT row for a refusal")
+        text = Path(self.dl.gui_log_file).read_text(encoding="utf-8")
+        self.assertIn("swapped", text)
+
+    def test_find_supplies_raises_on_a_swapped_pair_and_resolves_a_good_one(self):
+        import instruments.glassman_id as gid
+        ports = [self._wj_port("COM13", "TUSB3410________"), self._wj_port("COM15", "")]
+        p = patch.object(gid.list_ports, "comports", lambda: ports)
+        p.start(); self.addCleanup(p.stop)
+
+        # 2026-09-23: the pair as verified.
+        p_ok = patch.object(gid, "read_version", lambda port: {"COM13": "15", "COM15": "14"}[port])
+        p_ok.start()
+        try:
+            self.assertEqual(gid.find_supplies(), {"NEG": "COM13", "POS": "COM15"})
+        finally:
+            p_ok.stop()
+
+        # 2026-09-24: same serials, firmware swapped.
+        p_bad = patch.object(gid, "read_version", lambda port: {"COM13": "14", "COM15": "15"}[port])
+        p_bad.start()
+        try:
+            with self.assertRaises(IOError) as cm:
+                gid.find_supplies()
+        finally:
+            p_bad.stop()
+        self.assertIn("swapped", str(cm.exception))
+        self.assertIn("polarity LED", str(cm.exception))
+
     def test_manual_connect_buttons_log_connect_too(self):
         """Auto-connect was the only path with CONNECT rows; the manual
         buttons for the BNC575, the relay and the Opta must log them too."""

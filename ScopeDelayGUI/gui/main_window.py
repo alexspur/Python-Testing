@@ -45,6 +45,7 @@ from instruments.glassman_id import (
     SUPPLIES as WJ_SUPPLIES,
     matches as wj_matches,
     read_version as wj_read_version,
+    swap_message as wj_swap_message,
 )
 from instruments.bnc575 import BNC575Controller
 from instruments.rigol import RigolScope
@@ -2922,8 +2923,13 @@ class ScopeDelayMainWindow(QMainWindow):
         two supplies have been seen swapping hub locations. The WJ protocol
         itself cannot report polarity, model or serial number.
 
-        Returns the firmware version (logged, not matched on). Raises IOError
-        if the port is gone, holds the other supply, or never answers.
+        The USB serial alone is not enough: on 2026-09-24 the
+        "TUSB3410________" link answered firmware 14 - the POSITIVE supply's
+        controller - after answering 15 the day before, so the serial follows
+        the adapter or cable, not the supply, and the pair had been swapped.
+        The firmware is therefore matched too, and a mismatch refuses the
+        connect. Raises IOError if the port is gone, holds the other supply,
+        never answers, or answers with the wrong firmware.
         """
         key = self._WJ_SUPPLY_KEYS[index]
         p = next((p for p in list_ports.comports() if p.device == port), None)
@@ -2939,6 +2945,11 @@ class ScopeDelayMainWindow(QMainWindow):
         version = wj_read_version(port)
         if version is None:
             raise IOError(f"no WJ reply on {port}")
+        expected = WJ_SUPPLIES[key].get("firmware")
+        if expected and version != expected:
+            msg = wj_swap_message(f"WJ{index+1} ({key})", port, version, expected)
+            self.data_logger.log_error(f"WJ{index+1}", msg)
+            raise IOError(msg)
         return version
 
     def on_wj_connect(self, index, port_override=None):

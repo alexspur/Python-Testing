@@ -31,19 +31,29 @@ from serial.tools import list_ports
 #   serial_number  best (FTDI USB-RS232 adapter attached to the supply)
 #   location       tied to a physical hub port
 #
-# The two WJ supplies report different USB serials, and a cable swap test
-# showed the serial follows the supply, not the hub port:
-#   one supply reports "TUSB3410________"
+# The two WJ links report different USB serials:
+#   one reports "TUSB3410________"
 #   the other reports an empty serial ""
-# That makes the match independent of which USB port each supply uses.
+# That is independent of which hub port each is plugged into. It is NOT an
+# identity for the supply itself. Evidence from 2026-09-24: the
+# "TUSB3410________" link, which on 2026-09-23 answered WJ firmware 15 (the
+# NEGATIVE supply, verified that day by unplugging the positive one), answered
+# firmware 14 the next morning - the POSITIVE supply's controller. A firmware
+# revision cannot move between units, so the TUSB3410 serial follows the USB
+# adapter or cable, not the supply, and the two had been swapped. The GUI
+# assigned WJ1/WJ2 backwards that morning without noticing.
 #
-# Verified 2026-09-23 by unplugging the POSITIVE supply:
+# Identity is therefore serial AND firmware, both required:
 #   POS  serial ""                  WJ firmware 14
 #   NEG  serial "TUSB3410________"  WJ firmware 15
-# The firmware version is recorded as documentation only; nothing matches on
-# it (a serviced or reflashed supply would change it). Do NOT match these
-# supplies on location: the two have been seen swapping hub locations.
-# Confirm POS with the front panel polarity LED before trusting this table.
+# find_supplies() and the GUI's connect refuse a port whose firmware does not
+# match its serial's rule, and say so. A serviced or reflashed supply changes
+# its firmware and must be re-entered here deliberately: failing loud is the
+# point. Two units with equal firmware would be indistinguishable by this;
+# the durable fix is a uniquely-serialled FTDI adapter on each supply's RS-232
+# port (example below). Do NOT match on location: the two have been seen
+# swapping hub locations. Confirm POS with the front panel polarity LED before
+# trusting this table.
 # ---------------------------------------------------------------------------
 SUPPLIES = {
     "POS": {"vid": 0x0451, "pid": 0x3410, "serial_number": "",
@@ -142,8 +152,24 @@ def matches(p, rule):
     return True
 
 
+def swap_message(label, port, found, expected):
+    """The refusal when a port's firmware does not match its serial's rule.
+
+    One text for find_supplies() and the GUI, so the operator reads the same
+    thing in the console, the GUI log and the timeline.
+    """
+    return (f"{port} answers WJ firmware {found}; {label} is expected to be firmware "
+            f"{expected}. The supplies or their USB adapters/cables have been swapped: "
+            f"check the front-panel polarity LEDs and the USB cables before connecting.")
+
+
 def find_supplies(verify=True):
-    """Return {"POS": "COMx", "NEG": "COMy"}. Raise if anything is ambiguous."""
+    """Return {"POS": "COMx", "NEG": "COMy"}. Raise if anything is ambiguous.
+
+    With verify, each matched port must answer the WJ version query AND
+    report the firmware its rule expects. A swapped pair - right serials,
+    wrong firmware - raises instead of resolving backwards.
+    """
     ports = list_ports.comports()
     result = {}
     for name, rule in SUPPLIES.items():
@@ -154,8 +180,13 @@ def find_supplies(verify=True):
             devs = ", ".join(p.device for p in hits)
             raise LookupError(f"{name}: rule matches several ports ({devs}). Make it more specific.")
         dev = hits[0].device
-        if verify and read_version(dev) is None:
-            raise IOError(f"{name}: {dev} matched but did not answer the WJ version query.")
+        if verify:
+            found = read_version(dev)
+            if found is None:
+                raise IOError(f"{name}: {dev} matched but did not answer the WJ version query.")
+            expected = rule.get("firmware")
+            if expected and found != expected:
+                raise IOError(swap_message(name, dev, found, expected))
         result[name] = dev
 
     if len(set(result.values())) != len(result):
