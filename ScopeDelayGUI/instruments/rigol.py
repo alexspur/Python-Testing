@@ -991,25 +991,28 @@ class RigolScope:
                                ch3: int = 3, ch4: int = 4,
                                timeout: float = 300.0) -> tuple:
         """
-        Arm single trigger, wait for acquisition, then capture four channels.
-        
+        Wait for an acquisition on an ALREADY ARMED scope, then read four channels.
+
+        This does not send :SINGle. The caller arms the scope before starting
+        the worker; re-arming here would discard an acquisition that landed
+        between the caller's arm and this call - the arm-time settings read
+        sits in exactly that window - and would leave the scope waiting for
+        a shot that has already happened.
+
         Args:
             ch1-ch4: Channel numbers (default: 1, 2, 3, 4)
             timeout: Maximum time to wait for trigger in seconds
-            
+
         Returns:
             Tuple of ((t1, v1), (t2, v2), (t3, v3), (t4, v4)) where each is numpy arrays
-            
+
         Raises:
             TimeoutError: If trigger doesn't occur within timeout
         """
-        # Arm single trigger
-        self.single()
-        
         # Wait for trigger and acquisition to complete
         if not self.wait_for_trigger(timeout=timeout):
             raise TimeoutError(f"Trigger timeout after {timeout} seconds")
-            
+
         # Capture all four channels
         return self.capture_four_channels(ch1, ch2, ch3, ch4)
 

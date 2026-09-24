@@ -2410,6 +2410,16 @@ class ScopeDelayMainWindow(QMainWindow):
         was asked to retrieve. Capture All still arms, which is correct:
         that happens before the shot, not after it.
         """
+        # A Read on a scope that is armed and waiting would send :STOP inside
+        # capture_four_channels and cancel the pending single acquisition:
+        # that scope would miss the shot. Refuse until its capture has landed
+        # (_finish_pending_capture drops it from the pending set).
+        if scope_id in (getattr(self, "_pending_capture_ids", None) or set()):
+            self.log(f"[{name}] Read refused: this scope is armed and waiting for "
+                     f"the shot. Read it after the capture completes.")
+            self.set_status("yellow", f"{name} is armed for the shot - Read refused")
+            return
+
         # Mark this scope read-only for the duration, so the shared capture
         # handler keeps the result out of captured_scopes and out of the
         # auto-save path. Set before the worker starts: the worker can finish
@@ -2421,6 +2431,9 @@ class ScopeDelayMainWindow(QMainWindow):
         self.log(f"[{name}] reading the last acquisition (no re-arm)...")
         self._set_capture_state(scope_id, "capturing")
 
+        begin = getattr(rigol, "timing_begin", None)
+        if begin is not None:
+            begin()
         worker = ImmediateFourChannelWorker(rigol, name)
         worker.finished.connect(
             lambda data, nm: self.on_four_channel_capture_finished(data, nm, scope_id))
@@ -2733,6 +2746,13 @@ class ScopeDelayMainWindow(QMainWindow):
                 if not connected:
                     self._set_capture_state(scope_id, "idle")
                     continue
+                # This is the ONE arm for this shot. The worker only waits
+                # and reads; the timing stamps start here so the arm and
+                # the settings read below are on the same timeline as the
+                # worker's trigger and transfer stamps.
+                begin = getattr(scope, "timing_begin", None)
+                if begin is not None:
+                    begin()
                 scope.stop()
                 scope.single()
                 self.data_logger.log_scope_arm(scope_id)

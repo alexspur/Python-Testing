@@ -160,6 +160,15 @@ class FakeScope:
         one = (np.array([0.0]), np.array([0.0]))
         return (one, one, one, one)
 
+    def wait_and_capture_four(self, *a, **k):
+        """Mirror of the driver: wait for the trigger, then read. Never arms."""
+        self.calls.append("wait_for_trigger")
+        return self.capture_four_channels()
+
+    def timing_begin(self):
+        # Not recorded in calls: tests assert on what reaches the scope.
+        self.timing = []
+
 
 def tmc_block(payload, newline=True, declared=None):
     """Build a TMC block: #<n><length><payload>[\\n].
@@ -1325,6 +1334,61 @@ class TestGuiShotLogging(unittest.TestCase):
         self.assertEqual(row["rigol2_ch1_label"], "UNKNOWN", "never a default")
         self.assertEqual(row["rigol2_ch1_probe_ratio"], "0", "the rest is still read")
 
+    # ------------------------------------------------------------ arm once
+    def test_capture_all_arms_exactly_once_and_before_the_worker(self):
+        """The GUI arms; the worker waits and reads. One :SINGle per shot,
+        sent before the settings read and before the worker starts."""
+        from utils.capture_single_worker import CaptureFourChannelWorker
+        scope = FakeScope()
+        self.win.rigol1 = scope
+        self.win.rigol1_connected = True
+
+        self.win.on_capture_all_scopes()                 # real start_four_channel_capture
+        worker = self.win.capture_worker_1
+        self.assertIsInstance(worker, CaptureFourChannelWorker)
+        self.assertTrue(worker.wait(5000), "worker did not finish")
+
+        self.assertEqual(scope.calls.count("single"), 1, "exactly one arm per shot")
+        self.assertLess(scope.calls.index("single"), scope.calls.index("get_settings"))
+        self.assertLess(scope.calls.index("single"), scope.calls.index("wait_for_trigger"))
+        # Nothing after the wait may arm.
+        after_wait = scope.calls[scope.calls.index("wait_for_trigger"):]
+        self.assertNotIn("single", after_wait)
+        self.assertIn("capture_four_channels", after_wait)
+
+    def test_read_is_refused_while_the_scope_is_armed_for_the_shot(self):
+        """capture_four_channels sends :STOP, which cancels a pending single
+        acquisition: a Read on an armed scope would make it miss the shot."""
+        scope = FakeScope()
+        self.win.rigol1 = scope
+        self.win.rigol1_connected = True
+        self.win.start_four_channel_capture = lambda *a, **k: None   # armed, still pending
+        self.win.on_capture_all_scopes()
+        self.assertIn(1, self.win._pending_capture_ids)
+        before = list(scope.calls)
+
+        self.win.on_capture_r1()
+
+        self.assertEqual(scope.calls, before, "nothing may reach an armed scope")
+        self.assertFalse(hasattr(self.win, "capture_worker_1"), "no read worker may start")
+        self.assertNotIn(1, self.win._read_only_scopes)
+        text = Path(self.dl.gui_log_file).read_text(encoding="utf-8")
+        self.assertIn("Read refused", text)
+        self.assertIn("armed and waiting for the shot", text)
+
+        # Once the shot's capture has landed, a Read is allowed again.
+        self.win._finish_pending_capture(1)
+        self.win.on_capture_r1()
+        self.assertTrue(hasattr(self.win, "capture_worker_1"))
+        self.win.capture_worker_1.wait(5000)
+
+    def test_the_capture_worker_itself_never_arms(self):
+        from utils.capture_single_worker import CaptureFourChannelWorker
+        scope = FakeScope()
+        CaptureFourChannelWorker(scope, "Rigol #1", timeout=1.0).run()   # inline, no thread
+        self.assertNotIn("single", scope.calls)
+        self.assertEqual(scope.calls, ["wait_for_trigger", "capture_four_channels"])
+
     def test_manual_connect_buttons_log_connect_too(self):
         """Auto-connect was the only path with CONNECT rows; the manual
         buttons for the BNC575, the relay and the Opta must log them too."""
@@ -2354,7 +2418,10 @@ class TestScopeSettingsReadback(unittest.TestCase):
         done = {}
 
         def worker():
+            # The caller arms; the worker waits and reads. Both on this
+            # thread here, so every stamp carries one id.
             scope.timing_begin()
+            scope.single()
             done["data"] = scope.wait_and_capture_four(timeout=2.0)
             done["tid"] = threading.get_ident()
 
@@ -2379,6 +2446,29 @@ class TestScopeSettingsReadback(unittest.TestCase):
         self.assertEqual(len(done["data"][0][1]), 16, "CH1 must still read fully")
         read_end = next(s for s in scope.timing if s["event"] == "ch1:read_end")
         self.assertEqual(read_end["points"], 16)
+
+    # ------------------------------------------------------------ arm once
+    def test_the_wait_path_never_sends_single(self):
+        """The worker only waits and reads. It used to re-arm, which would
+        discard an acquisition that landed between the caller's arm and the
+        worker start - the arm-time settings read sits in that window."""
+        session = canned_session(**{
+            ":TRIGger:STATus?": "TD",            # already triggered before we look
+            ":ACQuire:MDEPth?": "16",
+            ":WAVeform:PREamble?": "0,2,16,1,1e-9,0,0,0.01,0,128",
+            ":CHANnel1:DISPlay?": "1",
+        })
+        session._pending = bytearray(tmc_block(bytes(range(16))))
+        scope = make_scope(session)
+        scope.instr = session
+        scope.error_hook = lambda ch, msg: None
+
+        data = scope.wait_and_capture_four(timeout=2.0)
+
+        self.assertNotIn(":SINGle", session.written, "the wait path must not re-arm")
+        self.assertEqual(len(data[0][1]), 16,
+                         "an acquisition that was already complete must be read, not discarded")
+        self.assertIn(":STOP", session.written, "the read still stops the scope first")
 
     # ------------------------------------- keys a firmware does not answer
     def test_an_unanswered_settings_key_is_never_asked_again(self):
