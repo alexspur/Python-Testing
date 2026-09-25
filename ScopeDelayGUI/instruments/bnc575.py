@@ -656,13 +656,18 @@ class BNC575Controller:
         """Set T0 period in seconds (100ns to 5000s)"""
         return self._command(f":PULSE0:PER {period:.11e}")
     
-    def get_period(self) -> float:
-        """Get T0 period in seconds"""
+    def get_period(self) -> Optional[float]:
+        """Get T0 period in seconds, or None if the scope did not answer.
+
+        Returns None rather than a plausible default: a fabricated 0.001 is
+        indistinguishable from a real 1 ms reading, so a dead link used to be
+        logged as a genuine readback.
+        """
         resp = self._query(":PULSE0:PER?")
         try:
             return float(resp)
-        except:
-            return 0.001
+        except (TypeError, ValueError):
+            return None
     
     def set_frequency(self, freq: float) -> bool:
         """Set frequency in Hz (convenience method)"""
@@ -670,9 +675,11 @@ class BNC575Controller:
             return self.set_period(1.0 / freq)
         return False
     
-    def get_frequency(self) -> float:
-        """Get frequency in Hz"""
+    def get_frequency(self) -> Optional[float]:
+        """Get frequency in Hz, or None if the period could not be read."""
         p = self.get_period()
+        if p is None:
+            return None
         return 1.0 / p if p > 0 else 0
     
     def set_burst_count(self, count: int) -> bool:
@@ -722,13 +729,13 @@ class BNC575Controller:
         level = max(0.20, min(15.0, level))
         return self._command(f":PULSE0:TRIG:LEV {level:.3f}")
     
-    def get_trigger_level(self) -> float:
-        """Get trigger level"""
+    def get_trigger_level(self) -> Optional[float]:
+        """Get trigger level in volts, or None if it could not be read."""
         resp = self._query(":PULSE0:TRIG:LEV?")
         try:
             return float(resp)
-        except:
-            return 2.5
+        except (TypeError, ValueError):
+            return None
     
     def set_trigger_edge(self, edge: TriggerEdge) -> bool:
         """Set trigger edge: RIS or FALL"""
@@ -784,28 +791,32 @@ class BNC575Controller:
         ch = self._resolve_channel(channel)
         return self._command(f":PULSE{ch}:WIDT {width:.11e}")
     
-    def get_channel_width(self, channel) -> float:
-        """Get channel width in seconds"""
+    def get_channel_width(self, channel) -> Optional[float]:
+        """Get channel width in seconds, or None if it could not be read."""
         ch = self._resolve_channel(channel)
         resp = self._query(f":PULSE{ch}:WIDT?")
         try:
             return float(resp)
-        except:
-            return 1e-6
+        except (TypeError, ValueError):
+            return None
     
     def set_channel_delay(self, channel, delay: float) -> bool:
         """Set channel delay in seconds (-999.999s to 999.999s)"""
         ch = self._resolve_channel(channel)
         return self._command(f":PULSE{ch}:DEL {delay:.11e}")
     
-    def get_channel_delay(self, channel) -> float:
-        """Get channel delay in seconds"""
+    def get_channel_delay(self, channel) -> Optional[float]:
+        """Get channel delay in seconds, or None if it could not be read.
+
+        A fabricated 0.0 was especially misleading here: zero delay is a
+        perfectly ordinary setting, so a failed read looked like a real one.
+        """
         ch = self._resolve_channel(channel)
         resp = self._query(f":PULSE{ch}:DEL?")
         try:
             return float(resp)
-        except:
-            return 0.0
+        except (TypeError, ValueError):
+            return None
     
     def set_channel_polarity(self, channel, polarity: Polarity) -> bool:
         """Set channel polarity"""
@@ -841,14 +852,14 @@ class BNC575Controller:
         ch = self._resolve_channel(channel)
         return self._command(f":PULSE{ch}:OUTP:AMP {amplitude:.3f}")
     
-    def get_channel_amplitude(self, channel) -> float:
-        """Get output amplitude"""
+    def get_channel_amplitude(self, channel) -> Optional[float]:
+        """Get output amplitude in volts, or None if it could not be read."""
         ch = self._resolve_channel(channel)
         resp = self._query(f":PULSE{ch}:OUTP:AMP?")
         try:
             return float(resp)
-        except:
-            return 4.0
+        except (TypeError, ValueError):
+            return None
     
     def set_channel_mode(self, channel, mode: ChannelMode) -> bool:
         """Set channel mode"""

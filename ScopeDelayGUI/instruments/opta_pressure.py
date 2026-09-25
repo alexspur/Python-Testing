@@ -17,6 +17,17 @@ import time
 from pymodbus.client import ModbusTcpClient
 
 
+# ---------------------------------------------------------------- calibration
+#
+# The transducer is a 0-10 V / 0-100 psi unit, so full scale at 10.0 V is
+# 100.0 psi. These live in the Opta's holding registers, which reset to the
+# firmware defaults on every Opta reboot, so the GUI writes them at each
+# connect and verifies the readback rather than trusting whatever is loaded.
+OPTA_FULL_SCALE_PSI = 100.0   # holding register 0, psi x10
+OPTA_ZERO_OFFSET_MV = 0       # holding register 1
+OPTA_AVG_SAMPLES = 32         # holding register 2
+
+
 def _unit_kw(client):
     params = inspect.signature(client.read_input_registers).parameters
     for name in ("slave", "device_id", "unit"):
@@ -110,7 +121,7 @@ class OptaPressure:
     # ------------------------------------------------------------ calibration
 
     def set_full_scale_psi(self, psi):
-        """Pressure at 10.0 V in. Default 159.4, carried over from the Mega."""
+        """Pressure at 10.0 V in. 100.0 for the 0-100 psi transducer."""
         value = int(round(psi * 10))
         if not 0 < value <= 65535:
             raise ValueError(f"full scale out of range: {psi}")

@@ -4,6 +4,8 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 
+from utils.connect_memory import scope_resource
+
 
 class RigolScope:
     def __init__(self, resource):
@@ -87,11 +89,10 @@ class RigolScope:
 #  MAIN SCRIPT (edit VISA addresses as needed)
 # ===========================================================
 
-RIGOL_ADDR = [
-    "USB0::0x1AB1::0x0514::DS7A233300256::0::INSTR",
-    "USB0::0x1AB1::0x0514::DS7A232900210::0::INSTR",
-    "USB0::0x1AB1::0x0514::DS7A230800035::0::INSTR",
-]
+# Addresses come from scope_resource(), so this bench script follows
+# SCOPE_TRANSPORT instead of pinning its own transport. The list keeps the
+# order it had before the Ethernet move (scope 3, then 1, then 2).
+RIGOL_ADDR = [scope_resource(3), scope_resource(1), scope_resource(2)]
 
 scopes = []
 

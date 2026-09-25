@@ -7,6 +7,9 @@
  * Board: Arduino Mbed OS Opta Boards -> Opta
  * Libraries: ArduinoModbus, ArduinoRS485
  *
+ * TRANSDUCER
+ *   0-10 V output, 0-160 psi. 1 V = 16 psi.
+ *
  * WIRING CHANGE FROM THE MEGA
  *   The Mega needed a 10k/10k divider because its ADC tops out at 5 V.
  *   The Opta accepts 0-10 V on I1..I8 directly. Remove the divider and
@@ -23,7 +26,7 @@
  *     4   Status bits. bit0 under range, bit1 over range
  *
  *   Holding registers (read/write, FC03/FC06/FC16)
- *     0   Full scale pressure in psi x10. Default 1594 = 159.4 psi
+ *     0   Full scale pressure in psi x10. Default 1600 = 160.0 psi
  *     1   Zero offset in mV, subtracted before scaling
  *     2   Averaging depth, 1..64 samples
  *     3   Reserved
@@ -53,15 +56,14 @@ const int LED_PIN[4] = { LED_D0, LED_D1, LED_D2, LED_D3 };
 // Opta divides its 0-10 V input down to the MCU ADC range on board.
 // Verify OPTA_DIVIDER with a known voltage on I1 before trusting the mV
 // register. This replaces the old PRESSURE_DIVIDER_RATIO of 2.0.
-const float ADC_VREF_MV  = 3000.0f;
+const float ADC_VREF_MV  = 3300.0f;
 const float ADC_FULL     = 4095.0f;
-const float OPTA_DIVIDER = 0.3034f;
+const float OPTA_DIVIDER = 0.3085f;
 
-const float SENSOR_FULL_SCALE_MV = 10000.0f;   // 0-10 V transducer
+// 0-10 V transducer, 0-160 psi
+const float SENSOR_FULL_SCALE_MV = 10000.0f;
 
-// Carried over from the Mega sketch, trimmed against the physical dial.
-// Re-trim after the divider comes out, since the scaling path changed.
-const uint16_t DEFAULT_FULL_SCALE_PSI_X10 = 1594;   // 159.4 psi
+const uint16_t DEFAULT_FULL_SCALE_PSI_X10 = 1000;   // 160.0 psi
 const uint16_t DEFAULT_ZERO_OFFSET_MV     = 0;
 const uint16_t DEFAULT_AVG_SAMPLES        = 32;
 
@@ -124,7 +126,7 @@ void setup() {
 
   updateRegisters();
 
-  Serial.println("Pressure monitor ready on port 502, I1 = 0-10V transducer");
+  Serial.println("Pressure monitor ready on port 502, I1 = 0-10V / 0-160 psi transducer");
 }
 
 void loop() {

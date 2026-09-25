@@ -1,18 +1,21 @@
 from PyQt6.QtWidgets import (
-    QGroupBox, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QDoubleSpinBox,
+    QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
 )
 from PyQt6.QtCore import Qt
 from gui.gauge_widget import GaugeWidget
 from utils.status_lamp import StatusLamp
 
 
-class SF6Panel(QGroupBox):
-    """SF6 dome pressure monitor, read from the Opta over Modbus TCP.
+class MarxPressurePanel(QGroupBox):
+    """Marx dome pressure, read from the Opta over Modbus TCP.
 
     Display only. main_window owns the PressureWorker thread, pushes results
     in through set_link_state / show_snapshot / show_calibration, and wires
-    btn_connect, btn_disconnect, btn_set_full_scale and btn_zero_here.
+    btn_connect and btn_disconnect.
+
+    There is no calibration UI: the scaling lives on the Opta, and the worker
+    writes the known values (see instruments/opta_pressure.py) at every
+    connect and verifies the readback. A failed verify is shown here.
     """
 
     _LINK_STATES = {
@@ -27,9 +30,12 @@ class SF6Panel(QGroupBox):
     _BANNER_STYLE = ("background-color:#C62828; color:white; font-weight:bold;"
                      " padding:6px; border-radius:4px;")
     _RECONNECT_STYLE = "background-color:#FB8C00; color:white; font-weight:bold;"
+    _CAL_OK_STYLE = "color:#666;"
+    _CAL_BAD_STYLE = ("background-color:#C62828; color:white; font-weight:bold;"
+                      " padding:4px; border-radius:4px;")
 
     def __init__(self, pressure_min=0, pressure_max=100):
-        super().__init__("SF6 Dome Pressure")
+        super().__init__("Marx Pressure")
 
         layout = QVBoxLayout()
         layout.setContentsMargins(6, 6, 6, 6)
@@ -79,42 +85,11 @@ class SF6Panel(QGroupBox):
         self.lbl_banner.hide()
         layout.addWidget(self.lbl_banner)
 
-        # ─────────────────────────────────────────────
-        # CALIBRATION (holding registers, applied live)
-        # ─────────────────────────────────────────────
-        cal = QGroupBox("Calibration (live on the Opta, no reflash)")
-        cal_grid = QGridLayout()
-        cal.setLayout(cal_grid)
-
-        cal_grid.addWidget(QLabel("Loaded full scale:"), 0, 0)
-        self.lbl_cal_full_scale = QLabel("---")
-        cal_grid.addWidget(self.lbl_cal_full_scale, 0, 1)
-        cal_grid.addWidget(QLabel("Zero offset:"), 0, 2)
-        self.lbl_cal_zero = QLabel("---")
-        cal_grid.addWidget(self.lbl_cal_zero, 0, 3)
-        cal_grid.addWidget(QLabel("Averaging:"), 0, 4)
-        self.lbl_cal_avg = QLabel("---")
-        cal_grid.addWidget(self.lbl_cal_avg, 0, 5)
-
-        cal_grid.addWidget(QLabel("Full scale @ 10 V (psi):"), 1, 0)
-        self.spin_full_scale = QDoubleSpinBox()
-        self.spin_full_scale.setDecimals(1)
-        self.spin_full_scale.setRange(0.1, 6553.5)   # holding register is psi x10
-        self.spin_full_scale.setSingleStep(0.1)
-        self.spin_full_scale.setValue(159.4)
-        cal_grid.addWidget(self.spin_full_scale, 1, 1)
-        self.btn_set_full_scale = QPushButton("Set Full Scale")
-        cal_grid.addWidget(self.btn_set_full_scale, 1, 2)
-        self.btn_zero_here = QPushButton("Zero Here")
-        self.btn_zero_here.setToolTip("Take the present input as 0 psi. Vent the line first.")
-        cal_grid.addWidget(self.btn_zero_here, 1, 3)
-
-        note = QLabel("Held in Opta RAM only: resets to the firmware defaults "
-                      "(159.4 psi, 0 mV) whenever the Opta reboots.")
-        note.setWordWrap(True)
-        note.setStyleSheet("color:#666;")
-        cal_grid.addWidget(note, 2, 0, 1, 6)
-        layout.addWidget(cal)
+        # Calibration the Opta confirmed at connect, or why it disagreed.
+        self.lbl_cal = QLabel("Calibration: ---")
+        self.lbl_cal.setWordWrap(True)
+        self.lbl_cal.setStyleSheet(self._CAL_OK_STYLE)
+        layout.addWidget(self.lbl_cal)
 
         layout.addStretch(1)
         self.set_link_state("down")
@@ -130,8 +105,6 @@ class SF6Panel(QGroupBox):
         self.btn_connect.setEnabled(state != "connecting")
         self.btn_connect.setStyleSheet(self._RECONNECT_STYLE if state == "lost" else "")
         self.btn_disconnect.setEnabled(state == "up")
-        self.btn_set_full_scale.setEnabled(state == "up")
-        self.btn_zero_here.setEnabled(state == "up")
 
         if state != "up":
             self._clear_reading()
@@ -167,10 +140,18 @@ class SF6Panel(QGroupBox):
         self.lbl_psi.setStyleSheet(self._PSI_STYLE)
 
     def show_calibration(self, cal: dict):
-        self.lbl_cal_full_scale.setText(f"{cal['full_scale_psi']:.1f} psi")
-        self.lbl_cal_zero.setText(f"{cal['zero_offset_mv']} mV")
-        self.lbl_cal_avg.setText(f"{cal['avg_samples']} samples")
-        self.spin_full_scale.setValue(cal["full_scale_psi"])
+        """Report what the Opta confirmed after the connect-time write."""
+        summary = (f"{cal['full_scale_psi']:.1f} psi full scale, "
+                   f"{cal['zero_offset_mv']} mV zero, "
+                   f"{cal['avg_samples']} samples")
+        if cal.get("verified", True):
+            self.lbl_cal.setText(f"Calibration verified: {summary}")
+            self.lbl_cal.setStyleSheet(self._CAL_OK_STYLE)
+        else:
+            self.lbl_cal.setText(
+                f"CALIBRATION NOT VERIFIED: {cal.get('mismatch', '')}. "
+                f"Opta reports {summary}. The pressure shown may be wrong.")
+            self.lbl_cal.setStyleSheet(self._CAL_BAD_STYLE)
 
     def _clear_reading(self):
         self.gauge.show_text("---")
@@ -181,3 +162,8 @@ class SF6Panel(QGroupBox):
     def _show_banner(self, text: str):
         self.lbl_banner.setText(text)
         self.lbl_banner.show()
+
+
+# The panel was called SF6Panel when the gauge was described as the SF6 dome.
+# Keep the old name working so nothing outside this file has to change.
+SF6Panel = MarxPressurePanel

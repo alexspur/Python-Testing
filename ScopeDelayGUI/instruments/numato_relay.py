@@ -44,30 +44,22 @@ class NumatoRelayController:
         try:
             self.ser = serial.Serial(port, baudrate, timeout=1)
             time.sleep(0.1)  # Allow module to initialize
+            # Nothing is commanded at connect. The relays stay wherever they
+            # are, and the module cannot say where that is, so the GUI shows
+            # the state as unknown until a mode is sent. The cache below is
+            # therefore a guess until then.
             self.relay_states = [False] * self.NUM_CHANNELS
-
-            # Force GPIO pins LOW so external pull-downs define input state
-            for pin in (0, 2, 3, 4, 5):
-                self._send_command(f"gpio clear {pin}\r")
-
-            # Ensure all relays start OFF
-            for ch in range(self.NUM_CHANNELS):
-                self._send_command(f"relay off {ch}\r")
-
             return True
         except Exception as e:
             self.ser = None
             raise RuntimeError(f"Failed to connect to Numato relay: {e}")
 
     def close(self):
-        """Disconnect from the relay module, turning all relays off first."""
+        """Close the port. Sends nothing: the GUI grounds the Marx in the
+        safe order (charging relay off, then discharging relay off) before
+        calling this. An all-channels-off here ran in channel order, which
+        opened ground before the supply was disconnected."""
         if self.ser and self.ser.is_open:
-            # Turn all relays off before disconnecting
-            for i in range(self.NUM_CHANNELS):
-                try:
-                    self._send_command(f"relay off {i}\r")
-                except Exception:
-                    pass
             self.ser.close()
         self.ser = None
         self.relay_states = [False] * self.NUM_CHANNELS

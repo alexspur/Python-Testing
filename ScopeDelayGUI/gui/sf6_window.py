@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QVBoxLayout, QWidget, QLabel,
     QSplitter, QGroupBox, QSizePolicy,
-    QHBoxLayout, QGridLayout, QDoubleSpinBox, QPushButton, QComboBox
+    QHBoxLayout, QGridLayout, QPushButton
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -15,7 +15,7 @@ import pyqtgraph as pg
 class SF6Window(QMainWindow):
     def __init__(self, parent=None, pressure_gauge_min=0, pressure_gauge_max=100):
         super().__init__(parent)
-        self.setWindowTitle("SF6 Marx Generator Control + WJ Power Supplies")
+        self.setWindowTitle("Marx Generator Control + WJ Power Supplies")
 
         # Set window flags to make it appear in taskbar independently
         from PyQt6.QtCore import Qt
@@ -38,9 +38,9 @@ class SF6Window(QMainWindow):
         main_layout.addWidget(vertical_splitter)
 
         # -------------------------------------------
-        # SECTION 1: SF6 Marx Generator Control + Relay Control (TOP)
+        # SECTION 1: Marx Generator Control + Relay Control (TOP)
         # -------------------------------------------
-        top_group = QGroupBox("SF6 Marx Generator Control")
+        top_group = QGroupBox("Marx Generator Control")
         top_group_font = QFont("Arial", 10)
         top_group_font.setBold(True)
         top_group.setFont(top_group_font)
@@ -64,9 +64,13 @@ class SF6Window(QMainWindow):
         vertical_splitter.addWidget(top_group)
 
         # -------------------------------------------
-        # SECTION 2: WJ Controls (MIDDLE)
+        # SECTION 2: WJ readback gauges (MIDDLE)
+        #
+        # Display only. The supplies are commanded from the WJ panel in the
+        # main window; this window used to carry a second, fully wired copy of
+        # those controls, which meant two places could charge the Marx.
         # -------------------------------------------
-        wj_group = QGroupBox("WJ Controls")
+        wj_group = QGroupBox("WJ Supply Readback")
         wj_group_font = QFont("Arial", 10)
         wj_group_font.setBold(True)
         wj_group.setFont(wj_group_font)
@@ -96,66 +100,6 @@ class SF6Window(QMainWindow):
         gauges_layout.addWidget(self.kv2_gauge, 1, 1)
         gauges_layout.addWidget(self.ma2_gauge, 1, 2)
         wj_layout.addLayout(gauges_layout)
-
-        # Program row
-        program_row = QHBoxLayout()
-        program_row.setSpacing(6)
-        program_row.addWidget(QLabel("Voltage (kV):"))
-        self.program_voltage = QDoubleSpinBox()
-        self.program_voltage.setRange(0, 100)
-        self.program_voltage.setDecimals(2)
-        self.program_voltage.setValue(60.0)   # default 60 kV (both supplies on startup)
-        program_row.addWidget(self.program_voltage)
-
-        program_row.addWidget(QLabel("Current (mA):"))
-        self.program_current = QDoubleSpinBox()
-        self.program_current.setRange(0, 6)
-        self.program_current.setDecimals(2)
-        self.program_current.setValue(2.0)
-        program_row.addWidget(self.program_current)
-
-        self.btn_apply_program = QPushButton("Apply Program")
-        program_row.addWidget(self.btn_apply_program)
-        wj_layout.addLayout(program_row)
-
-        # Global control buttons
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
-        self.btn_hv_on = QPushButton("HV ON")
-        self.btn_hv_off = QPushButton("HV OFF")
-        self.btn_reset = QPushButton("RESET")
-        self.btn_read = QPushButton("READ")
-        btn_row.addWidget(self.btn_hv_on)
-        btn_row.addWidget(self.btn_hv_off)
-        btn_row.addWidget(self.btn_reset)
-        btn_row.addWidget(self.btn_read)
-        wj_layout.addLayout(btn_row)
-
-        # Per-unit connect/disconnect
-        conn_grid = QGridLayout()
-        conn_grid.setHorizontalSpacing(8)
-        conn_grid.setVerticalSpacing(6)
-        self.wj_port_combos = []
-        self.btn_wj_connect = []
-        self.btn_wj_disconnect = []
-
-        port_labels = ["Negative Port:", "Positive Port:"]
-        for i in range(2):
-            label = QLabel(port_labels[i])
-            combo = QComboBox()
-            combo.addItem("No COM ports")
-            btn_c = QPushButton("Connect")
-            btn_d = QPushButton("Disconnect")
-            self.wj_port_combos.append(combo)
-            self.btn_wj_connect.append(btn_c)
-            self.btn_wj_disconnect.append(btn_d)
-
-            conn_grid.addWidget(label, i, 0)
-            conn_grid.addWidget(combo, i, 1)
-            conn_grid.addWidget(btn_c, i, 2)
-            conn_grid.addWidget(btn_d, i, 3)
-
-        wj_layout.addLayout(conn_grid)
 
         vertical_splitter.addWidget(wj_group)
 

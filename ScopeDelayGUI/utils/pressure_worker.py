@@ -24,7 +24,9 @@ which emits request_connect again.
 
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal, pyqtSlot
 
-from instruments.opta_pressure import OptaPressure
+from instruments.opta_pressure import (
+    OptaPressure, OPTA_FULL_SCALE_PSI, OPTA_ZERO_OFFSET_MV, OPTA_AVG_SAMPLES,
+)
 
 
 class PressureWorker(QObject):
@@ -33,6 +35,7 @@ class PressureWorker(QObject):
     link_up = pyqtSignal(str)              # "host:port" after a good connect
     link_lost = pyqtSignal(str)            # reason; polling has stopped
     calibration_ready = pyqtSignal(dict)   # read_calibration(), after connect and each write
+    calibration_mismatch = pyqtSignal(str) # readback differs from what we wrote
     command_done = pyqtSignal(str)         # calibration write accepted
     command_failed = pyqtSignal(str)       # calibration write refused, link still up
 
@@ -70,7 +73,7 @@ class PressureWorker(QObject):
         try:
             if not self.io.connect():
                 raise IOError("no TCP connection")
-            cal = self.io.read_calibration()
+            cal = self._apply_calibration()
         except Exception as e:
             self._drop(f"could not reach Opta at {self._where()}: {e}")
             return
@@ -103,6 +106,40 @@ class PressureWorker(QObject):
         QThread.currentThread().quit()
 
     # ------------------------------------------------------------ calibration
+
+    def _apply_calibration(self):
+        """Write the known calibration, read it back and verify it.
+
+        The Opta keeps these in RAM and reverts to the firmware defaults on
+        every reboot, so writing at each connect is what keeps the reading
+        trustworthy rather than whatever happens to be loaded. A mismatch
+        does not drop the link: the pressure is still live, it just is not
+        the calibration we asked for, and the GUI has to say so.
+        """
+        self.io.set_full_scale_psi(OPTA_FULL_SCALE_PSI)
+        self.io.set_zero_offset_mv(OPTA_ZERO_OFFSET_MV)
+
+        cal = self.io.read_calibration()
+        problems = []
+        # Full scale round-trips through an integer register (psi x10), so
+        # compare with a tolerance rather than for equality.
+        if abs(cal["full_scale_psi"] - OPTA_FULL_SCALE_PSI) > 0.05:
+            problems.append(
+                f"full scale {cal['full_scale_psi']:.1f} psi, expected {OPTA_FULL_SCALE_PSI:.1f}")
+        if cal["zero_offset_mv"] != OPTA_ZERO_OFFSET_MV:
+            problems.append(
+                f"zero offset {cal['zero_offset_mv']} mV, expected {OPTA_ZERO_OFFSET_MV}")
+        # Averaging is not written, only reported: it changes the response
+        # time, never the calibration of the reading.
+        if cal["avg_samples"] != OPTA_AVG_SAMPLES:
+            problems.append(
+                f"averaging {cal['avg_samples']} samples, expected {OPTA_AVG_SAMPLES}")
+
+        cal["verified"] = not problems
+        cal["mismatch"] = "; ".join(problems)
+        if problems:
+            self.calibration_mismatch.emit(cal["mismatch"])
+        return cal
 
     @pyqtSlot(float)
     def set_full_scale(self, psi):

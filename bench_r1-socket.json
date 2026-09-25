@@ -1,0 +1,56 @@
+{
+  "tag": "r1-socket",
+  "resource": "TCPIP0::192.168.10.51::5555::SOCKET",
+  "when": "2026-09-23 15:04:43",
+  "idn": "RIGOL TECHNOLOGIES,DS7054,DS7A232900210,00.01.02.00.07",
+  "first_query_ms": 14.77,
+  "lan_status": "CONFIGURED",
+  "lan_ip": "192.168.10.51",
+  "lan_mac": "00:19:AF:77:08:4C",
+  "lan_dhcp": "0",
+  "lan_visa": "TCPIP::192.168.10.51::INSTR",
+  "displayed_channels": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "memory_depth": 1000000,
+  "latency": {
+    "samples": 200,
+    "mean_ms": 1.113,
+    "median_ms": 1.038,
+    "p95_ms": 1.635,
+    "min_ms": 0.967,
+    "max_ms": 3.305
+  },
+  "bulk": {
+    "channel": 1,
+    "points": 1000000,
+    "expected": 1000000,
+    "complete": true,
+    "chunk_points": 250000,
+    "transfers": 4,
+    "seconds": 0.385,
+    "MB": 1.0,
+    "MB_per_s": 2.6
+  },
+  "full_capture": {
+    "channels": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "points_per_channel": {
+      "1": 1000000,
+      "2": 1000000,
+      "3": 1000000,
+      "4": 1000000
+    },
+    "seconds": 1.595
+  },
+  "transactions": 76,
+  "latency_overhead_s": 0.079,
+  "latency_overhead_pct": 4.9
+}
