@@ -39,7 +39,7 @@ from . import pipeline as P
 
 # Bump when the pipeline or the plots change: shots processed by an older
 # version are redone automatically on the next run.
-PIPELINE_VERSION = "py-1"
+PIPELINE_VERSION = "py-2"
 
 SUMMARY_COLS = [
     "shot_number", "stamp", "session_shot_index", "datetime", "status",
@@ -107,12 +107,29 @@ def session_shots(sdir: Path, stamp: str):
                      for k in (1, 2, 3)]
             shots.append({"shot_number": _num(meta.get("shot_number")),
                           "session_shot_index": idx, "files": files, "meta": meta})
-        return shots
-    files = [sdir / default_name(k, stamp, 1) for k in (1, 2, 3)]
-    if any(f.exists() for f in files):
+    # Scope files no shot row names: the scopes triggered without a GUI Fire
+    # (external trigger, BNC575 fired from its front panel), a Read, or an old
+    # session with no shot log at all. Grouped by the part of the name after
+    # "rigolN_", so rigol1_X.csv, rigol2_X.csv and rigol3_X.csv are one shot.
+    named = {f.name.lower() for sh in shots for f in sh["files"]}
+    for f1 in sorted(sdir.glob("rigol1_*.csv")):
+        if f1.name.lower() in named:
+            continue
+        tail = f1.name[len("rigol1_"):]
+        files = [sdir / f"rigol{k}_{tail}" for k in (1, 2, 3)]
         shots.append({"shot_number": np.nan, "session_shot_index": 1,
-                      "files": files, "meta": {}})
+                      "files": files, "meta": {}, "tag": tail[:-4],
+                      "unlogged": log.exists()})
     return shots
+
+
+def shot_key(sh, stamp):
+    """File key and display name for one shot."""
+    if np.isfinite(sh["shot_number"]):
+        n = int(sh["shot_number"])
+        return f"shot_{n:04d}", f"#{n:04d}"
+    tag = sh.get("tag") or stamp
+    return f"shot_{tag}", tag
 
 
 def _num(x):
@@ -147,13 +164,7 @@ def settings_from_meta(meta):
 
 # ===================== one shot =====================
 def process_one(sh, sdir: Path, stamp: str, out_dir: Path, plots=True):
-    if np.isfinite(sh["shot_number"]):
-        key = f"shot_{int(sh['shot_number']):04d}"
-        name = f"#{int(sh['shot_number']):04d}"
-    else:
-        key = f"shot_{stamp}" + (f"_{sh['session_shot_index']:02d}"
-                                 if sh["session_shot_index"] > 1 else "")
-        name = stamp
+    key, name = shot_key(sh, stamp)
     S = {
         "key": key, "name": name, "stamp": stamp, "session_dir": str(sdir),
         "shot_number": sh["shot_number"],
@@ -183,13 +194,18 @@ def process_one(sh, sdir: Path, stamp: str, out_dir: Path, plots=True):
     if 3 in scopes:
         t3 = scopes[3][:, 0]
         for i, col in enumerate((1, 2)):
-            _, tr = P.gate_qsw(t3, scopes[3][:, col])
-            S["qsw_rise_trig_us"][i] = tr * 1e6
+            try:
+                _, tr = P.gate_qsw(t3, scopes[3][:, col])
+                S["qsw_rise_trig_us"][i] = tr * 1e6
+            except Exception as e:  # noqa: BLE001
+                say(f"{name}: Q-switch {i + 1} timing not measured ({e})")
 
     if S["status"] == "ok":
         try:
             W = P.process_waveforms(scopes[1], scopes[2], scopes[3])
             S.update(W)
+            if W.get("warnings"):
+                S["error"] = "; ".join(W["warnings"])
         except P.NoPulse as e:
             S["status"] = "no_fire"
             S["error"] = str(e)
@@ -334,9 +350,10 @@ def run(root=None, session=None, shot=None, force=False, plots=True, open_plots=
         for sh in session_shots(sdir, stamp):
             if shot is not None and sh["shot_number"] != shot:
                 continue
-            key = (f"shot_{int(sh['shot_number']):04d}" if np.isfinite(sh["shot_number"])
-                   else f"shot_{stamp}" + (f"_{sh['session_shot_index']:02d}"
-                                           if sh["session_shot_index"] > 1 else ""))
+            key, _ = shot_key(sh, stamp)
+            if sh.get("unlogged"):
+                say(f"{key}: scope files with no shot-log row (no GUI Fire); "
+                    "processed without a shot number or settings")
             c = cache.get(key)
             if (not force and c and c["row"].get("pipeline_version") == PIPELINE_VERSION
                     and c["row"]["status"] != "missing_waveforms"
@@ -344,7 +361,15 @@ def run(root=None, session=None, shot=None, force=False, plots=True, open_plots=
                 counts["cached"] += 1
                 continue
             t0 = time.time()
-            S = process_one(sh, sdir, stamp, out_dir, plots=plots)
+            try:
+                S = process_one(sh, sdir, stamp, out_dir, plots=plots)
+            except Exception as e:  # noqa: BLE001
+                # One bad shot never stops the run. It is not cached, so the
+                # next run tries it again.
+                counts["failed"] += 1
+                say(f"{key}: FAILED, skipped ({type(e).__name__}: {e})")
+                traceback.print_exc()
+                continue
             row = summary_row(S)
             cache[key] = {"row": {k: _fmt(v) for k, v in row.items()}}
             counts[S["status"]] += 1
@@ -352,12 +377,13 @@ def run(root=None, session=None, shot=None, force=False, plots=True, open_plots=
             dt = time.time() - t0
             if S["status"] == "ok":
                 pk = S["peaks"]
-                say(f"{S['name']}: OK in {dt:.1f} s  D {_fmt(round(pk['LTGS1_Ddot']))}/"
-                    f"{_fmt(round(pk['LTGS2_Ddot']))} kV  RVM {_fmt(round(pk['RVM1']))}/"
-                    f"{_fmt(round(pk['RVM2']))} kV  spacing cmd "
-                    f"{_fmt(S['settings']['pulse_spacing_cmd_ns'])} / Qsw "
+                n0 = lambda x: _fmt(round(x) if np.isfinite(x) else x)  # noqa: E731
+                say(f"{S['name']}: OK in {dt:.1f} s  D {n0(pk['LTGS1_Ddot'])}/"
+                    f"{n0(pk['LTGS2_Ddot'])} kV  RVM {n0(pk['RVM1'])}/{n0(pk['RVM2'])} kV"
+                    f"  spacing cmd {_fmt(S['settings']['pulse_spacing_cmd_ns'])} / Qsw "
                     f"{_fmt(round(S['spacing_qsw_ns'], 1))} / RVM "
-                    f"{_fmt(round(S['spacing_rvm_ns'], 1))} ns")
+                    f"{_fmt(round(S['spacing_rvm_ns'], 1))} ns"
+                    + (f"  ({S['error']})" if S["error"] else ""))
             else:
                 q = S["spacing_qsw_ns"]
                 extra = (f"  Q-switch spacing {q:.1f} ns (cmd "

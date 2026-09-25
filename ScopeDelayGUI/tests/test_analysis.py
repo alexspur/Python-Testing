@@ -164,3 +164,64 @@ def test_killed_run_leaves_nothing_ltgs_gui3_would_load(logs):
     assert not list(out.glob("partial_*"))
     assert sorted(p.name for p in out.glob("shot_*.mat")) == [
         "shot_0040.mat", "shot_0041.mat", "shot_0042.mat", "shot_0043.mat"]
+
+
+def test_repeated_time_value_does_not_crash(tmp_path):
+    """A July export repeated its first time value: t[1] - t[0] was zero."""
+    t = np.arange(-20e-6, 25e-6, 1e-9)
+    t[1] = t[0]
+    v = np.where((t > 5e-6) & (t < 5.5e-6), 3.5, 0.0)
+    vg, tr = P.gate_qsw(t, v)
+    assert abs(tr - 5e-6) < 3e-9
+
+
+def test_late_scope3_record_skips_c225_c315_not_the_shot(tmp_path):
+    root = tmp_path / "logs"
+    sdir = make_session(root, "20260925_110000", [(50, 200, "fired")])
+    f3 = sdir / PS.default_name(3, "20260925_110000", 1)
+    M = np.loadtxt(f3, delimiter=",", skiprows=1)
+    M = M[M[:, 0] > 9.9e-6]                  # scope 3 starts 0.1 us before pulse 1
+    _write(f3, M)
+    counts = PS.run(root=root, plots=True)
+    assert counts["ok"] == 1 and counts["failed"] == 0
+    row = next(csv.DictReader(open(root / "processed_shots" / "shot_summary.csv")))
+    assert row["status"] == "ok" and row["C225_Ddot_kV"] == "" and row["C315_Bdot_kV"] == ""
+    assert "C225/C315 skipped" in row["error"]
+    assert float(row["LTGS1_Ddot_kV"]) > 400
+
+
+def test_one_bad_shot_does_not_stop_the_run(logs, monkeypatch):
+    real = PS.process_one
+
+    def boom(sh, *a, **k):
+        if sh["shot_number"] == 40:
+            raise OverflowError("synthetic")
+        return real(sh, *a, **k)
+    monkeypatch.setattr(PS, "process_one", boom)
+    c = PS.run(root=logs, plots=False)
+    assert c["failed"] == 1 and c["ok"] == 1 and c["no_fire"] == 1
+
+
+def test_scope_files_without_a_shot_row_are_processed(tmp_path):
+    """The scopes triggered but no GUI Fire happened, so the shot log has only
+    its header. The files are still found and processed, unnumbered."""
+    root = tmp_path / "logs"
+    stamp = "20260924_164325"
+    sdir = root / "2026.09.24" / f"experiment_log_{stamp}"
+    sdir.mkdir(parents=True)
+    make_shot(sdir, stamp, 1, 200, fired=True, seed=7)
+    (sdir / f"shot_log_{stamp}.csv").write_text("shot_number,session_shot_index,datetime\n")
+    c = PS.run(root=root, plots=False)
+    assert c["ok"] == 1
+    assert (root / "processed_shots" / f"shot_{stamp}.mat").exists()
+
+
+def test_extra_files_beside_logged_shots_are_picked_up(logs):
+    sdir = next(logs.glob("*/experiment_log_*"))
+    stamp = sdir.name.replace("experiment_log_", "")
+    for k in (1, 2, 3):   # a set of files no shot row names
+        src = sdir / PS.default_name(k, stamp, 1)
+        (sdir / f"rigol{k}_{stamp}_read01.csv").write_bytes(src.read_bytes())
+    c = PS.run(root=logs, plots=False)
+    assert c["ok"] == 3                     # shots 40, 41 and the extra set
+    assert (logs / "processed_shots" / f"shot_{stamp}_read01.mat").exists()

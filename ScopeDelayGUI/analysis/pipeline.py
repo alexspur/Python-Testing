@@ -105,6 +105,17 @@ def inwin(t, w):
     return (t > w[0]) & (t < w[1])
 
 
+def sample_dt(t):
+    """Sample interval from the whole record, not t[1] - t[0]. Some July
+    exports repeat a time value (limited digits), which made t[1] - t[0]
+    zero and crashed the run. Same value as t[1] - t[0] on a clean record."""
+    n = len(t)
+    dt = (t[-1] - t[0]) / (n - 1) if n > 1 else 0.0
+    if not np.isfinite(dt) or dt <= 0:
+        raise ValueError("time column does not increase")
+    return float(dt)
+
+
 # ===================== file reading =====================
 def read_rigol(path):
     """Rigol export: time plus four channels, one header line.
@@ -135,7 +146,7 @@ def gate_qsw(t, v, min_dur=100e-9, pad=60e-9, thr_frac=0.5, smooth_s=20e-9):
     thresholded at noise level. The moving mean keeps single-sample spikes
     from setting the height. Everything else is the July logic.
     """
-    dt = t[1] - t[0]
+    dt = sample_dt(t)
     lo = np.median(v)
     hi = movmean(v, 2 * mround(smooth_s / dt / 2) + 1).max()
     vg = np.zeros_like(v, dtype=float)
@@ -163,7 +174,7 @@ def gate_qsw(t, v, min_dur=100e-9, pad=60e-9, thr_frac=0.5, smooth_s=20e-9):
 def detect_activity(t, v, k=10, env_s=200e-9, noise_s=500e-9):
     """Returns (tStart, tEnd, above). tStart is None when nothing is found."""
     v0 = v - np.median(v)
-    dt = t[1] - t[0]
+    dt = sample_dt(t)
     wn = max(8, mround(noise_s / dt))
     nb = v0.size // wn
     blk = v0[:nb * wn].reshape(nb, wn)
@@ -274,23 +285,37 @@ def process_waveforms(fr, fd, f3, cal=CAL):
         pk[tag] = np.abs(Vr[inwin(ti, evt_win)]).max() / 1e3
 
     # ---- rigol3: C225 quiet-mask cubic, C315 pre-only ----
+    # Both need rigol3 samples before pulse 1. When scope 3's record starts
+    # too late (its own timebase delay), C225 and C315 are skipped with a
+    # warning instead of failing the whole shot. The LTGS and RVM results
+    # above do not depend on them.
+    S["warnings"] = []
     bm = inwin(t3, r3_pre)
-    v = M3[:, 4] - M3[bm, 4].mean()
-    _, _, act = detect_activity(t3, v)
-    padN = mround(0.3e-6 / (t3[1] - t3[0]))
-    act = movmax(act.astype(float), 2 * padN + 1) > 0
-    C225 = reconstruct_quiet(t3, v, c["CF3_CH4"], c3_zero, act, 3)
-    S["C225_t"] = (t3 - tPulse) * 1e6
-    S["C225"] = C225 / 1e3
-    pk["C225_Ddot"] = np.abs(C225).max() / 1e3
-
-    v = M3[:, 3] - M3[bm, 3].mean()
     im3 = (t3 >= c3_int[0]) & (t3 <= c3_int[1])
-    ti3 = t3[im3]
-    C315 = reconstruct_pre(ti3, v[im3], c["CF3_CH3"] * c["geom"] * c["bScale"], c3_zero)
-    S["C315_t"] = (ti3 - tPulse) * 1e6
-    S["C315"] = C315 / 1e3
-    pk["C315_Bdot"] = np.abs(C315).max() / 1e3
+    if bm.sum() < 10 or inwin(t3, c3_zero).sum() < 10 or im3.sum() < 10:
+        S["warnings"].append(
+            f"C225/C315 skipped: scope 3 record starts at {t3[0] * 1e6:.2f} us, "
+            f"after the pre-pulse window (pulse 1 at {tPulse * 1e6:.2f} us)")
+        S["C225_t"], S["C225"] = np.array([]), np.array([])
+        S["C315_t"], S["C315"] = np.array([]), np.array([])
+        pk["C225_Ddot"] = np.nan
+        pk["C315_Bdot"] = np.nan
+    else:
+        v = M3[:, 4] - M3[bm, 4].mean()
+        _, _, act = detect_activity(t3, v)
+        padN = mround(0.3e-6 / sample_dt(t3))
+        act = movmax(act.astype(float), 2 * padN + 1) > 0
+        C225 = reconstruct_quiet(t3, v, c["CF3_CH4"], c3_zero, act, 3)
+        S["C225_t"] = (t3 - tPulse) * 1e6
+        S["C225"] = C225 / 1e3
+        pk["C225_Ddot"] = np.abs(C225).max() / 1e3
+
+        v = M3[:, 3] - M3[bm, 3].mean()
+        ti3 = t3[im3]
+        C315 = reconstruct_pre(ti3, v[im3], c["CF3_CH3"] * c["geom"] * c["bScale"], c3_zero)
+        S["C315_t"] = (ti3 - tPulse) * 1e6
+        S["C315"] = C315 / 1e3
+        pk["C315_Bdot"] = np.abs(C315).max() / 1e3
 
     # ---- rigol3 Q-switch monitors: CH1 = Laser1, CH2 = Laser2 ----
     S["Qt"], S["Qv"] = [None, None], [None, None]
