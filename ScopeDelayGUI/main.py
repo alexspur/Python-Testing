@@ -42,7 +42,7 @@ PRESSURE_GAUGE_MAX_PSI = 100.0
 
 # Startup charge voltage (kV) preloaded into the "Set Voltage" box for the WJ
 # power supplies. This is the kV that HV ON commands.
-STARTUP_CHARGE_KV = 75.0
+STARTUP_CHARGE_KV = 60.0
 
 
 if __name__ == "__main__":
