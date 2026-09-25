@@ -39,6 +39,7 @@ from PyQt6.QtCore import QByteArray, QObject, QProcess, pyqtSignal
 
 from utils.data_logger import DataLogger
 from utils.shot_logger import SHOT_COLUMNS, ShotCounter, ShotLogger
+from utils import relay_modes as rm
 from utils.shot_snapshot import build_shot_row, pulse_spacing_ns, resolve_absolute_delays
 from utils.connect_memory import save_memory
 from utils.system_state import SystemState, SOURCE_READBACK
@@ -702,6 +703,9 @@ class GuiWindowTestCase(unittest.TestCase):
         self.win.bnc_connected = True
         self.win.ensure_wj_hv_off = lambda *a, **k: True
         self.win._check_lasers_armed = lambda: True
+        # Fire also requires the Marx floating (commanded relay mode FLOAT).
+        self.win._relay_states = dict(rm.TARGET[rm.FLOAT])
+        self.win._relay_set_mode(rm.FLOAT)
         return self.win.bnc
 
     def _reprep(self):
@@ -780,7 +784,7 @@ class TestGuiShotLogging(GuiWindowTestCase):
         self.assertIn("RELAY_COMMAND", types)
         self.assertIn("RELAY_STATE", types)
         states = self.win.system_state.get("relays")["states"]
-        self.assertTrue(states["charge_positive"])
+        self.assertTrue(states["charge_relay"])
 
     def test_laser_changes_are_logged(self):
         self.win._on_laser_event("Laser1", "ARM",
@@ -1580,81 +1584,130 @@ class TestGuiShotLogging(GuiWindowTestCase):
         self.assertNotIn("single", scope.calls)
         self.assertEqual(scope.calls, ["wait_for_trigger", "capture_four_channels"])
 
-    # ------------------------------------------ swapped WJ supplies refused
+    # -------------------------------- WJ supplies told apart by firmware
     def _wj_port(self, device, serial):
         from types import SimpleNamespace
         return SimpleNamespace(device=device, vid=0x0451, pid=0x3410,
                                serial_number=serial, location="1-13.1.2",
                                description="TUSB3410")
 
-    def _wj_identity(self, ports, versions):
-        """Fake the USB table and the WJ 'V' replies the GUI would see."""
+    def _wj_identity(self, versions):
+        """Fake the WJ 'V' replies the GUI would see: port -> firmware."""
         import gui.main_window as mw
-        p1 = patch.object(mw.list_ports, "comports", lambda: ports)
-        p2 = patch.object(mw, "wj_read_version", lambda port: versions.get(port))
-        p1.start(); p2.start()
-        self.addCleanup(p1.stop); self.addCleanup(p2.stop)
+        p = patch.object(mw, "wj_read_version", lambda port: versions.get(port))
+        p.start()
+        self.addCleanup(p.stop)
 
         class FakeWJ:
+            def __init__(self):
+                self.ser = None
+                self.ports = []
+
+            @property
+            def is_connected(self):
+                return self.ser is not None
+
+            def connect(self, port):
+                from types import SimpleNamespace
+                self.ports.append(port)
+                self.ser = SimpleNamespace(port=port, is_open=True)
+
             def close(self):
-                pass
+                self.ser = None
         self.win.wj_units[0] = FakeWJ()
         self.win.wj_units[1] = FakeWJ()
+        for row in self.win.wj_panel.rows:
+            row.port_combo.clear()
+            row.port_combo.addItems(["COM13", "COM15"])
 
-    def test_wj_connect_accepts_right_serial_and_right_firmware(self):
-        self._wj_identity([self._wj_port("COM13", "TUSB3410________")], {"COM13": "15"})
-        self.assertEqual(self.win._identify_wj_port(0, "COM13"), "15")   # WJ1 = NEG
+    def _wj_memory(self):
+        import utils.connect_memory as cm
+        return json.loads(Path(cm.MEM_FILE).read_text())
 
-    def test_wj_connect_refuses_right_serial_wrong_firmware(self):
-        """What happened on 2026-09-24: the NEG serial on the supply whose
-        controller answers 14 - the positive one. Yesterday this connected."""
-        self._wj_identity([self._wj_port("COM13", "TUSB3410________")], {"COM13": "14"})
+    def test_wj_ports_are_assigned_by_firmware_and_a_swap_is_corrected(self):
+        """2026-09-24: memory says WJ1 = COM13 and WJ2 = COM15, but COM13
+        answers firmware 14, the positive supply. Both connect, the right way
+        round, the memory is corrected, and one INFO line says so."""
+        self._wj_identity({"COM13": "14", "COM15": "15"})
+        self.win.conn.update({"WJ1_COM": "COM13", "WJ2_COM": "COM15"})
 
-        with self.assertRaises(IOError) as cm:
-            self.win._identify_wj_port(0, "COM13")
+        connected = self.win._wj_connect_by_firmware({0: "COM13", 1: "COM15"})
 
-        msg = str(cm.exception)
-        for piece in ("COM13", "firmware 14", "firmware 15", "WJ1", "polarity LED", "USB cable"):
-            self.assertIn(piece, msg)
-        errors = [r for r in self._events("ERROR", "WJ1") if "swapped" in r["notes"]]
-        self.assertEqual(len(errors), 1, "the refusal must be in the timeline")
-
-    def test_wj_manual_connect_button_refuses_a_swapped_supply(self):
-        self._wj_identity([self._wj_port("COM13", "TUSB3410________")], {"COM13": "14"})
-        connected = []
-        self.win.wj_units[0].connect = lambda port: connected.append(port)
-
-        self.win.on_wj_connect(0, port_override="COM13")
-
-        self.assertEqual(connected, [], "the supply must not be opened")
-        self.assertEqual(self._events("CONNECT", "WJ1"), [], "no CONNECT row for a refusal")
+        self.assertEqual(connected, {0: "COM15", 1: "COM13"})
+        self.assertEqual(self.win.wj_units[0].ports, ["COM15"])     # WJ1 NEG, firmware 15
+        self.assertEqual(self.win.wj_units[1].ports, ["COM13"])     # WJ2 POS, firmware 14
+        mem = self._wj_memory()
+        self.assertEqual((mem["WJ1_COM"], mem["WJ2_COM"]), ("COM15", "COM13"))
         text = Path(self.dl.gui_log_file).read_text(encoding="utf-8")
-        self.assertIn("swapped", text)
+        self.assertIn("[WJ] COM13 is WJ2 (POS, firmware 14), COM15 is WJ1 (NEG, firmware 15). "
+                      "Ports swapped from memory, corrected.", text)
+        infos = [r for r in self._events("INFO", "WJ") if "swapped" in r["notes"]]
+        self.assertEqual(len(infos), 1)
+        by = {r["source"]: r for r in self._events("CONNECT")}
+        self.assertEqual((by["WJ1"]["param1"], by["WJ2"]["param1"]), ("COM15", "COM13"))
+        self.assertIn("firmware 15", by["WJ1"]["notes"])
+        self.assertEqual(self.win.wj_panel.rows[0].port_combo.currentText(), "COM15")
+        self.assertEqual(self.win.wj_panel.rows[1].port_combo.currentText(), "COM13")
 
-    def test_find_supplies_raises_on_a_swapped_pair_and_resolves_a_good_one(self):
+    def test_wj_ports_in_memory_order_connect_without_a_swap_line(self):
+        self._wj_identity({"COM13": "15", "COM15": "14"})
+        connected = self.win._wj_connect_by_firmware({0: "COM13", 1: "COM15"})
+        self.assertEqual(connected, {0: "COM13", 1: "COM15"})
+        self.assertNotIn("swapped", Path(self.dl.gui_log_file).read_text(encoding="utf-8"))
+        self.assertEqual(len(self._events("CONNECT", "WJ1")), 1)
+        self.assertEqual(len(self._events("CONNECT", "WJ2")), 1)
+
+    def test_wj_manual_connect_assigns_the_port_by_firmware(self):
+        """The WJ1 row's Connect with a port that answers 14: it is WJ2."""
+        self._wj_identity({"COM13": "14"})
+        self.win.on_wj_connect(0, port_override="COM13")
+        self.assertEqual(self.win.wj_units[0].ports, [])
+        self.assertEqual(self.win.wj_units[1].ports, ["COM13"])
+        self.assertEqual(self._wj_memory()["WJ2_COM"], "COM13")
+        text = Path(self.dl.gui_log_file).read_text(encoding="utf-8")
+        self.assertIn("COM13 answers firmware 14: WJ2 (POS), not WJ1. Connected as WJ2 and saved.",
+                      text)
+
+    def test_wj_refuses_two_ports_with_the_same_firmware(self):
+        self._wj_identity({"COM13": "14", "COM15": "14"})
+        self.assertEqual(self.win._wj_connect_by_firmware({0: "COM13", 1: "COM15"}), {})
+        self.assertEqual(self.win.wj_units[0].ports + self.win.wj_units[1].ports, [])
+        errors = [r for r in self._events("ERROR", "WJ") if "both answer WJ firmware 14" in r["notes"]]
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(self._events("CONNECT"), [])
+        self.assertTrue(self.popups)
+
+    def test_wj_refuses_a_firmware_that_is_neither_14_nor_15(self):
+        self._wj_identity({"COM13": "16", "COM15": "15"})
+        self.assertEqual(self.win._wj_connect_by_firmware({0: "COM13", 1: "COM15"}), {})
+        self.assertEqual(self.win.wj_units[1].ports, [], "nothing connects on a refusal")
+        errors = [r for r in self._events("ERROR", "WJ") if "neither 14" in r["notes"]]
+        self.assertEqual(len(errors), 1)
+
+    def test_wj_port_with_no_reply_leaves_only_that_unit_unconnected(self):
+        self._wj_identity({"COM13": None, "COM15": "14"})
+        connected = self.win._wj_connect_by_firmware({0: "COM13", 1: "COM15"})
+        self.assertEqual(connected, {1: "COM15"})
+        self.assertIn("no WJ reply on COM13",
+                      Path(self.dl.gui_log_file).read_text(encoding="utf-8"))
+
+    def test_find_supplies_resolves_by_firmware_alone(self):
         import instruments.glassman_id as gid
         ports = [self._wj_port("COM13", "TUSB3410________"), self._wj_port("COM15", "")]
         p = patch.object(gid.list_ports, "comports", lambda: ports)
-        p.start(); self.addCleanup(p.stop)
-
-        # 2026-09-23: the pair as verified.
-        p_ok = patch.object(gid, "read_version", lambda port: {"COM13": "15", "COM15": "14"}[port])
-        p_ok.start()
-        try:
+        p.start()
+        self.addCleanup(p.stop)
+        with patch.object(gid, "read_version", lambda port: {"COM13": "15", "COM15": "14"}[port]):
             self.assertEqual(gid.find_supplies(), {"NEG": "COM13", "POS": "COM15"})
-        finally:
-            p_ok.stop()
-
-        # 2026-09-24: same serials, firmware swapped.
-        p_bad = patch.object(gid, "read_version", lambda port: {"COM13": "14", "COM15": "15"}[port])
-        p_bad.start()
-        try:
-            with self.assertRaises(IOError) as cm:
+        # Same USB serials, firmware the other way round: the serials are ignored.
+        with patch.object(gid, "read_version", lambda port: {"COM13": "14", "COM15": "15"}[port]):
+            self.assertEqual(gid.find_supplies(), {"NEG": "COM15", "POS": "COM13"})
+        with patch.object(gid, "read_version", lambda port: "14"):
+            with self.assertRaises(LookupError):
                 gid.find_supplies()
-        finally:
-            p_bad.stop()
-        self.assertIn("swapped", str(cm.exception))
-        self.assertIn("polarity LED", str(cm.exception))
+        with patch.object(gid, "read_version", lambda port: {"COM13": "16", "COM15": "15"}[port]):
+            with self.assertRaises(IOError):
+                gid.find_supplies()
 
     def test_manual_connect_buttons_log_connect_too(self):
         """Auto-connect was the only path with CONNECT rows; the manual
@@ -1932,7 +1985,7 @@ class TestGuiShotLogging(GuiWindowTestCase):
             " ".join(str(v) for v in r.values())
             for r in read_rows(self.dl.get_log_file_path()))
         self.assertIn("failed interlocks", blob.lower())
-        self.assertIn("2. Relay Connection", blob)
+        self.assertIn("2. Relays FLOAT", blob)
 
     def test_window_title_is_the_shot_control_title(self):
         self.assertEqual(self.win.windowTitle(), "MultiPulse Shot Control")
@@ -3013,21 +3066,34 @@ class TestScopeCaptureReliability(unittest.TestCase):
         self.assertFalse(ok)
 
     # --------------------------------------------- (g) shot row honesty
-    def test_shot_row_has_a_blank_file_written_column(self):
-        """The row names the file it EXPECTS; whether it exists is separate.
-        Shots 5-8 in the master log name 19 files that were never written."""
+    def test_shot_row_names_the_file_and_leaves_outcomes_to_the_events(self):
+        """The row is frozen at t0. Whether the capture was good and the file
+        written are SCOPE_CAPTURE / SCOPE_EXPORT events keyed by shot number,
+        so the always-blank columns are gone."""
         from utils.shot_logger import SHOT_COLUMNS
+        from utils.shot_snapshot import build_shot_row
         for n in (1, 2, 3):
             self.assertIn(f"rigol{n}_file", SHOT_COLUMNS)
-            self.assertIn(f"rigol{n}_file_written", SHOT_COLUMNS)
-
-        row = build_shot_row({}, shot_number=1, session_shot_index=1,
+            self.assertIn(f"rigol{n}_armed", SHOT_COLUMNS)
+            self.assertNotIn(f"rigol{n}_file_written", SHOT_COLUMNS)
+            self.assertNotIn(f"rigol{n}_capture_ok", SHOT_COLUMNS)
+        for old in ("charge_positive_relay", "charge_negative_relay",
+                    "discharge_positive_relay", "discharge_negative_relay"):
+            self.assertNotIn(old, SHOT_COLUMNS)
+        for new in ("charge_relay", "discharge_relay", "relay_mode", "relay_state_source"):
+            self.assertIn(new, SHOT_COLUMNS)
+        row = build_shot_row({}, shot_number=7, session_shot_index=1,
                              datetime_str="now", timestamp_sec=0.0,
                              session_dir="d", experiment_log_file="e.csv",
                              gui_version="v", scope_files={1: "rigol1_x.csv"})
         self.assertEqual(row["rigol1_file"], "rigol1_x.csv")
-        self.assertEqual(row["rigol1_file_written"], "",
-                         "the export has not run yet at t0")
+        self.assertEqual(row["relay_mode"], "UNKNOWN")
+        # No key the row writes may be missing from the column list (DictWriter
+        # would raise); columns the snapshot cannot fill are left to restval.
+        self.assertEqual(set(row) - set(SHOT_COLUMNS), set())
+        for key in ("charge_relay", "discharge_relay", "relay_mode", "rigol1_file"):
+            self.assertIn(key, row)
+
 
 
 if __name__ == "__main__":

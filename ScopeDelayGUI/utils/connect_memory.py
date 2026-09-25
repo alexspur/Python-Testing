@@ -72,10 +72,10 @@ default_data = {
 # rewrites the COM values to wherever each device currently lives.
 #
 # The two WJ supplies are NOT in the table below. They are resolved by
-# instruments/glassman_id.py, which matches each supply by the USB serial its
-# own TUSB3410 chip reports (one "TUSB3410________", the other empty). That
-# serial follows the supply to any USB socket; hub location does not, and has
-# been observed swapping between these two supplies.
+# instruments/glassman_id.py from the firmware each answers (15 = WJ1 NEG,
+# 14 = WJ2 POS). Neither the COM number nor the USB serial identifies a
+# supply: the serial follows the adapter or cable, and both have been seen
+# swapped. The GUI reads the firmware again at connect and corrects the ports.
 #
 # To (re)learn signatures for new hardware, run:  python -m utils.connect_memory
 # and copy the printed values in here.
@@ -136,7 +136,8 @@ def _find_port_for_signature(sig, ports):
 
 
 def _resolve_wj_supplies(data):
-    """Resolve both WJ supplies by USB serial (see instruments/glassman_id.py).
+    """Resolve both WJ supplies by the firmware they answer (see
+    instruments/glassman_id.py); the GUI re-checks at connect and corrects.
 
     WJ1 is the NEGATIVE supply, WJ2 the POSITIVE one, matching the panel
     labels. If either is missing, unpowered or ambiguous, find_supplies()

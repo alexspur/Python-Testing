@@ -178,10 +178,11 @@ SHOT_COLUMNS = (
         "laser2_state",
         "laser2_mode",
         # --- relays (commanded state; the driver has no hardware readback) ---
-        "charge_positive_relay",
-        "charge_negative_relay",
-        "discharge_positive_relay",
-        "discharge_negative_relay",
+        # The two relays the GUI drives and the three-state mode they were
+        # last commanded to (GROUND / FLOAT / CHARGE, else UNKNOWN).
+        "charge_relay",
+        "discharge_relay",
+        "relay_mode",
         "relay_state_source",
         # --- interlocks ---
         "master_interlock_pass",
@@ -189,23 +190,17 @@ SHOT_COLUMNS = (
         "interlock_manual_overrides",
         # --- scopes (filenames stay rigol<N>_<session ts>.csv so the existing
         #     post-test analysis keeps working; they are named here instead) ---
-        # rigol<N>_file is the filename this shot EXPECTS. Whether it was
-        # actually written is a separate column, filled by the report from
-        # SCOPE_EXPORT events plus a check that the file exists: the row used
-        # to name a file for every connected scope whether or not any capture
-        # or export ever happened.
+        # rigol<N>_file is the filename this shot EXPECTS. The row is frozen
+        # at t0, before any capture or export, so whether the capture was
+        # good and whether the file was written are not columns: the
+        # SCOPE_CAPTURE and SCOPE_EXPORT events hold that, keyed by shot
+        # number, and the session report reads them.
         "rigol1_armed",
-        "rigol1_capture_ok",
         "rigol1_file",
-        "rigol1_file_written",
         "rigol2_armed",
-        "rigol2_capture_ok",
         "rigol2_file",
-        "rigol2_file_written",
         "rigol3_armed",
-        "rigol3_capture_ok",
         "rigol3_file",
-        "rigol3_file_written",
     ]
     # --- Rigol settings read back at arm time (query-only, per channel) ---
     + rigol_setting_columns(1)

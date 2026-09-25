@@ -1,8 +1,9 @@
 """
 glassman_id.py
 
-Finds the positive and negative Glassman / XP Power WJ supplies by USB identity,
-confirms each one answers the WJ serial protocol, and returns their COM ports.
+Tells the two Glassman / XP Power WJ supplies apart by the firmware revision
+their controllers answer, confirms each one speaks the WJ serial protocol,
+and returns their COM ports.
 
 Requires pyserial:  pip install pyserial
 
@@ -10,10 +11,11 @@ Lives in ScopeDelayGUI/instruments/ so the GUI can import it.
 
 Usage (run from the ScopeDelayGUI folder):
     python instruments/glassman_id.py --scan    list every WJ candidate with serial, location, firmware
-    python instruments/glassman_id.py           resolve POS and NEG to COM ports using SUPPLIES below
+    python instruments/glassman_id.py           resolve POS and NEG to COM ports by firmware
     python instruments/glassman_id.py --status  resolve, then read voltage, current and status once
 
-In the GUI (utils/connect_memory.py resolves WJ1=NEG, WJ2=POS this way):
+In the GUI (utils/connect_memory.py resolves WJ1=NEG, WJ2=POS this way, and
+gui/main_window.py assigns each port at connect the same way):
     from instruments.glassman_id import find_supplies
     ports = find_supplies()          # {"POS": "COM16", "NEG": "COM13"} -- COM numbers change
 """
@@ -26,47 +28,30 @@ from serial.tools import list_ports
 
 
 # ---------------------------------------------------------------------------
-# Edit this table. Each rule lists the port attributes that must all match.
-# Use exactly one of these per supply:
-#   serial_number  best (FTDI USB-RS232 adapter attached to the supply)
-#   location       tied to a physical hub port
+# Identity is the firmware revision, nothing else.
 #
-# The two WJ links report different USB serials:
-#   one reports "TUSB3410________"
-#   the other reports an empty serial ""
-# That is independent of which hub port each is plugged into. It is NOT an
-# identity for the supply itself. Evidence from 2026-09-24: the
-# "TUSB3410________" link, which on 2026-09-23 answered WJ firmware 15 (the
-# NEGATIVE supply, verified that day by unplugging the positive one), answered
-# firmware 14 the next morning - the POSITIVE supply's controller. A firmware
-# revision cannot move between units, so the TUSB3410 serial follows the USB
-# adapter or cable, not the supply, and the two had been swapped. The GUI
-# assigned WJ1/WJ2 backwards that morning without noticing.
+#   firmware 15  NEG  WJ1 (negative supply)
+#   firmware 14  POS  WJ2 (positive supply)
 #
-# Identity is therefore serial AND firmware, both required:
-#   POS  serial ""                  WJ firmware 14
-#   NEG  serial "TUSB3410________"  WJ firmware 15
-# find_supplies() and the GUI's connect refuse a port whose firmware does not
-# match its serial's rule, and say so. A serviced or reflashed supply changes
-# its firmware and must be re-entered here deliberately: failing loud is the
-# point. Two units with equal firmware would be indistinguishable by this;
-# the durable fix is a uniquely-serialled FTDI adapter on each supply's RS-232
-# port (example below). Do NOT match on location: the two have been seen
-# swapping hub locations. Confirm POS with the front panel polarity LED before
-# trusting this table.
+# Neither the COM number nor the USB serial identifies a supply. COM numbers
+# move with cables and hub ports. The two USB links report different serials
+# ("TUSB3410________" and ""), but evidence from 2026-09-24 shows that serial
+# follows the USB adapter or cable, not the supply: the "TUSB3410________"
+# link answered firmware 15 on 2026-09-23 and firmware 14 the next morning.
+# A firmware revision cannot move between units, so it is the identity, and
+# the ports are matched to it at every connect.
+#
+# Limits: two units with equal firmware would be indistinguishable, and a
+# serviced or reflashed supply changes its firmware; both fail loud here and
+# must be re-entered deliberately. Confirm POS with the front-panel polarity
+# LED before trusting this table.
 # ---------------------------------------------------------------------------
+FIRMWARE_UNITS = {"15": "NEG", "14": "POS"}
+
 SUPPLIES = {
-    "POS": {"vid": 0x0451, "pid": 0x3410, "serial_number": "",
-            "firmware": "14", "rated_kv": None, "rated_ma": None},
-    "NEG": {"vid": 0x0451, "pid": 0x3410, "serial_number": "TUSB3410________",
-            "firmware": "15", "rated_kv": None, "rated_ma": None},
-
-    # Example for FTDI adapters on the RS-232 port (J1):
-    # "POS": {"vid": 0x0403, "pid": 0x6001, "serial_number": "XXXXXXXX",
-    #         "rated_kv": 30.0, "rated_ma": 4.0},
+    "POS": {"vid": 0x0451, "pid": 0x3410, "firmware": "14", "rated_kv": None, "rated_ma": None},
+    "NEG": {"vid": 0x0451, "pid": 0x3410, "firmware": "15", "rated_kv": None, "rated_ma": None},
 }
-
-MATCH_KEYS = ("vid", "pid", "serial_number", "location")
 
 # USB IDs that may carry a WJ supply. TI TUSB3410 is the built-in USB port.
 # FTDI and Prolific cover USB-RS232 adapters on J1.
@@ -140,57 +125,43 @@ def read_status(port, rated_kv=None, rated_ma=None):
 # ---------------------------------------------------------------------------
 # Identification
 # ---------------------------------------------------------------------------
-def matches(p, rule):
-    for k in MATCH_KEYS:
-        if k not in rule:
-            continue
-        actual = getattr(p, k)
-        if k == "serial_number":
-            actual = actual or ""   # treat None and "" as the same empty serial
-        if actual != rule[k]:
-            return False
-    return True
-
-
-def swap_message(label, port, found, expected):
-    """The refusal when a port's firmware does not match its serial's rule.
-
-    One text for find_supplies() and the GUI, so the operator reads the same
-    thing in the console, the GUI log and the timeline.
-    """
-    return (f"{port} answers WJ firmware {found}; {label} is expected to be firmware "
-            f"{expected}. The supplies or their USB adapters/cables have been swapped: "
-            f"check the front-panel polarity LEDs and the USB cables before connecting.")
+def unit_for_firmware(fw):
+    """'NEG', 'POS', or None for a firmware that is neither 15 nor 14."""
+    return FIRMWARE_UNITS.get(fw)
 
 
 def find_supplies(verify=True):
-    """Return {"POS": "COMx", "NEG": "COMy"}. Raise if anything is ambiguous.
+    """Return {"POS": "COMx", "NEG": "COMy"} from the firmware each candidate
+    port answers. Raise if anything is ambiguous.
 
-    With verify, each matched port must answer the WJ version query AND
-    report the firmware its rule expects. A swapped pair - right serials,
-    wrong firmware - raises instead of resolving backwards.
+    Every candidate USB port is asked for its version. A port with no WJ
+    reply is skipped. A firmware that is neither 14 nor 15 raises IOError;
+    two ports with the same firmware raise LookupError, as does a missing
+    supply. `verify` is accepted for the old call signature; the version is
+    always read, since it is the identity.
     """
-    ports = list_ports.comports()
     result = {}
-    for name, rule in SUPPLIES.items():
-        hits = [p for p in ports if matches(p, rule)]
-        if not hits:
-            raise LookupError(f"{name}: no port matches {rule}")
-        if len(hits) > 1:
-            devs = ", ".join(p.device for p in hits)
-            raise LookupError(f"{name}: rule matches several ports ({devs}). Make it more specific.")
-        dev = hits[0].device
-        if verify:
-            found = read_version(dev)
-            if found is None:
-                raise IOError(f"{name}: {dev} matched but did not answer the WJ version query.")
-            expected = rule.get("firmware")
-            if expected and found != expected:
-                raise IOError(swap_message(name, dev, found, expected))
-        result[name] = dev
-
-    if len(set(result.values())) != len(result):
-        raise LookupError(f"Two supplies resolved to the same port: {result}")
+    seen = {}
+    for p in sorted(list_ports.comports(), key=lambda p: p.device):
+        if (p.vid, p.pid) not in CANDIDATE_IDS:
+            continue
+        fw = read_version(p.device)
+        if fw is None:
+            continue
+        name = unit_for_firmware(fw)
+        if name is None:
+            raise IOError(f"{p.device} answers WJ firmware {fw}, which is neither "
+                          "14 (POS, WJ2) nor 15 (NEG, WJ1).")
+        if name in result:
+            raise LookupError(f"{result[name]} and {p.device} both answer WJ firmware {fw}: "
+                              "the supplies cannot be told apart. Check the cables.")
+        result[name] = p.device
+        seen[p.device] = fw
+    missing = [name for name in SUPPLIES if name not in result]
+    if missing:
+        raise LookupError(f"{', '.join(missing)}: no port answered WJ firmware "
+                          f"{', '.join(SUPPLIES[n]['firmware'] for n in missing)}"
+                          + (f" (found {seen})" if seen else ""))
     return result
 
 
@@ -202,10 +173,11 @@ def scan():
         return
     for p in found:
         fw = read_version(p.device)
-        label = f"WJ firmware {fw}" if fw else "no WJ reply"
-        print(f"{p.device:<7} {label:<16} vid={p.vid:04X} pid={p.pid:04X} "
+        unit = unit_for_firmware(fw) if fw else None
+        label = f"WJ firmware {fw} ({unit or 'unknown'})" if fw else "no WJ reply"
+        print(f"{p.device:<7} {label:<26} vid={p.vid:04X} pid={p.pid:04X} "
               f"serial={p.serial_number!r} location={p.location!r}")
-    print("\nCheck the polarity LED on each supply, then fill in SUPPLIES.")
+    print("\nFirmware 15 is NEG (WJ1), 14 is POS (WJ2). Check the polarity LED on each supply.")
 
 
 def main():

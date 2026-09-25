@@ -1,5 +1,7 @@
 # instruments/wj.py
 
+import threading
+
 import serial
 import serial.tools.list_ports
 
@@ -34,6 +36,11 @@ class WJPowerSupply:
         self.vmax_kv = float(vmax_kv)
         self.imax_ma = float(imax_ma)
         self.ser: serial.Serial | None = None
+        # One transaction (write + reply) at a time. The reader thread polls
+        # Q at 20 Hz while the GUI thread sends S from the buttons; without
+        # this a Set read the poll's R packet as its reply ("R00000000000040\rA")
+        # and the poll read the Set's A, and writes timed out on each other.
+        self._lock = threading.RLock()
 
         # Last commanded analog setpoints (so we can send HV ON/OFF/RESET
         # without changing V/I each time)
@@ -48,20 +55,22 @@ class WJPowerSupply:
         return [p.device for p in serial.tools.list_ports.comports()]
 
     def connect(self, port: str, baudrate: int = 9600, timeout: float = 0.3):
-        self.close()
-        self.ser = serial.Serial(
-            port=port,
-            baudrate=baudrate,
-            bytesize=serial.EIGHTBITS,
-            parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE,
-            timeout=timeout,
-        )
+        with self._lock:
+            self.close()
+            self.ser = serial.Serial(
+                port=port,
+                baudrate=baudrate,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=timeout,
+            )
 
     def close(self):
-        if self.ser is not None:
-            self.ser.close()
-            self.ser = None
+        with self._lock:                # never mid-transaction
+            if self.ser is not None:
+                self.ser.close()
+                self.ser = None
 
     @property
     def is_connected(self) -> bool:
@@ -82,14 +91,16 @@ class WJPowerSupply:
         return SOH + body + cs_ascii + CR
 
     def _write_readline(self, core: str) -> str:
-        if not self.is_connected:
-            raise RuntimeError("WJPowerSupply not connected")
-
-        pkt = self._build_packet(core)
-        self.ser.reset_input_buffer()
-        self.ser.write(pkt)
-        line = self.ser.readline().decode("ascii", errors="ignore").strip()
-        return line
+        """One whole transaction under the port lock: flush, write, read the
+        reply. Every command and every poll goes through here."""
+        with self._lock:
+            if not self.is_connected:
+                raise RuntimeError("WJPowerSupply not connected")
+            pkt = self._build_packet(core)
+            self.ser.reset_input_buffer()
+            self.ser.write(pkt)
+            line = self.ser.readline().decode("ascii", errors="ignore").strip()
+            return line
 
     # ------------------------------------------------------------------
     # High-level commands

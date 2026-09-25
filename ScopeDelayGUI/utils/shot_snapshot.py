@@ -254,14 +254,10 @@ def build_shot_row(snapshot, shot_number, session_shot_index, datetime_str,
     # ---------------------------------------------------------- relays
     relays = snapshot.get("relays") or {}
     states = relays.get("states") or {}
-    for column, name in (
-        ("charge_positive_relay", "charge_positive"),
-        ("charge_negative_relay", "charge_negative"),
-        ("discharge_positive_relay", "discharge_positive"),
-        ("discharge_negative_relay", "discharge_negative"),
-    ):
-        value = states.get(name)
+    for column in ("charge_relay", "discharge_relay"):
+        value = states.get(column)
         row[column] = UNKNOWN if value is None else fmt(value)
+    row["relay_mode"] = relays.get("mode") or UNKNOWN
     row["relay_state_source"] = relays.get("source", UNKNOWN)
 
     # ---------------------------------------------------------- interlocks
@@ -277,12 +273,9 @@ def build_shot_row(snapshot, shot_number, session_shot_index, datetime_str,
         sec = snapshot.get(f"rigol{scope_id}") or {}
         row.update({
             f"rigol{scope_id}_armed": fmt(sec.get("armed")),
-            f"rigol{scope_id}_capture_ok": fmt(sec.get("capture_ok")),
+            # The file this shot expects. Capture and export outcomes are
+            # events (SCOPE_CAPTURE, SCOPE_EXPORT), not t0 columns.
             f"rigol{scope_id}_file": scope_files.get(scope_id, sec.get("file", "")),
-            # Left blank at t0 on purpose. The export has not run yet, so the
-            # row cannot honestly claim the file exists; the report fills this
-            # in from SCOPE_EXPORT events and a check against the disk.
-            f"rigol{scope_id}_file_written": "",
         })
 
         # Settings read back when the scope was armed for this shot. Blank

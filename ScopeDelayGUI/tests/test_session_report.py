@@ -64,7 +64,9 @@ def make_session(tmp_path, shots=(40, 41), gui_log=True, session_end=True,
         dl.log_config(f"Rigol{n}", "scope@connect", scope_settings(n))
         for ch in (1, 2, 3, 4):
             dl.log_config(f"Rigol{n}", f"channel{ch}@connect", channel_settings(n, ch))
-    dl.log_relay_state({"charge_positive": True, "charge_negative": False})
+    dl.log_relay_state({"charge_relay": False, "discharge_relay": True})
+    dl.log_relay_mode("GROUND", "FLOAT", "ok", [("discharge_relay", True, True)])
+    dl.log_relay_mode("FLOAT", "CHARGE", "refused", [], notes="HV not confirmed off: WJ2: HV on")
     for i in range(5):
         dl.log_opta_pressure(67.5 + i * 0.1, 6.75, 2765)
     dl.log_wj_voltage(1, 70.0, 0.5, hv_on=True)
@@ -248,7 +250,8 @@ def test_settings_sheet_has_every_bnc_and_rigol_channel_setting(session):
     assert (r["Unit"], r["Source"], r["Read at"]) == ("V/div", "readback", "arm")
     # Latest wins: shot 41 re-armed scope 1 channel 1 with a 20000:1 probe.
     assert keyed[("Rigol1", "channel1", "probe_ratio")]["Value"] == 20000
-    assert keyed[("Relay", "state", "charge_positive")]["Value"] == "ON"
+    assert keyed[("Relay", "state", "discharge_relay")]["Value"] == "ON"
+    assert keyed[("Relay", "mode", "relay_mode")]["Value"] == "FLOAT"
     # Device order: BNC575 first, relays last.
     devices = [r["Device"] for r in rows]
     assert devices[0] == "BNC575" and devices[-1] == "Relay"
@@ -285,6 +288,18 @@ def test_events_get_plain_sentences():
     r = {"event_type": "LASER_ARM", "source": "Laser1", "param1": "ARM", "param2": "ARMED",
          "param3": "", "param4": "", "notes": ""}
     assert sr.describe(r) == "Laser1 ARM, state ARMED."
+
+
+def test_relay_modes_are_on_the_relays_sheet_and_described(session):
+    sdir, _ = session
+    wb = load_workbook(sr.build(sdir))
+    ws = wb["Relays"]
+    cells = [c.value for row in ws.iter_rows() for c in row if c.value is not None]
+    assert "HV-off wait (s)" in cells
+    assert any(v == "refused" for v in cells) and any(v == "FLOAT" for v in cells)
+    events = {r[4] for r in sheet_rows(wb["Events"]) if r[2] == "RELAY_MODE"}
+    assert "Relays GROUND -> FLOAT: OK. writes: discharge_relay=ON ok" in events
+    assert any("FLOAT -> CHARGE: REFUSED" in e and "WJ2: HV on" in e for e in events)
 
 
 def test_truncated_last_row_does_not_crash(session):

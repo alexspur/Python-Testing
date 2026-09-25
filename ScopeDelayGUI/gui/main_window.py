@@ -39,16 +39,11 @@ from utils.shot_snapshot import (
 )
 from utils.downsample import downsample_four
 from utils.analysis_runner import AnalysisRun, AnalysisRunner
+from utils import relay_modes as rm
 
-from serial.tools import list_ports
 
 from instruments.dg535 import DG535Controller
-from instruments.glassman_id import (
-    SUPPLIES as WJ_SUPPLIES,
-    matches as wj_matches,
-    read_version as wj_read_version,
-    swap_message as wj_swap_message,
-)
+from instruments.glassman_id import read_version as wj_read_version
 from instruments.bnc575 import BNC575Controller
 from instruments.rigol import RigolScope
 from instruments.wj import WJPowerSupply
@@ -56,8 +51,6 @@ from instruments.numato_relay import NumatoRelayController
 
 
 class ScopeDelayMainWindow(QMainWindow):
-    _relay_update_signal = pyqtSignal(int, bool)  # (channel, state) — safe cross-thread UI update
-    _relay_log_signal = pyqtSignal(str)            # log messages from poll thread
     # (scope id, channel or 0, message) from a RigolScope error hook. The hook
     # fires on the capture QThread, so it goes through a signal to reach the
     # GUI thread before anything is logged or a widget is touched.
@@ -198,11 +191,22 @@ class ScopeDelayMainWindow(QMainWindow):
         self._opta_fault = None   # None = no reading yet, "" = sensor in range
         self._latest_psi = None   # last in-range psi; None when not trustworthy
 
-        # Relay polling state
-        self.relay_polling = False
-        self.relay_poll_thread = None
-        self._relay_update_signal.connect(self._relay_pushbutton_ui_update)
-        self._relay_log_signal.connect(self.log)
+        # Three-state relay control: the commanded mode and relay states, the
+        # transition in progress and its 100 ms timer. Unknown until a mode
+        # is commanded; nothing is written at connect. The clock is a
+        # member so tests can drive the 5 s HV-off wait.
+        self._relay_mode = rm.UNKNOWN
+        self._relay_states = {}
+        self._relay_transition = None
+        self._relay_clock = time.monotonic
+        self._wj_packet_monotonic = {}
+        # (kV, mA) last applied to each supply by Apply Program. Cleared by
+        # every HV OFF pulse, which programs 0 kV / 0 mA (the WJ ignores HV
+        # OFF otherwise), and by a connect. CHARGE needs one on both units.
+        self._wj_program = {}
+        self._relay_timer = QTimer(self)
+        self._relay_timer.setInterval(100)
+        self._relay_timer.timeout.connect(self._relay_tick)
 
         self.rigol1_connected = False
         self.rigol2_connected = False
@@ -827,6 +831,9 @@ class ScopeDelayMainWindow(QMainWindow):
                     self.relay_panel.set_connected(True, relay_port)
                     self.log(f"[Relay] Connected on {relay_port}")
                     self.data_logger.log_connect("Relay", relay_port)
+                    # Grounded at the END of auto-connect, once the WJ supplies
+                    # are up, so the HV-off readback confirms without a wait.
+                    self._relay_after_connect(ground=False)
             except Exception as e:
                 self.log(f"[Relay] NOT CONNECTED: {e}")
                 self.relay_panel.set_connected(False)
@@ -835,9 +842,11 @@ class ScopeDelayMainWindow(QMainWindow):
         # WJ HIGH VOLTAGE SUPPLIES (both on USB-serial)
         # ------------------------------
         # Identical USB-serial adapters can resolve to the same COM number, so
-        # never open a port the relay or the other supply already owns.
+        # never open a port the relay already owns. The saved ports are only
+        # where to look: each supply is assigned by the firmware it answers.
         claimed_ports = {relay_port} if relay_port else set()
-        for i, wj in enumerate(self.wj_units):
+        wj_ports = {}
+        for i in range(len(self.wj_units)):
             if not flags.get(f"wj{i+1}", True):
                 continue
             row = self.wj_panel.rows[i]
@@ -846,20 +855,16 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.log(f"[WJ{i+1}] No saved port to auto-connect")
                 row.lamp.set_status("red", "Not Connected")
                 continue
-            if port in claimed_ports:
+            if port in claimed_ports or port in wj_ports.values():
                 self.log(f"[WJ{i+1}] Skipping {port} (already used by another device)")
                 row.lamp.set_status("red", "Not Connected")
                 continue
+            wj_ports[i] = port
+        if wj_ports:
             try:
-                fw = self._identify_wj_port(i, port)
-                wj.connect(port)
-                claimed_ports.add(port)
-                row.lamp.set_status("green", "Connected")
-                self.log(f"[WJ{i+1}] Connected on {port}, firmware {fw}")
-                self.data_logger.log_connect(f"WJ{i+1}", port, f"firmware {fw}")
+                claimed_ports.update(self._wj_connect_by_firmware(wj_ports).values())
             except Exception as e:
-                row.lamp.set_status("red", "Not Connected")
-                self.log(f"[WJ{i+1}] NOT CONNECTED: {e}")
+                self.log(f"[WJ] NOT CONNECTED: {e}")
 
         # ------------------------------
         # Rigol Oscilloscopes
@@ -934,6 +939,13 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.log(f"[Laser2] NOT CONNECTED: {e}")
 
         self.log("=== Auto-connect done ===")
+
+        # The GUI starts in GROUND. The same transition as the button, through
+        # the sequencer and its safety checks: HV off to both supplies, wait for
+        # the readback, charging relay off, then discharging relay off. With the
+        # supplies just connected the readback confirms at once; a missing
+        # supply still grounds after the wait, with the ERROR row naming it.
+        self._relay_startup_ground()
 
 
     def _bnc_read_all_settings(self):
@@ -1034,10 +1046,7 @@ class ScopeDelayMainWindow(QMainWindow):
         relay_panel.btn_disconnect.clicked.connect(self.on_relay_disconnect)
 
         # Connect relay control signals
-        relay_panel.relay_state_changed.connect(self.on_relay_state_changed)
-        relay_panel.all_on_requested.connect(self.on_relay_all_on)
-        relay_panel.all_off_requested.connect(self.on_relay_all_off)
-        relay_panel.polling_toggle_requested.connect(self.on_relay_polling_toggle)
+        relay_panel.mode_requested.connect(self.on_relay_button)
 
     def refresh_relay_ports(self):
         """Populate COM port list for relay panel"""
@@ -1068,12 +1077,7 @@ class ScopeDelayMainWindow(QMainWindow):
             relay_panel.set_connected(True, port)
             self.log(f"[Relay] Connected to {port}")
             self.data_logger.log_connect("Relay", port)
-            # The module reports no relay states, and this GUI has issued no
-            # commands yet, so the physical state is genuinely unknown.
-            self.system_state.update(
-                "relays", {"states": {}, "source": "unknown"}, source=SOURCE_COMMANDED)
-            self.data_logger.log_relay_state({}, source="unknown at connect")
-            self._mark_interlock(2, f"relay connected {port}")
+            self._relay_after_connect(ground=True)
 
             # Save port to memory
             self.conn["RELAY_COM"] = port
@@ -1087,171 +1091,278 @@ class ScopeDelayMainWindow(QMainWindow):
         """Disconnect from Numato relay module"""
         relay_panel = self.relay_panel
 
-        # Stop polling first
-        if self.relay_polling:
-            self._stop_relay_polling()
-
         try:
+            self._relay_ground_and_close("disconnect")
             self.numato_relay.close()
             relay_panel.set_connected(False)
+            # Without the link nothing can be commanded, so the mode is unknown
+            # again (the relays themselves were left in GROUND just above).
+            self._relay_states = {}
+            self._relay_set_mode(rm.UNKNOWN)
             self.log("[Relay] Disconnected")
             self.data_logger.log_disconnect("Relay")
 
         except Exception as e:
             self.log(f"[Relay ERROR] {e}")
 
-    def on_relay_state_changed(self, channel: int, state: bool):
-        """Handle relay switch toggle"""
-        try:
-            self.numato_relay.set_relay(channel, state)
-            state_str = "ON" if state else "OFF"
-            self.log(f"[Relay] Channel {channel} {state_str}")
-            self._record_relay_state(channel, state, ok=True)
-            self._mark_interlock(2, f"relay ch{channel} responded")
+    # ------------------------------------------------------------------
+    #  Three-state HV relay control: GROUND / FLOAT / CHARGE
+    # ------------------------------------------------------------------
+    # The two relays this GUI drives, by Numato channel. "Charging Relay 1"
+    # (channel 1) connects the WJ supplies to the Marx; "Discharging Relay 1"
+    # (channel 0) is the grounding relay, disengaged = grounded. Channels 2
+    # and 3 are not used. The mode logic itself is utils/relay_modes.py.
+    _RELAY_CHANNELS = {rm.CHARGING: 1, rm.DISCHARGING: 0}
+    _RELAY_NAMES = {0: rm.DISCHARGING, 1: rm.CHARGING}   # channel -> shot-log name
 
-            # Interlock: turning ON Charging Relay (CH1) also energizes Discharging Relay (CH0)
-            if channel == self._RELAY_CHARGING and state:
-                self._relay_set(self._RELAY_DISCHARGING, True)
+    def _relay_after_connect(self, ground):
+        """The relays are wherever they were and the module cannot say where,
+        so the mode is unknown until the GUI grounds: right now for the Connect
+        button, at the end of auto-connect for a launch."""
+        self._relay_states = {}
+        self._relay_set_mode(rm.UNKNOWN)
+        self.data_logger.log_relay_state({}, source="unknown at connect")
+        if ground:
+            self._relay_startup_ground()
 
-        except Exception as e:
-            self.log(f"[Relay ERROR] {e}")
-            self.error_popup("Relay Error", str(e))
+    def _relay_startup_ground(self):
+        """Ground the Marx through the normal GROUND transition, if the relay
+        board is connected. Without it the panel stays 'State unknown'."""
+        if not getattr(self.numato_relay, "is_connected", False):
+            self.log("[RELAY] relay board not connected: state unknown, nothing commanded")
+            return
+        if self._relay_transition is not None:
+            return
+        self.log("[RELAY] startup ground: grounding the Marx before anything else")
+        self.on_relay_mode_requested(rm.GROUND, reason="startup ground")
 
-    def on_relay_all_on(self):
-        """Turn all relays ON"""
-        try:
-            self.numato_relay.all_on()
-            self.relay_panel.update_all_states([True, True, True, True])
-            self.log("[Relay] All channels ON")
-            for _ch in range(4):
-                self._record_relay_state(_ch, True, ok=True)
-            self._mark_interlock(2, "relay all on responded")
-        except Exception as e:
-            self.log(f"[Relay ERROR] {e}")
-            self.error_popup("Relay Error", str(e))
-
-    def on_relay_all_off(self):
-        """Turn all relays OFF"""
-        try:
-            self.numato_relay.all_off()
-            self.relay_panel.update_all_states([False, False, False, False])
-            self.log("[Relay] All channels OFF")
-            for _ch in range(4):
-                self._record_relay_state(_ch, False, ok=True)
-            self._mark_interlock(2, "relay all off responded")
-        except Exception as e:
-            self.log(f"[Relay ERROR] {e}")
-            self.error_popup("Relay Error", str(e))
-
-    # ── GPIO Pushbutton Polling ────────────────────────────────────────
-
-    def on_relay_polling_toggle(self, start: bool):
-        """Start or stop GPIO pushbutton polling."""
-        if start:
-            self._start_relay_polling()
+    def on_relay_button(self, mode):
+        """The panel's three buttons. CHARGE also turns HV on once the relays
+        are in CHARGE, so one press does both; pressed while already in
+        CHARGE it resends the relays and then HV ON."""
+        if mode == rm.CHARGE:
+            self.on_wj_hv_on(reason="CHARGE button", resend=True)
         else:
-            self._stop_relay_polling()
+            self.on_relay_mode_requested(mode)
 
-    def _start_relay_polling(self):
-        """Start background GPIO polling thread."""
-        if not self.numato_relay.is_connected:
-            self.log("[Relay] Cannot start polling — not connected")
-            self.relay_panel.set_polling_active(False)
-            return
-        self.relay_polling = True
-        self.relay_panel.set_polling_active(True)
-        self.log("[Relay] GPIO pushbutton polling started (GPIO 2, 3, 4, 5)")
-        import threading
-        self.relay_poll_thread = threading.Thread(
-            target=self._relay_poll_loop, daemon=True)
-        self.relay_poll_thread.start()
+    def _relay_hv_status(self):
+        """Cached HV state per supply for the mode logic: connected, hv_on and
+        the age of its last packet on the same clock the stamps use."""
+        now = self._relay_clock()
+        status = {}
+        for i, wj in enumerate(self.wj_units):
+            cached = self.system_state.get(f"wj{i + 1}") or {}
+            stamp = self._wj_packet_monotonic.get(i)
+            status[f"WJ{i + 1}"] = {
+                "connected": bool(getattr(wj, "is_connected", False)),
+                "hv_on": cached.get("hv_on"),
+                "age_s": None if stamp is None else now - stamp,
+            }
+        return status
 
-    def _stop_relay_polling(self):
-        """Stop the GPIO polling thread."""
-        self.relay_polling = False
-        self.relay_panel.set_polling_active(False)
-        if self.relay_poll_thread:
-            self.relay_poll_thread.join(timeout=1)
-            self.relay_poll_thread = None
-        self.log("[Relay] GPIO pushbutton polling stopped")
+    def on_relay_mode_requested(self, target, reason="", then=None):
+        """One of the three buttons, the startup ground, or an HV button.
+        Refusals are decided here; the writes run on the 100 ms timer so the
+        GUI stays live and the WJ packets keep arriving during the HV-off
+        wait. `reason` goes into the RELAY_MODE note ("startup ground",
+        "by HV ON"); `then(result, mode)` runs when the transition ends.
+        Returns True when the transition started, False when refused."""
+        if self._relay_transition is not None:
+            return False
+        if not getattr(self.numato_relay, "is_connected", False):
+            self.log(f"[RELAY] {target} refused: relay module not connected")
+            self.error_popup("Relay not connected", "Connect the Numato relay module first.")
+            return False
+        current = self._relay_mode
+        if target == rm.CHARGE:
+            ok, reasons = rm.hv_all_off(self._relay_hv_status())
+            if not ok:
+                why = "; ".join(reasons)
+                self.log(f"[RELAY] CHARGE refused: HV not confirmed off ({why})")
+                self.data_logger.log_relay_mode(current, target, "refused", [],
+                                                notes=f"HV not confirmed off: {why}")
+                self.error_popup(
+                    "CHARGE refused",
+                    "Both supplies must be connected and report HV off within the "
+                    f"last {rm.HV_FRESH_S:.0f} s.\n\n{why}")
+                return False
+        writes = rm.writes_for(current, target)
+        self._relay_transition = {
+            "from": current, "to": target, "writes": list(writes), "done": [],
+            "hv_wait": rm.needs_hv_off(current, target), "hv_started": None,
+            "hv_wait_s": None, "hv_confirmed": None, "note": "", "reason": reason,
+            "then": then,
+        }
+        # While relays move the mode is not any of the three: the panel shows
+        # it, step 2 drops, and Fire is blocked until the transition ends.
+        self._relay_set_mode(rm.UNKNOWN)
+        self.relay_panel.set_busy(True, target)
+        self.log(f"[RELAY] {current} -> {target}: "
+                 + ", ".join(f"{r} {'ON' if on else 'OFF'}" for r, on in writes)
+                 + (" after HV off is confirmed" if self._relay_transition["hv_wait"] else ""))
+        if self._relay_transition["hv_wait"]:
+            self._relay_send_hv_off()
+            self._relay_transition["hv_started"] = self._relay_clock()
+        self._relay_timer.start()
+        self._relay_tick()                  # first step now, not 100 ms later
+        return True
 
-    def _relay_poll_loop(self):
-        """Background thread: poll GPIO pins for pushbutton presses.
-
-        button_map: (gpio_pin, relay_channel)
-          GPIO 2 → Relay 1 (CH0) toggle
-          GPIO 3 → Relay 2 (CH1) toggle
-          GPIO 4 → Relay 3 (CH2) toggle
-          GPIO 5 → Relay 4 (CH3) toggle
-        Rising-edge detection prevents re-firing while button is held.
-        """
-        import time
-        # (gpio_pin, relay_channel)
-        button_map = [
-            (2, 1),  # GPIO 2 → CH1 (Charging Relay 1)
-            (3, 0),  # GPIO 3 → CH0 (Discharging Relay 1)
-            (4, 2),  # GPIO 4 → Relay 3
-            (5, 3),  # GPIO 5 → Relay 4
-        ]
-        prev = {gpio: False for gpio, _ in button_map}
-
-        while self.relay_polling and self.numato_relay.is_connected:
+    def _relay_send_hv_off(self):
+        for i, wj in enumerate(self.wj_units):
+            if not getattr(wj, "is_connected", False):
+                self.log(f"[RELAY] WJ{i + 1} not connected: HV OFF not sent")
+                continue
             try:
-                for gpio_pin, ch in button_map:
-                    if not self.relay_polling:
-                        break
-                    current = self.numato_relay.gpio_read(gpio_pin)
-                    time.sleep(0.02)
-                    # Rising edge only — toggle relay once per press
-                    if current and not prev[gpio_pin]:
-                        new_state = not self.numato_relay.relay_states[ch]
-                        if new_state:
-                            self.numato_relay.relay_on(ch)
-                        else:
-                            self.numato_relay.relay_off(ch)
-                        self.numato_relay.relay_states[ch] = new_state
-                        self._relay_update_signal.emit(ch, new_state)
-                    prev[gpio_pin] = current
-                time.sleep(0.08)
+                self._wj_hv_off_pulse(i, wj)
+                self.data_logger.log_wj_command(i + 1, "HV_OFF")
+                self.log(f"[RELAY] WJ{i + 1} HV OFF sent")
             except Exception as e:
-                self._relay_log_signal.emit(f"[Relay Poll ERROR] {e}")
-                time.sleep(0.5)
+                self.log(f"[RELAY] WJ{i + 1} HV OFF failed: {e}")
+                self.data_logger.log_error(f"WJ{i + 1}", f"HV OFF failed: {e}")
 
-    def _relay_pushbutton_ui_update(self, ch: int, state: bool):
-        """Called on main thread after a pushbutton press updates relay state."""
-        label = "ON" if state else "OFF"
-        self.log(f"[Relay] GPIO button: CH{ch} → {label}")
-        self.relay_panel.update_relay_state(ch, state)
-
-    # ── Relay channel constants ────────────────────────────────────────
-    _RELAY_CHARGING    = 1  # CH1 — Charging Relay 1  (NO)
-    _RELAY_DISCHARGING = 0  # CH0 — Discharging Relay 1 (NC)
-
-    # Channel -> shot-log name. This program only identifies two relays by
-    # function ("Charging Relay 1" / "Discharging Relay 1"); neither the panel
-    # nor the driver says which polarity rail they belong to, so the shot row
-    # fills charge_positive/discharge_positive from them and leaves the
-    # negative-rail columns UNKNOWN rather than guessing.
-    _RELAY_NAMES = {
-        0: "discharge_positive",
-        1: "charge_positive",
-        2: "relay3",
-        3: "relay4",
-    }
-
-    def _relay_set(self, ch: int, state: bool):
-        """Set a relay and update the GUI panel. Safe to call from main thread only."""
-        if not self.numato_relay.is_connected:
-            self.log(f"[Relay] Not connected — cannot set CH{ch}")
+    def _relay_tick(self):
+        """One step of the transition in progress: the HV-off wait, then one
+        relay write per tick."""
+        t = self._relay_transition
+        if t is None:
+            self._relay_timer.stop()
             return
+        if t["hv_wait"] and t["hv_confirmed"] is None:
+            ok, reasons = rm.hv_all_off(self._relay_hv_status())
+            elapsed = self._relay_clock() - t["hv_started"]
+            if ok:
+                t["hv_confirmed"], t["hv_wait_s"] = True, elapsed
+                self.log(f"[RELAY] HV confirmed off on both supplies after {elapsed:.1f} s")
+            elif elapsed >= rm.HV_OFF_WAIT_S:
+                why = "; ".join(reasons)
+                t["hv_confirmed"], t["hv_wait_s"] = False, elapsed
+                if t["to"] == rm.FLOAT:
+                    # The charging relay never opens under HV: stay where we
+                    # were (CHARGE, or UNKNOWN after a failed write).
+                    note = f"HV-off not confirmed after {elapsed:.1f} s ({why})"
+                    self.log(f"[RELAY] FLOAT refused: {note}; staying in {t['from']}")
+                    self.data_logger.log_error("Relay", f"FLOAT refused: {note}")
+                    self._relay_finish("timeout", t["from"], note=note)
+                    self.error_popup(
+                        f"Still in {t['from']}",
+                        f"HV off was not confirmed within {rm.HV_OFF_WAIT_S:.0f} s "
+                        f"({why}).\n\nThe charging relay is not opened. Turn HV off, "
+                        "check the supplies, then press FLOAT again.")
+                    return
+                # GROUND is never refused: ground anyway, and say so loudly.
+                t["note"] = f"HV-off NOT confirmed after {elapsed:.1f} s ({why}); grounded anyway"
+                self.log(f"[RELAY] ERROR: {t['note']}")
+                self.data_logger.log_error("Relay", t["note"])
+            else:
+                return                          # keep waiting
+        if t["writes"]:
+            relay, on = t["writes"].pop(0)
+            if not self._relay_write(relay, on):
+                return                          # finished as failed
+            if t["writes"]:
+                return                          # next write on the next tick
+        note = t["note"]
+        self._relay_finish("ok", t["to"], note=note)
+        if note:
+            self.error_popup("Grounded with HV not confirmed", note)
+
+    def _relay_write(self, relay, on):
+        """One relay write, rule-checked on the state it would produce.
+        Returns False after finishing the transition as failed."""
+        t = self._relay_transition
+        label = f"{relay} {'ON' if on else 'OFF'}"
         try:
-            self.numato_relay.set_relay(ch, state)
-            self.relay_panel.update_relay_state(ch, state)
-            self.log(f"[Relay] CH{ch} → {'ON' if state else 'OFF'}")
-            self._record_relay_state(ch, state, ok=True)
+            after = rm.apply_checked(self._relay_states, relay, on)
+        except rm.SafetyViolation as e:
+            self.log(f"[RELAY] write refused: {label}: {e}")
+            self.data_logger.log_error("Relay", f"write refused: {label}: {e}")
+            t["done"].append((relay, on, False))
+            self._relay_finish("failed", rm.UNKNOWN, note=f"refused {label}: {e}")
+            return False
+        channel = self._RELAY_CHANNELS[relay]
+        try:
+            self.numato_relay.set_relay(channel, on)
         except Exception as e:
-            self.log(f"[Relay ERROR] CH{ch}: {e}")
-            self._record_relay_state(ch, state, ok=False)
+            self.log(f"[RELAY] {label} (CH{channel}) FAILED: {e}; state unknown, GROUND only")
+            self.data_logger.log_error("Relay", f"{label} (CH{channel}) write failed: {e}")
+            t["done"].append((relay, on, False))
+            self._record_relay_state(channel, on, ok=False)
+            self._relay_finish("failed", rm.UNKNOWN, note=f"{label} write failed: {e}")
+            self.error_popup("Relay write failed",
+                             f"{label} (CH{channel}) failed: {e}\n\nThe relay state is "
+                             "unknown. Only GROUND is enabled.")
+            return False
+        self._relay_states = after
+        t["done"].append((relay, on, True))
+        self.log(f"[RELAY] {label} (CH{channel})")
+        self._record_relay_state(channel, on, ok=True)
+        return True
+
+    def _relay_finish(self, result, mode, note=""):
+        t, self._relay_transition = self._relay_transition, None
+        self._relay_timer.stop()
+        if result == "failed":
+            self._relay_states = {}             # the commanded state is no longer known
+        self._relay_set_mode(mode)
+        self.relay_panel.set_busy(False)
+        if result == "failed":
+            self.relay_panel.set_enabled_modes({rm.GROUND})
+        hv = "" if t["hv_wait_s"] is None else f"{t['hv_wait_s']:.1f}"
+        notes = "; ".join(filter(None, [t.get("reason", ""), note]))
+        self.data_logger.log_relay_mode(t["from"], t["to"], result, t["done"],
+                                        hv_wait_s=hv, notes=notes)
+        self.log(f"[RELAY] {t['from']} -> {t['to']}: {result}; state {mode}"
+                 + (f" ({note})" if note else ""))
+        then = t.get("then")
+        if then is not None:
+            try:
+                then(result, mode)
+            except Exception as e:
+                self.log(f"[RELAY] follow-up after {t['to']} failed: {e}")
+                self.data_logger.log_error("Relay", f"follow-up after {t['to']} failed: {e}")
+
+    def _relay_set_mode(self, mode):
+        """Commanded mode: lamps, the state cache the shot row reads, and
+        checklist step 2 (latched by FLOAT, dropped by anything else)."""
+        self._relay_mode = mode
+        self.system_state.update(
+            "relays", {"states": dict(self._relay_states), "mode": mode, "source": "commanded"},
+            source=SOURCE_COMMANDED)
+        self.relay_panel.set_mode(mode)
+        if mode == rm.FLOAT:
+            self._mark_interlock(2, "relays FLOAT")
+        else:
+            self._unmark_interlock(2, f"relays {mode}")
+
+    def _relay_ground_and_close(self, reason):
+        """Disconnect and GUI close: the GROUND order, charging relay off first,
+        then discharging relay off. Best effort, every write logged."""
+        relay = self.numato_relay
+        if not getattr(relay, "is_connected", False):
+            return
+        # A transition in flight is abandoned: the ground order below is
+        # the safe end state whatever it was doing.
+        self._relay_timer.stop()
+        self._relay_transition = None
+        previous = self._relay_mode
+        done = []
+        for r, on in rm.writes_for(rm.UNKNOWN, rm.GROUND):     # both relays, safe order
+            ch = self._RELAY_CHANNELS[r]
+            try:
+                relay.set_relay(ch, on)
+                done.append((r, on, True))
+                self._record_relay_state(ch, on, ok=True)
+            except Exception as e:
+                done.append((r, on, False))
+                self.log(f"[RELAY] {r} OFF (CH{ch}) failed at {reason}: {e}")
+                self.data_logger.log_error("Relay", f"{r} OFF failed at {reason}: {e}")
+        ok = all(o for _, _, o in done)
+        self._relay_states = dict(rm.TARGET[rm.GROUND]) if ok else {}
+        self._relay_set_mode(rm.GROUND if ok else rm.UNKNOWN)
+        self.data_logger.log_relay_mode(previous, rm.GROUND, "ok" if ok else "failed", done,
+                                        notes=f"at {reason}")
+        self.log(f"[RELAY] grounded at {reason}: charging off, then discharging off"
+                 + ("" if ok else " (a write FAILED, state unknown)"))
 
     def on_export_csv(self):
         """Manual export (toolbar/button): export every captured scope to its
@@ -1940,7 +2051,7 @@ class ScopeDelayMainWindow(QMainWindow):
     # gated Single + Capture action, built separately.
     _INTERLOCK_STEPS = [
         (1, "1. Laser Prep/Arm"),
-        (2, "2. Relay Connection"),
+        (2, "2. Relays FLOAT"),
         (3, "3. Power Supplies"),
         (4, "4. Pressure > 50 psi"),
     ]
@@ -2090,15 +2201,10 @@ class ScopeDelayMainWindow(QMainWindow):
                 psi = getattr(self, "_latest_psi", 0.0)
                 self._mark_interlock(4, f"{psi:.1f} psi")
 
-        # Step 2 - relay connection. Latches on a good relay response (see the
-        # relay handlers) but also passes on a live connection so it does not
-        # stay red after auto-connect.
-        if not self.interlock_passed.get(2):
-            if self.interlock_manual[2].isChecked():
-                self._mark_interlock(2, "manual")
-            elif getattr(self, "numato_relay", None) and \
-                    self.numato_relay.is_connected:
-                self._mark_interlock(2, "relay connected")
+        # Step 2 - relays FLOAT. Latched and dropped by the relay mode logic
+        # itself (_relay_set_mode); here only the manual override.
+        if not self.interlock_passed.get(2) and self.interlock_manual[2].isChecked():
+            self._mark_interlock(2, "manual")
 
         # Step 3 - power supplies. Latches in on_wj_packet (a good R packet
         # with no fault from every supply); here we only honor a manual
@@ -2481,6 +2587,17 @@ class ScopeDelayMainWindow(QMainWindow):
             self.log(f"[BNC575] Fire BLOCKED - {detail}")
             self.data_logger.log_fire_blocked("laser_not_prepped", detail)
             self.error_popup("Lasers not prepped", hint)
+            return
+
+        # RELAY GATE. The Marx must be floating at t0: isolated from the
+        # supplies and from ground. Commanded state, so an unknown start or
+        # a transition in progress blocks too. The step-2 override wins.
+        if self._relay_mode != rm.FLOAT and not self.interlock_manual[2].isChecked():
+            detail = f"relay mode is {self._relay_mode}, not FLOAT"
+            self.log(f"[BNC575] Fire BLOCKED - {detail}")
+            self.data_logger.log_fire_blocked("relays_not_float", detail)
+            self.error_popup("Relays not FLOAT",
+                             "Press FLOAT and wait for its lamp before firing.\n\n" + detail)
             return
 
         # SAFETY INTERLOCK: Ensure WJ HV supplies are OFF before firing.
@@ -3121,7 +3238,7 @@ class ScopeDelayMainWindow(QMainWindow):
         # Send HV OFF to all connected units
         for i, wj in connected_units:
             try:
-                resp = wj.hv_off_pulse()
+                resp = self._wj_hv_off_pulse(i, wj)
                 self.log(f"[WJ{i+1}] HV OFF command sent: {resp}")
             except Exception as e:
                 self.log(f"[WJ{i+1} ERROR] Failed to send HV OFF: {e}")
@@ -3153,7 +3270,7 @@ class ScopeDelayMainWindow(QMainWindow):
                     else:
                         self.log(f"[WJ{i+1}] HV still ON, retrying... (attempt {attempt + 1}/{max_retries})")
                         # Send another HV OFF command
-                        wj.hv_off_pulse()
+                        self._wj_hv_off_pulse(i, wj)
                         time.sleep(retry_delay)
 
                 except Exception as e:
@@ -3171,45 +3288,120 @@ class ScopeDelayMainWindow(QMainWindow):
         return True
 
     # GUI unit index -> supply key in instruments/glassman_id.py.
-    _WJ_SUPPLY_KEYS = ("NEG", "POS")   # WJ1 = negative, WJ2 = positive
+    # The supplies are told apart by the firmware their controllers answer:
+    # 15 is WJ1 (NEG), 14 is WJ2 (POS). COM numbers move with cables and hub
+    # ports, and the USB serial follows the adapter, so neither is identity.
+    _WJ_UNIT_BY_FIRMWARE = {"15": 0, "14": 1}
+    _WJ_POLARITY = {0: "NEG", 1: "POS"}
 
-    def _identify_wj_port(self, index, port):
-        """Confirm the supply on `port` really is WJ{index+1} before connecting.
+    def _wj_probe_firmware(self, port):
+        """Firmware the WJ on `port` answers (None when nothing does),
+        releasing any unit that holds the port first."""
+        for wj in self.wj_units:
+            ser = getattr(wj, "ser", None)
+            if ser is not None and getattr(ser, "port", None) == port:
+                wj.close()
+        return wj_read_version(port)
 
-        Polarity comes from the USB serial each supply's own chip reports
-        (SUPPLIES in instruments/glassman_id.py). That serial follows the
-        supply to any socket; COM numbers and hub locations do not, and these
-        two supplies have been seen swapping hub locations. The WJ protocol
-        itself cannot report polarity, model or serial number.
+    def _wj_not_connected(self, slots, text):
+        for slot in slots:
+            self.wj_panel.rows[slot].lamp.set_status("red", text)
 
-        The USB serial alone is not enough: on 2026-09-24 the
-        "TUSB3410________" link answered firmware 14 - the POSITIVE supply's
-        controller - after answering 15 the day before, so the serial follows
-        the adapter or cable, not the supply, and the pair had been swapped.
-        The firmware is therefore matched too, and a mismatch refuses the
-        connect. Raises IOError if the port is gone, holds the other supply,
-        never answers, or answers with the wrong firmware.
+    def _wj_connect_by_firmware(self, ports):
+        """Open each port, read its firmware, and connect it as the unit that
+        firmware names. `ports` maps the slot a port was remembered or chosen
+        for (0 = WJ1, 1 = WJ2) to the port. Returns {unit: port} connected.
+
+        A swapped pair connects the right way round, the corrected ports are
+        saved to connection_memory.json, and one INFO line says so. Refused,
+        with nothing connected, only when two ports answer the same firmware
+        or a port answers a firmware that is neither 14 nor 15. A port with
+        no WJ reply leaves just that unit unconnected.
         """
-        key = self._WJ_SUPPLY_KEYS[index]
-        p = next((p for p in list_ports.comports() if p.device == port), None)
-        if p is None:
-            raise IOError(f"{port} is not present")
-        if not wj_matches(p, WJ_SUPPLIES[key]):
-            actual = p.serial_number or ""
-            other = next((k for k, rule in WJ_SUPPLIES.items() if wj_matches(p, rule)), None)
-            raise IOError(
-                f"{port} has USB serial {actual!r}; WJ{index+1} is the {key} supply"
-                + (f" and {port} is the {other} supply" if other else ""))
-        self.wj_units[index].close()   # release the port if this unit already holds it
-        version = wj_read_version(port)
-        if version is None:
-            raise IOError(f"no WJ reply on {port}")
-        expected = WJ_SUPPLIES[key].get("firmware")
-        if expected and version != expected:
-            msg = wj_swap_message(f"WJ{index+1} ({key})", port, version, expected)
-            self.data_logger.log_error(f"WJ{index+1}", msg)
-            raise IOError(msg)
-        return version
+        answers = {}
+        for slot, port in ports.items():
+            try:
+                answers[port] = self._wj_probe_firmware(port)
+            except Exception as e:
+                answers[port] = None
+                self.log(f"[WJ{slot + 1}] {port}: {e}")
+
+        by_fw = {}
+        for port, fw in answers.items():
+            if fw is None:
+                continue
+            if fw not in self._WJ_UNIT_BY_FIRMWARE:
+                msg = (f"{port} answers WJ firmware {fw}, which is neither 14 (WJ2, POS) "
+                       "nor 15 (WJ1, NEG); no WJ supply connected")
+                self.log(f"[WJ ERROR] {msg}")
+                self.data_logger.log_error("WJ", msg)
+                self._wj_not_connected(ports, "Not Connected")
+                self.error_popup("WJ supply not recognised", msg)
+                return {}
+            by_fw.setdefault(fw, []).append(port)
+        dup = {fw: ps for fw, ps in by_fw.items() if len(ps) > 1}
+        if dup:
+            msg = "; ".join(f"{' and '.join(ps)} both answer WJ firmware {fw}"
+                            for fw, ps in dup.items())
+            msg += ": the supplies cannot be told apart, no WJ supply connected; check the cables"
+            self.log(f"[WJ ERROR] {msg}")
+            self.data_logger.log_error("WJ", msg)
+            self._wj_not_connected(ports, "Not Connected")
+            self.error_popup("WJ supplies cannot be told apart", msg)
+            return {}
+
+        for slot, port in ports.items():
+            if answers[port] is None:
+                self.log(f"[WJ{slot + 1}] NOT CONNECTED: no WJ reply on {port}")
+                self.wj_panel.rows[slot].lamp.set_status("red", "Not Connected")
+
+        assignment = {self._WJ_UNIT_BY_FIRMWARE[fw]: ps[0] for fw, ps in by_fw.items()}
+        connected = {}
+        for unit in sorted(assignment):
+            port = assignment[unit]
+            wj, row = self.wj_units[unit], self.wj_panel.rows[unit]
+            fw = answers[port]
+            try:
+                if getattr(wj, "is_connected", False):
+                    wj.close()
+                wj.connect(port)
+            except Exception as e:
+                row.lamp.set_status("red", "Not Connected")
+                self.log(f"[WJ{unit + 1}] NOT CONNECTED on {port}: {e}")
+                continue
+            connected[unit] = port
+            self._wj_program.pop(unit, None)      # a fresh link: nothing applied yet
+            if row.port_combo.findText(port) < 0:
+                row.port_combo.addItem(port)
+            row.port_combo.setCurrentText(port)
+            row.lamp.set_status("green", "Connected")
+            self.log(f"[WJ{unit + 1}] Connected on {port}, firmware {fw} "
+                     f"({self._WJ_POLARITY[unit]})")
+            self.data_logger.log_connect(f"WJ{unit + 1}", port, f"firmware {fw}")
+            self.conn[f"WJ{unit + 1}_COM"] = port
+            save_memory(f"WJ{unit + 1}_COM", port)
+
+        moved = {slot: port for slot, port in ports.items()
+                 if answers[port] is not None and connected.get(slot) != port}
+        if moved and len(moved) == len(ports) == 2:
+            parts = []
+            for slot in sorted(ports):
+                port = ports[slot]
+                unit = self._WJ_UNIT_BY_FIRMWARE[answers[port]]
+                parts.append(f"{port} is WJ{unit + 1} ({self._WJ_POLARITY[unit]}, "
+                             f"firmware {answers[port]})")
+            line = ", ".join(parts) + ". Ports swapped from memory, corrected."
+            self.log(f"[WJ] {line}")
+            self.data_logger.log_info("WJ", line)
+        else:
+            for slot, port in moved.items():
+                unit = self._WJ_UNIT_BY_FIRMWARE[answers[port]]
+                line = (f"{port} answers firmware {answers[port]}: WJ{unit + 1} "
+                        f"({self._WJ_POLARITY[unit]}), not WJ{slot + 1}. Connected as "
+                        f"WJ{unit + 1} and saved.")
+                self.log(f"[WJ] {line}")
+                self.data_logger.log_info("WJ", line)
+        return connected
 
     def on_wj_connect(self, index, port_override=None):
         row = self.wj_panel.rows[index]
@@ -3225,26 +3417,33 @@ class ScopeDelayMainWindow(QMainWindow):
 
         try:
             self.log(f"[WJ{index+1}] Connecting on {port}...")
-            fw = self._identify_wj_port(index, port)
-            self.wj_units[index].connect(port)
-            save_memory(f"WJ{index+1}_COM", port)
-            row.lamp.set_status("green", "Connected")
-            self.log(f"[WJ{index+1}] Connected on {port}, firmware {fw}")
-            self.data_logger.log_connect(f"WJ{index+1}", port, f"firmware {fw}")
+            # The row is only where the operator chose the port; the unit
+            # it becomes is decided by the firmware it answers.
+            if not self._wj_connect_by_firmware({index: port}):
+                row.lamp.set_status("red", "Error")
         except Exception as e:
             self.log(f"[WJ{index+1} ERROR] {e}")
             row.lamp.set_status("red", "Error")
 
 
-    def on_wj_hv_on(self):
-        # Interlock: energize charging relay (NO→closed) and discharging relay (NC→open)
-        self._relay_set(self._RELAY_CHARGING,    True)
-        self._relay_set(self._RELAY_DISCHARGING, True)
-
-        # Send V/I + HV_ON in ONE packet so we make only one round-trip per
-        # supply per click — anything more collides with the WJ reader
-        # thread's Q polls. Voltage is the spinbox value; current is each
-        # supply's MAX (matches Apply Program behavior).
+    def on_wj_hv_on(self, reason="by HV ON", resend=False):
+        """HV ON goes through the relays. Not in CHARGE: the normal transition
+        to CHARGE first, with all its checks (both supplies connected and
+        reading HV off, discharging relay on, then charging relay on), and HV
+        ON to both supplies only once CHARGE has completed. Refused or failed:
+        nothing is sent, and the log says why. Already in CHARGE: HV ON now,
+        or with `resend` (the CHARGE button) the relays are re-sent first."""
+        # A program must have been applied to both supplies since the last
+        # HV OFF, and the panel must still show it: what HV ON sends is what
+        # Apply Program sent, never an edited-but-unapplied field.
+        missing = [f"WJ{i + 1}" for i in range(len(self.wj_units)) if i not in self._wj_program]
+        if missing:
+            msg = (f"CHARGE refused: no program applied to {', '.join(missing)} since the "
+                   "last HV OFF; press Apply Program first")
+            self.log(f"[WJ] {msg}")
+            self.data_logger.log_error("WJ", msg)
+            self.error_popup("CHARGE refused", msg)
+            return
         try:
             kv, ma = self.wj_panel.program_values()
         except ValueError as e:
@@ -3252,7 +3451,41 @@ class ScopeDelayMainWindow(QMainWindow):
             self.data_logger.log_error("WJ", f"HV ON refused: {e}")
             self.error_popup("WJ out of range", str(e))
             return
+        applied = {self._wj_program[i] for i in range(len(self.wj_units))}
+        if applied != {(kv, ma)}:
+            shown = ", ".join(f"{a:g} kV / {b:g} mA" for a, b in sorted(applied))
+            msg = (f"CHARGE refused: the panel shows {kv:g} kV / {ma:g} mA but {shown} was "
+                   "applied; press Apply Program again")
+            self.log(f"[WJ] {msg}")
+            self.data_logger.log_error("WJ", msg)
+            self.error_popup("CHARGE refused", msg)
+            return
+        if self._relay_mode == rm.CHARGE and not resend:
+            self._wj_send_hv_on(kv, ma)
+            return
+        if self._relay_transition is not None:
+            self.log("[WJ] HV ON not sent: the relays are changing; press again when they settle")
+            return
+        self.log(f"[WJ] HV ON ({reason}): relays are {self._relay_mode}, "
+                 + ("resending CHARGE first" if self._relay_mode == rm.CHARGE
+                    else "going to CHARGE first"))
 
+        def then(result, mode):
+            if result == "ok" and mode == rm.CHARGE:
+                self._wj_send_hv_on(kv, ma)
+            else:
+                msg = f"HV ON not sent: the transition to CHARGE ended {result} (state {mode})"
+                self.log(f"[WJ] {msg}")
+                self.data_logger.log_error("WJ", msg)
+
+        if not self.on_relay_mode_requested(rm.CHARGE, reason=reason, then=then):
+            self.log("[WJ] HV ON not sent: CHARGE was refused (see above)")
+            self.data_logger.log_error("WJ", "HV ON not sent: CHARGE refused")
+
+    def _wj_send_hv_on(self, kv, ma):
+        # Send V/I + HV_ON in ONE packet so we make only one round-trip per
+        # supply per click. Voltage is the spinbox value; current is each
+        # supply's MAX (matches Apply Program behavior).
         for i, wj in enumerate(self.wj_units):
             try:
                 resp = wj.send_set(kv=kv, ma=ma, hv_on=True)
@@ -3263,18 +3496,31 @@ class ScopeDelayMainWindow(QMainWindow):
                 self.data_logger.log_error(f"WJ{i+1}", str(e))
 
     def on_wj_hv_off(self):
-        # Interlock: de-energize charging relay (NO→open), keep discharging relay energized (NC stays open)
-        self._relay_set(self._RELAY_CHARGING, False)
+        """HV OFF from CHARGE is the normal CHARGE -> FLOAT transition: HV off
+        to both supplies, wait for the readback, then the charging relay off;
+        not confirmed in 5 s and the charging relay stays closed, with the
+        ERROR and the popup. In GROUND, FLOAT or UNKNOWN it only sends HV OFF
+        and leaves the relays where they are: it never un-grounds the Marx."""
+        if self._relay_mode == rm.CHARGE and self._relay_transition is None:
+            self.on_relay_mode_requested(rm.FLOAT, reason="by HV OFF")
+            return
+        self._wj_send_hv_off()
 
+    def _wj_hv_off_pulse(self, i, wj):
+        """HV OFF to one supply. The pulse programs 0 kV / 0 mA, so the
+        applied program is gone with it: Apply Program before the next CHARGE."""
+        self._wj_program.pop(i, None)
+        return wj.hv_off_pulse()
+
+    def _wj_send_hv_off(self):
         for i, wj in enumerate(self.wj_units):
             try:
-                resp = wj.hv_off_pulse()
+                resp = self._wj_hv_off_pulse(i, wj)
                 self.data_logger.log_wj_command(i+1, "HV_OFF")
                 self.log(f"[WJ{i+1}] HV OFF → {resp}")
             except Exception as e:
                 self.log(f"[WJ{i+1} ERROR] {e}")
                 self.data_logger.log_error(f"WJ{i+1}", str(e))
-
 
     def on_wj_set_voltage(self, kv=None, ma=None):
         # Both supplies are programmed together from the shared fields. A
@@ -3298,16 +3544,19 @@ class ScopeDelayMainWindow(QMainWindow):
         for i, wj in enumerate(self.wj_units):
             try:
                 resp = wj.set_program(kv, ma)
+                self._wj_program[i] = (kv, ma)
                 self.data_logger.log_wj_command(i+1, "SET_PROGRAM", f"{kv}kV_{ma}mA")
                 self.data_logger.log_config(f"WJ{i+1}", "program",
                                             {"kv": kv, "ma": ma}, origin="commanded")
                 self.log(f"[WJ{i+1}] Set → {kv} kV, {ma} mA ({resp})")
             except Exception as e:
+                self._wj_program.pop(i, None)
                 self.log(f"[WJ{i+1} ERROR] {e}")
                 self.data_logger.log_error(f"WJ{i+1}", str(e))
 
 
     def on_wj_disconnect(self, index):
+        self._wj_program.pop(index, None)
         try:
             self.wj_units[index].close()
         except:
@@ -3381,6 +3630,7 @@ class ScopeDelayMainWindow(QMainWindow):
         output, so it is commanded state, not confirmed.
         """
         unit = f"wj{unit_index + 1}"
+        self._wj_packet_monotonic[unit_index] = self._relay_clock()
         kv = data.get("kv")
         ma = data.get("ma")
         hv_on = data.get("hv_on")
@@ -3445,7 +3695,8 @@ class ScopeDelayMainWindow(QMainWindow):
         states = dict((self.system_state.get("relays") or {}).get("states", {}))
         states[name] = bool(state) if ok else None
         self.system_state.update(
-            "relays", {"states": states, "source": "commanded"}, source=SOURCE_COMMANDED)
+            "relays", {"states": states, "mode": self._relay_mode, "source": "commanded"},
+            source=SOURCE_COMMANDED)
         try:
             self.data_logger.log_relay_state(states, source="commanded")
         except Exception:
@@ -3799,6 +4050,14 @@ class ScopeDelayMainWindow(QMainWindow):
             for worker in self.wj_workers:
                 if worker.isRunning():
                     worker.stop()
+
+        # The Marx is grounded in the safe order before the port closes, and
+        # before SESSION_END so the writes are in the logs.
+        try:
+            self._relay_ground_and_close("GUI close")
+            self.numato_relay.close()
+        except Exception as e:
+            print(f"[relay close failed] {e}")
 
         if self.pressure_thread is not None:
             # Close the Modbus socket on the worker thread, then let it exit.

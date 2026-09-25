@@ -31,6 +31,8 @@ class DataLogger:
     - SCOPE_ALL: All scopes captured
     - RELAY_COMMAND / RELAY_STATE: relay switching (param1=name, param2=requested,
       param3=confirmed or UNKNOWN, param4=ok/failed)
+    - RELAY_MODE: one GROUND/FLOAT/CHARGE transition (param1=from, param2=to,
+      param3=result, param4=HV-off wait s, notes=writes in order)
     - LASER_ARM / LASER_DISARM / LASER_FIRE / LASER_INTERLOCK / LASER_ERROR
     - INTERLOCK_CHECK / INTERLOCK_PASS / INTERLOCK_FAIL / FIRE_BLOCKED
     - SHOT: one row per real shot (param1=shot number), mirroring shot_log CSV
@@ -304,6 +306,28 @@ class DataLogger:
             param4='ok' if ok else 'failed',
             notes=f"{name} (CH{channel}) commanded {'ON' if requested else 'OFF'}"
                   + ("" if ok else " - COMMAND FAILED")
+        )
+
+    def log_relay_mode(self, from_mode, to_mode, result, writes, hv_wait_s='', notes=''):
+        """One three-state relay transition (GROUND / FLOAT / CHARGE).
+
+        param1 = from, param2 = to, param3 = result (ok, refused, failed,
+        timeout), param4 = seconds waited for the HV-off readback (blank when
+        no wait was needed). notes lists every relay write in order as
+        name=ON|OFF ok|FAILED, then the reason or context. Commanded, never
+        read back: the Numato reports only its own cache.
+        """
+        rendered = ", ".join(
+            f"{r}={'ON' if on else 'OFF'} {'ok' if ok else 'FAILED'}" for r, on, ok in writes
+        ) or "no writes"
+        self._log_event(
+            event_type='RELAY_MODE',
+            source='Relay',
+            param1=from_mode,
+            param2=to_mode,
+            param3=result,
+            param4=hv_wait_s,
+            notes=f"writes: {rendered}" + (f"; {notes}" if notes else "")
         )
 
     def log_relay_state(self, states, source='commanded'):

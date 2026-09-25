@@ -212,6 +212,9 @@ def describe(r):
         return f"Relay {p1} commanded {p2}{conf}. Result: {p4}."
     if e == "RELAY_STATE":
         return f"Relay states ({p1}): {n}"
+    if e == "RELAY_MODE":
+        wait = f", HV-off wait {p4} s" if p4 else ""
+        return f"Relays {p1} -> {p2}: {p3.upper()}{wait}. {n}"
     if e.startswith("LASER_"):
         state = f", state {p2}" if p2 else ""
         return f"{s} {p1 or e[6:]}{state}.{tail}"
@@ -428,7 +431,8 @@ def sheet_events(wb, events):
         c = ws.cell(row=i, column=5, value=describe(r))
         c.data_type = "s"
         c.alignment = Alignment(wrap_text=True, vertical="top")
-        if r["event_type"] in ("ERROR", "FIRE_BLOCKED", "INTERLOCK_FAIL", "CLIP_WARNING"):
+        if r["event_type"] in ("ERROR", "FIRE_BLOCKED", "INTERLOCK_FAIL", "CLIP_WARNING") \
+                or (r["event_type"] == "RELAY_MODE" and r["param3"] != "ok"):
             fill_row(ws, i, 5, ERR_FILL)
         elif r["event_type"] == "SHOT":
             fill_row(ws, i, 5, OK_FILL)
@@ -500,6 +504,7 @@ def sheet_relays(wb, rows):
     ws = wb.create_sheet("Relays")
     cols = ["Time", "Relay", "Channel", "Commanded", "Confirmed", "Result"]
     header(ws, cols, [14, 22, 10, 12, 12, 10])
+    all_rows = rows
     rows = [r for r in rows if r["event_type"] == "RELAY_COMMAND"]
     for i, r in enumerate(rows, start=2):
         ws.cell(row=i, column=1, value=when(r)).number_format = TIME_FMT
@@ -520,6 +525,29 @@ def sheet_relays(wb, rows):
     c.font = NOTE_FONT
     if not rows:
         empty_note(ws, "No relay commands this session.")
+
+    # The three-state transitions, commanded: one row each.
+    modes = [r for r in all_rows if r["event_type"] == "RELAY_MODE"]
+    hdr = note_row + 2
+    header(ws, ["Time", "From", "To", "Result", "HV-off wait (s)", "Writes and reason"],
+           [14, 22, 10, 12, 12, 10], row=hdr)
+    ws.freeze_panes = "A2"
+    ws.column_dimensions["F"].width = 90
+    for i, r in enumerate(modes, start=hdr + 1):
+        ws.cell(row=i, column=1, value=when(r)).number_format = TIME_FMT
+        ws.cell(row=i, column=2, value=r["param1"])
+        ws.cell(row=i, column=3, value=r["param2"])
+        res = ws.cell(row=i, column=4, value=r["param3"])
+        ws.cell(row=i, column=5, value=num(r["param4"]))
+        c = ws.cell(row=i, column=6, value=r["notes"])
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+        if r["param3"] != "ok":
+            fill_row(ws, i, 6, ERR_FILL)
+        elif "NOT confirmed" in r["notes"]:
+            res.fill = WARN_FILL
+    if not modes:
+        empty_note(ws, "No relay mode transitions this session.", row=hdr + 1)
+    body(ws)
 
 
 def shot_status_rows(shots, facts):
@@ -704,6 +732,12 @@ def latest_settings(events):
                 if "=" in part:
                     name, state = part.split("=", 1)
                     latest[("Relay", "state", name.strip())] = (state.strip(), r["param1"], "", r)
+        elif e == "RELAY_MODE":
+            # The mode after the transition: the target when it completed,
+            # unchanged when refused or timed out, unknown after a failed write.
+            mode = {"ok": r["param2"], "refused": r["param1"], "timeout": r["param1"]}.get(
+                r["param3"], "UNKNOWN")
+            latest[("Relay", "mode", "relay_mode")] = (mode, "commanded", "", r)
 
     def order(item):
         (device, group, key), _ = item
