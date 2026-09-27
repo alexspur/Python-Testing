@@ -37,6 +37,12 @@ CAL = {
     "DIV_CH2": 19970.7 / 20000,
 }
 
+# B-dot baseline windows (all B-dots: LTGS1, LTGS2, C315). Not the July
+# windows: see reconstruct_bdot for why and for what they were tested on.
+BDOT_PRE_S = 1.0e-6         # offset / zero window: this long, ending 50 ns before pulse 1
+BDOT_POST_GAP_S = 0.3e-6    # post window starts this long after the last activity
+BDOT_POST_LEN_S = 1.0e-6    # and is this long; the trace ends with it
+
 # Signal names per scope channel, for the raw-channel plot.
 CHANNEL_NAMES = {
     1: ["RVM 1", "RVM 2", "Trig monitor", "Trig sync"],
@@ -216,11 +222,42 @@ def reconstruct_quiet(ti, vi, CF, zero_win, act_mask, deg):
     return CF * integ
 
 
-def reconstruct_pre(ti, vi, CF, pre_win):
-    integ = cumtrapz(ti, vi)
-    zm = inwin(ti, pre_win)
-    p = np.polyfit(ti[zm], integ[zm], 1)
-    return CF * (integ - np.polyval(p, ti))
+def reconstruct_bdot(t, v, CF, tPulse, tEnd):
+    """Z*I from a B-dot record: offset removed, integrated, baseline fitted
+    on quiet windows right next to the pulse. Returns (t, Z*I in volts,
+    warning or "").
+
+    Changed from July (py-3). The July code took the raw offset from 4-8 us
+    before the pulse, zeroed on 0.3-0.05 us before, and fitted the integral
+    baseline through 3-8 us after the pulse (C315: pre-pulse only, then
+    integrated to the end of the 400 us record). These channels sit at
+    25-50 V/div with ~1 V of noise and a baseline that wanders ~0.15 V on a
+    microsecond scale, and after the pulse the raw offset steps by up to
+    ~0.2 V. Integrated at CF*geom*bScale ~ 1.7e11, 0.1 V of offset error is
+    ~17 kV per us, so distant windows left 13-18 kV of tilt/offset after the
+    pulse (median over the 2026-09-24 fired shots) and let C315 ramp to
+    thousands of kV. With 1 us windows either side of the pulse the offset
+    left after the pulse is under 1 kV, the noise floor on dry shots drops
+    from 12-15 kV to 4-6 kV, and the peaks move by under 2 %.
+    """
+    pre = (max(tPulse - BDOT_PRE_S, t[0]), tPulse - 0.05e-6)
+    post = (tEnd + BDOT_POST_GAP_S, tEnd + BDOT_POST_GAP_S + BDOT_POST_LEN_S)
+    v = remove_offset_step(t, v, pre, post, tPulse, tEnd) if inwin(t, post).sum() >= 10         else v - v[inwin(t, pre)].mean()
+    # The trace stops at the end of the post window: past it nothing pins the
+    # baseline, and the wander integrates into tens of kV of false drift
+    # within a few us.
+    im = (t >= pre[0]) & (t <= min(post[1], t[-1]))
+    ti = t[im]
+    integ = cumtrapz(ti, v[im])
+    pm, qm = inwin(ti, pre), inwin(ti, post)
+    warn = ""
+    if qm.sum() >= 10:
+        p = np.polyfit(ti[pm | qm], integ[pm | qm], 1)
+        integ = integ - np.polyval(p, ti)
+    else:
+        warn = "record ends before the post-pulse baseline window; pre-pulse zero only"
+    integ = integ - integ[pm].mean()
+    return ti, CF * integ, warn
 
 
 # ===================== main pipeline =====================
@@ -252,13 +289,10 @@ def process_waveforms(fr, fd, f3, cal=CAL):
     droop_post = (tEnd + 3e-6, min(tEnd + 8e-6, td[-1]))
     int_win = (tPulse - 6e-6, droop_post[1])
     evt_win = (tPulse - 1e-6, tEnd + 1e-6)
-    b_zero_win = (tPulse - 0.3e-6, tPulse - 0.05e-6)
-    b_int_win = (b_zero_win[0], min(tEnd + 8e-6, td[-1]))
     r3_pre = (max(tPulse - 2e-6, t3[0] + 0.1e-6), tPulse - 0.3e-6)
     c3_zero = (max(tPulse - 0.9e-6, t3[0]), tPulse - 0.1e-6)
-    c3_int = (c3_zero[0], t3[-1])
 
-    S = {"tPulse": tPulse, "tEnd": tEnd, "peaks": {}}
+    S = {"tPulse": tPulse, "tEnd": tEnd, "peaks": {}, "warnings": []}
     pk = S["peaks"]
 
     # ---- D-dots (rigol2): LTGS1 = CH3, LTGS2 = CH1 ----
@@ -275,24 +309,21 @@ def process_waveforms(fr, fd, f3, cal=CAL):
     S["Bt"], S["Bv"] = [None, None], [None, None]
     for k, (col, CF, tag) in enumerate(((4, c["CF_CH4"], "LTGS1_Bdot"),
                                         (2, c["CF_CH2"], "LTGS2_Bdot"))):
-        v = remove_offset_step(td, Md[:, col], base_win, droop_post, tPulse, tEnd)
-        im = (td >= b_int_win[0]) & (td <= b_int_win[1])
-        ti, vi = td[im], v[im]
-        Vr = reconstruct(ti, vi, CF * c["geom"] * c["bScale"],
-                         b_zero_win, b_zero_win, droop_post)
+        ti, Vr, warn = reconstruct_bdot(td, Md[:, col], CF * c["geom"] * c["bScale"],
+                                        tPulse, tEnd)
+        if warn:
+            S["warnings"].append(f"{tag}: {warn}")
         S["Bt"][k] = (ti - tPulse) * 1e6
         S["Bv"][k] = Vr / 1e3
         pk[tag] = np.abs(Vr[inwin(ti, evt_win)]).max() / 1e3
 
-    # ---- rigol3: C225 quiet-mask cubic, C315 pre-only ----
+    # ---- rigol3: C225 quiet-mask cubic, C315 as the LTGS B-dots ----
     # Both need rigol3 samples before pulse 1. When scope 3's record starts
     # too late (its own timebase delay), C225 and C315 are skipped with a
     # warning instead of failing the whole shot. The LTGS and RVM results
     # above do not depend on them.
-    S["warnings"] = []
     bm = inwin(t3, r3_pre)
-    im3 = (t3 >= c3_int[0]) & (t3 <= c3_int[1])
-    if bm.sum() < 10 or inwin(t3, c3_zero).sum() < 10 or im3.sum() < 10:
+    if bm.sum() < 10 or inwin(t3, c3_zero).sum() < 10:
         S["warnings"].append(
             f"C225/C315 skipped: scope 3 record starts at {t3[0] * 1e6:.2f} us, "
             f"after the pre-pulse window (pulse 1 at {tPulse * 1e6:.2f} us)")
@@ -310,12 +341,15 @@ def process_waveforms(fr, fd, f3, cal=CAL):
         S["C225"] = C225 / 1e3
         pk["C225_Ddot"] = np.abs(C225).max() / 1e3
 
-        v = M3[:, 3] - M3[bm, 3].mean()
-        ti3 = t3[im3]
-        C315 = reconstruct_pre(ti3, v[im3], c["CF3_CH3"] * c["geom"] * c["bScale"], c3_zero)
+        ti3, C315, warn = reconstruct_bdot(t3, M3[:, 3],
+                                           c["CF3_CH3"] * c["geom"] * c["bScale"], tPulse, tEnd)
+        if warn:
+            S["warnings"].append(f"C315_Bdot: {warn}")
         S["C315_t"] = (ti3 - tPulse) * 1e6
         S["C315"] = C315 / 1e3
-        pk["C315_Bdot"] = np.abs(C315).max() / 1e3
+        # Peak over the event only, like every other channel. It was the max
+        # over the whole integrated record, i.e. wherever the drift ended up.
+        pk["C315_Bdot"] = np.abs(C315[inwin(ti3, evt_win)]).max() / 1e3
 
     # ---- rigol3 Q-switch monitors: CH1 = Laser1, CH2 = Laser2 ----
     S["Qt"], S["Qv"] = [None, None], [None, None]
