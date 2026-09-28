@@ -39,7 +39,7 @@ from . import pipeline as P
 
 # Bump when the pipeline or the plots change: shots processed by an older
 # version are redone automatically on the next run.
-PIPELINE_VERSION = "py-3"
+PIPELINE_VERSION = "py-4"
 
 SUMMARY_COLS = [
     "shot_number", "stamp", "session_shot_index", "datetime", "status",

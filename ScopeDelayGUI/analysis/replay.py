@@ -222,6 +222,7 @@ class RunResult:
     seconds: float
     out_dir: Path
     scopes: dict = field(default_factory=dict)   # k -> array, the raw records
+    cal_used: dict = field(default_factory=dict)  # CAL as it was during the run
 
 
 def run_shot(ref, cache=None, cal_overrides=None, plots=True, out_base=None):
@@ -230,6 +231,7 @@ def run_shot(ref, cache=None, cal_overrides=None, plots=True, out_base=None):
     out = sandbox_dir(ref, out_base)
     t0 = time.time()
     with _patched(cache, cal_overrides):
+        cal_used = dict(P.CAL)
         # PNGs go to process_one's sdir argument; the waveform paths in the
         # shot dict are absolute, so they still come from the real session.
         S = PS.process_one(ref.shot, out, ref.stamp, out, plots=plots)
@@ -241,7 +243,8 @@ def run_shot(ref, cache=None, cal_overrides=None, plots=True, out_base=None):
                 except Exception:  # noqa: BLE001
                     pass
     row = {k: PS._fmt(v) for k, v in PS.summary_row(S).items()}
-    return RunResult(S=S, row=row, seconds=time.time() - t0, out_dir=out, scopes=scopes)
+    return RunResult(S=S, row=row, seconds=time.time() - t0, out_dir=out, scopes=scopes,
+                     cal_used=cal_used)
 
 
 def load_scopes(ref, cache=None):

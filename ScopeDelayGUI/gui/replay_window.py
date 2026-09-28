@@ -172,14 +172,16 @@ class AnalysisPlots(pg.GraphicsLayoutWidget):
             if p.legend is not None:
                 p.legend.clear()
 
-    def show_result(self, S, style, previous=None, keep_view=False):
+    def show_result(self, S, style, previous=None, keep_view=False, note=""):
         views = {k: p.getViewBox().viewRange() for k, p in self.panels.items()}
         self._clear_panels()
         if S.get("status") != "ok":
             self.panels["V"].setTitle(f"No analysis traces: status {S.get('status')} "
                                       f"({S.get('error', '')})")
             return
-        self.panels["V"].setTitle("LTGS D-dots and RVMs")
+        self.panels["V"].setTitle("LTGS D-dots and RVMs"
+                                  + (f"  <span style='color:#c00000'>[{note}]</span>"
+                                     if note else ""))
         if previous is not None and previous.get("status") == "ok":
             self._draw(previous, style, faint=True)
         self._draw(S, style)
@@ -189,7 +191,7 @@ class AnalysisPlots(pg.GraphicsLayoutWidget):
                 p.addItem(pg.InfiniteLine(x, angle=90, pen=pg.mkPen("#888", width=1,
                                                                      style=Qt.PenStyle.DotLine)))
         self.panels["Q"].addItem(self.info)
-        self.info.setText(self.PL.spacing_text(S))
+        self.info.setText(self.PL.spacing_text(S) + (f"\n{note}" if note else ""))
         if keep_view:
             for k, p in self.panels.items():
                 (x0, x1), (y0, y1) = views[k]
@@ -435,10 +437,20 @@ class ShotReplayWindow(QMainWindow):
         self.tbl_cal.setHorizontalHeaderLabels(["Key", "In code", "Override"])
         self.tbl_cal.verticalHeader().setVisible(False)
         self.tbl_cal.horizontalHeader().setStretchLastSection(True)
+        self.tbl_cal.itemChanged.connect(self._cal_edited)
         v.addWidget(self.tbl_cal)
+        row = QHBoxLayout()
+        self.btn_cal_apply = QPushButton("Apply overrides && rerun")
+        self.btn_cal_apply.setStyleSheet("font-weight: bold; padding: 6px;")
+        self.btn_cal_apply.clicked.connect(self.apply_cal)
+        row.addWidget(self.btn_cal_apply, 1)
         b = QPushButton("Clear overrides")
         b.clicked.connect(self._clear_cal)
-        v.addWidget(b)
+        row.addWidget(b)
+        v.addLayout(row)
+        self.lbl_cal = QLabel("")
+        self.lbl_cal.setWordWrap(True)
+        v.addWidget(self.lbl_cal)
         self._fill_cal()
         return w
 
@@ -544,7 +556,7 @@ class ShotReplayWindow(QMainWindow):
 
     def _set_busy(self, on):
         for w in (self.btn_load, self.btn_prev, self.btn_next, self.btn_rerun,
-                  self.btn_batch, self.list_shots):
+                  self.btn_cal_apply, self.btn_batch, self.list_shots):
             w.setEnabled(not on)
         self.btn_batch_stop.setEnabled(self._batch is not None and self._batch.isRunning())
 
@@ -578,6 +590,7 @@ class ShotReplayWindow(QMainWindow):
         self._fill_list()
         self._fill_info()
         self._fill_results()
+        self._cal_edited()
         self.status(f"Loading {ref.name} from {ref.sdir.name} ...")
         self.log(f"[REPLAY] loading {ref.name}: {ref.sdir}")
         self._pending_analyze = self.chk_auto.isChecked()
@@ -656,11 +669,16 @@ class ShotReplayWindow(QMainWindow):
         self.replay_rows[self.ref.key] = res.row
         S, row = res.S, res.row
         color = {"ok": "green", "no_fire": "#b36b00"}.get(S["status"], "red")
+        used = self._cal_used_text(res)
         self.status(f"{S['name']}: {S['status']}   spacing cmd {row['spacing_cmd_ns'] or '--'} / "
                     f"Qsw {row['spacing_qsw_ns'] or '--'} / RVM {row['spacing_rvm_ns'] or '--'} ns"
                     f"   ({res.seconds:.1f} s, {row['pipeline_version']})"
+                    + (f"   OVERRIDES: {used}" if used else "")
                     + (f"   {S['error']}" if S.get("error") else ""), color)
-        self.log(f"[REPLAY] {S['name']}: {S['status']} in {res.seconds:.1f} s -> {res.out_dir}")
+        self.log(f"[REPLAY] {S['name']}: {S['status']} in {res.seconds:.1f} s -> {res.out_dir}"
+                 + (f"\n[REPLAY] calibration used: {used}" if used else
+                    "\n[REPLAY] calibration used: code values (no overrides)"))
+        self._cal_edited()
         self._fill_results()
         self._show_plots()
         png = row.get("analysis_png") or row.get("raw_png")
@@ -688,8 +706,10 @@ class ShotReplayWindow(QMainWindow):
         if self.current is None:
             return
         prev = self.previous.S if (self.previous and self.chk_overlay.isChecked()) else None
+        used = self._cal_used_text(self.current)
         self.plots.show_result(self.current.S, self.style, prev,
-                               keep_view=keep_view or prev is not None)
+                               keep_view=keep_view or prev is not None,
+                               note=f"OVERRIDES: {used}" if used else "")
 
     def _show_png(self, which):
         if self.current is None:
@@ -746,6 +766,7 @@ class ShotReplayWindow(QMainWindow):
             if it and it.text().strip():
                 keep[self.tbl_cal.item(r, 0).text()] = it.text().strip()
         cal = R.P.CAL
+        self.tbl_cal.blockSignals(True)
         self.tbl_cal.setRowCount(len(cal))
         for i, (k, v) in enumerate(cal.items()):
             a = QTableWidgetItem(k)
@@ -755,11 +776,63 @@ class ShotReplayWindow(QMainWindow):
             self.tbl_cal.setItem(i, 0, a)
             self.tbl_cal.setItem(i, 1, b)
             self.tbl_cal.setItem(i, 2, QTableWidgetItem(keep.get(k, "")))
+        self.tbl_cal.blockSignals(False)
         self.tbl_cal.resizeColumnToContents(0)
+        self._cal_edited()
 
     def _clear_cal(self):
+        self.tbl_cal.blockSignals(True)
         for r in range(self.tbl_cal.rowCount()):
             self.tbl_cal.setItem(r, 2, QTableWidgetItem(""))
+        self.tbl_cal.blockSignals(False)
+        self._cal_edited()
+
+    def apply_cal(self):
+        """Commit a cell still being typed in, then rerun with the overrides."""
+        self.tbl_cal.setFocus()              # focus-out closes the editor and commits it
+        if self.ref is None:
+            self.lbl_cal.setText("Load a shot first; the overrides apply to the next run.")
+            self.lbl_cal.setStyleSheet("color: #b36b00;")
+            return
+        self.rerun()
+
+    def _cal_used_text(self, res):
+        """'bScale = -4.5 (code -5.5), ...' for the values a run used that
+        differ from the code; '' when it ran on the code values."""
+        if res is None or not res.cal_used:
+            return ""
+        code = R.P.CAL
+        return ", ".join(f"{k} = {v:.6g} (code {code[k]:.6g})"
+                         for k, v in res.cal_used.items()
+                         if k in code and v != code[k])
+
+    def _cal_edited(self, *_):
+        """Highlight overridden rows and say whether the latest run used them."""
+        if not hasattr(self, "lbl_cal"):
+            return
+        code = R.P.CAL
+        pending = {k: v for k, v in self.cal_overrides().items() if v != code.get(k)}
+        self.tbl_cal.blockSignals(True)
+        for r in range(self.tbl_cal.rowCount()):
+            key = self.tbl_cal.item(r, 0).text()
+            bg = CHANGED if key in pending else QColor(0, 0, 0, 0)
+            for c in range(3):
+                it = self.tbl_cal.item(r, c)
+                if it:
+                    it.setBackground(bg)
+        self.tbl_cal.blockSignals(False)
+        used = self.current.cal_used if self.current else {}
+        ran = {k: v for k, v in used.items() if k in code and v != code[k]}
+        if not pending and not ran:
+            self.lbl_cal.setText("No overrides. Runs use the code values.")
+            self.lbl_cal.setStyleSheet("color: black;")
+        elif self.current is not None and pending == ran:
+            self.lbl_cal.setText(f"APPLIED in the latest run: {self._cal_used_text(self.current)}")
+            self.lbl_cal.setStyleSheet("color: green; font-weight: bold;")
+        else:
+            txt = ", ".join(f"{k} = {v:.6g}" for k, v in pending.items()) or "code values"
+            self.lbl_cal.setText(f"NOT APPLIED YET: {txt}. Press 'Apply overrides & rerun'.")
+            self.lbl_cal.setStyleSheet("color: #c00000; font-weight: bold;")
 
     # ------------------------------------------------------------ batch
     def start_batch(self):

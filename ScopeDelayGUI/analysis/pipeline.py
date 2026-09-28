@@ -31,7 +31,7 @@ CAL = {
     "CF3_CH3": -6.96e8,  # CH3 C315 B-dot, FC027
     "CF3_CH4": 1.56e11,  # CH4 C225 D-dot, FC032
     "geom": 2 * np.pi * 7.5,
-    "bScale": -5.5,
+    "bScale": -4.5,
     # rigol1 RVM divider corrections (scope probe ratio is 20000:1)
     "DIV_CH1": 19588.6 / 20000,
     "DIV_CH2": 19970.7 / 20000,
@@ -233,8 +233,8 @@ def reconstruct_bdot(t, v, CF, tPulse, tEnd):
     integrated to the end of the 400 us record). These channels sit at
     25-50 V/div with ~1 V of noise and a baseline that wanders ~0.15 V on a
     microsecond scale, and after the pulse the raw offset steps by up to
-    ~0.2 V. Integrated at CF*geom*bScale ~ 1.7e11, 0.1 V of offset error is
-    ~17 kV per us, so distant windows left 13-18 kV of tilt/offset after the
+    ~0.2 V. Integrated at CF*geom*bScale ~ 1.4e11, 0.1 V of offset error is
+    ~14 kV per us, so distant windows left 13-18 kV of tilt/offset after the
     pulse (median over the 2026-09-24 fired shots) and let C315 ramp to
     thousands of kV. With 1 us windows either side of the pulse the offset
     left after the pulse is under 1 kV, the noise floor on dry shots drops
