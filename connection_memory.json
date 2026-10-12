@@ -1,9 +1,11 @@
 {
   "DG535_COM": "COM4",
   "BNC575_COM": "COM5",
-  "WJ1_COM": "COM13",
-  "WJ2_COM": "COM16",
+  "WJ1_COM": "COM16",
+  "WJ2_COM": "COM13",
   "RELAY_COM": "COM7",
   "CFR_LASER_COM": "COM6",
-  "CFR_LASER2_COM": "COM8"
+  "CFR_LASER2_COM": "COM8",
+  "ANALYZE_AFTER_SHOT": true,
+  "SHOW_ANALYSIS_PLOTS": true
 }
