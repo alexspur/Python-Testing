@@ -39,7 +39,7 @@ from . import pipeline as P
 
 # Bump when the pipeline or the plots change: shots processed by an older
 # version are redone automatically on the next run.
-PIPELINE_VERSION = "py-2"
+PIPELINE_VERSION = "py-5"
 
 SUMMARY_COLS = [
     "shot_number", "stamp", "session_shot_index", "datetime", "status",
@@ -174,6 +174,9 @@ def process_one(sh, sdir: Path, stamp: str, out_dir: Path, plots=True):
         "status": "ok", "error": "", "peaks": {},
         "qsw_rise_trig_us": np.array([np.nan, np.nan]),
         "pipeline_version": PIPELINE_VERSION,
+        # B-dot scale the traces were built with. ltgs_gui3_6.m reads it and
+        # only rescales files that lack it (those were built with -5.5).
+        "bScale": float(P.CAL["bScale"]),
     }
     have = [f.exists() for f in sh["files"]]
     scopes = {}
@@ -305,13 +308,35 @@ def _fmt(v):
 
 
 def write_summary(path: Path, rows):
+    """Write the summary. If the CSV is locked (open in Excel), retry for
+    about 2 s, then leave it alone and write <name>_pending.csv beside it
+    with a warning. The next write that gets through removes the pending
+    file. Returns the path actually written."""
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(SUMMARY_COLS)
         for r in rows:
             w.writerow([_fmt(r.get(c)) for c in SUMMARY_COLS])
-    os.replace(tmp, path)
+    pending = path.with_name(path.stem + "_pending.csv")
+    for _ in range(10):
+        try:
+            os.replace(tmp, path)
+            if pending.exists():
+                try:
+                    pending.unlink()
+                except OSError:
+                    pass
+            return path
+        except PermissionError:
+            time.sleep(0.2)
+    try:
+        os.replace(tmp, pending)
+    except OSError:
+        pending = tmp
+    say(f"WARNING: {path} is locked (open in Excel?), left unchanged. "
+        f"This run's summary is in {pending}. Close the file and run again to update it.")
+    return pending
 
 
 def _sort_key(r):

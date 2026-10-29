@@ -1,0 +1,33 @@
+SURVEY, CH4
+============================================================
+  trigger sweep      NORM
+  trigger source     EXT
+  trigger level      5.600000E-1
+  timebase s/div     5.000000E-8
+  timebase offset    4.691000E-7
+  memory depth       1.0000E+06
+  CH4 impedance      FIFT
+  CH4 V/div          1
+  CH4 probe ratio    1
+
+  window        -49530.9 to +50469.0 ns (100000 ns span)
+  samples       1000000  at 100 ps
+  signal range  -0.760 to +3.121 V (ptp 3.882 V)
+  baseline      +0.000 V, noise 0.0 mV rms
+  signal reach  3.121 V from baseline = 3121248000000.0 sigma (needs 7.9)
+  polarity      positive-going
+  thresholds    +0.624 / +1.873 V  (20% / 60% of reach)
+
+  4 transition(s)
+              time   direction   local ptp
+    --------------------------------------
+         469.80 ns      rising      3.161 V
+         761.00 ns     falling      3.161 V
+        1028.00 ns      rising      3.161 V
+        1382.40 ns     falling      3.161 V
+
+  First rising edge at 469.80 ns. Use
+    --search 455 485
+
+  A 100 us window is far too wide for this measurement. Rerun with
+  --tscale 2e-7 so the edge is sampled densely enough to fit.

@@ -1,0 +1,282 @@
+HOW THE C225 OUTPUT TRACE IS BUILT
+==================================
+
+Shots 43, 44, 45, 46, session experiment_log_20260924_170806 (24 Sept 2026).
+Signal: scope 3 (Rigol DS7054) CH4 = C225 D-dot, probe FC032.
+Pipeline: analysis/pipeline.py, pipeline_version "py-2".
+
+Line numbers refer to the copies in the source/ folder of this export.
+
+
+1. WHICH CODE MAKES THE TRACE
+-----------------------------
+
+There is one C225 trace and it is made in Python.
+
+  source/ScopeDelayGUI/analysis/process_shots.py
+      process_one(), line 166. Reads the three rigol CSV files (line 187)
+      and calls pipeline.process_waveforms() (line 205). save_mat() (line 237,
+      function at line 257) writes logs/processed_shots/shot_NNNN.mat.
+      PIPELINE_VERSION = "py-2" is line 42.
+
+  source/ScopeDelayGUI/analysis/pipeline.py
+      process_waveforms(), line 227. The C225 block is lines 287-311.
+      It stores S["C225_t"] (line 309) and S["C225"] (line 310).
+
+  source/logs/ltgs_gui3.m  (the MATLAB GUI)
+      Does NOT compute anything for C225. loadAll() (line 604) loads the
+      shot_*.mat files written by process_shots.py, and getTrace() (lines
+      728-729) plots S.C225_t against S.C225 as they are. No filter, shift or
+      baseline is applied in ltgs_gui3.m.
+
+  source/process_shots.m  (the older MATLAB pipeline)
+      process_waveforms(), line 417, C225 block lines 498-508. Same math as
+      pipeline.py (pipeline.py is a line-by-line port of it). It is NOT what
+      made the .mat files for these shots: those carry pipeline_version py-2.
+      The only C225 difference: MATLAB takes the sample interval as
+      t(2)-t(1) (lines 503 and 655); Python takes it over the whole record
+      (sample_dt, pipeline.py line 108). Same value on a clean record.
+
+  source/logs/shot_timing.py
+      The 50% edges, pulse widths and gap are found here and only here.
+      It builds its OWN, DIFFERENT C225 output trace for that (section 9).
+      Neither pipeline.py, process_shots.py, process_shots.m nor ltgs_gui3.m
+      finds 50% edges. A comment in shot_timing.py (line 72-73, 333) says
+      out_edges() is a port of "outEdges in ltgs_gui3.m", but no function of
+      that name exists in ltgs_gui3.m or anywhere else in the project.
+
+Checked for these four shots: the trace rebuilt step by step by
+make_export.py, the output of process_waveforms(), and the C225 stored in
+logs/processed_shots/shot_00NN.mat are identical (max difference 0 kV, time
+axis difference 0, tPulse difference 0).
+
+
+2. STEPS IN ORDER (pipeline.py)
+-------------------------------
+
+Step 1. Read the file.  read_rigol(), lines 120-135.
+    rigol3_20260924_170806_shotNN.csv, column 0 = time (s), column 4 = CH4 (V).
+    Rows with a non-finite time are dropped. Nothing else.
+    Record: 1,000,000 samples, 0.4 ns apart, about -200 to +200 us around
+    pulse 1. CH4 is 8-bit: one code step is 1.3568 V in the exported volts.
+
+Step 2. Find tPulse and tEnd.  process_waveforms() lines 237-247, using
+    detect_activity(), lines 174-188.
+    detect_activity on each of three "anchor" channels:
+        scope 2 CH3 (LTGS1-232 D-dot), scope 2 CH4 (LTGS1-007 B-dot),
+        scope 3 CH4 (C225 D-dot).
+    detect_activity(t, v), defaults k = 10, env_s = 200 ns, noise_s = 500 ns:
+        v0 = v - median(v)
+        noise: split v0 into blocks of 500 ns (1250 samples), take the std of
+        each block (ddof 1), sort, sigma = the 25th-percentile block std
+        env = moving max of |v0| over 200 ns (500 samples, movmax line 58)
+        above = env > 10 * sigma
+        start = first time above, end = last time above.
+    tPulse = median of the three starts, tEnd = max of the three ends.
+    These are scope record times. Scope 2 and scope 3 record times are mixed
+    here with no cable or trigger correction.
+    Values: see edges.csv, tPulse_record_s and pulse_window_us_end
+    (tEnd - tPulse: 1.670, 1.219, 1.121, 0.940 us for shots 43-46).
+
+Step 3. Time axis. NO time shift or cable delay is applied to C225.
+    t_pipeline_us = (t_record - tPulse) * 1e6     (line 309)
+    So t = 0 is tPulse from step 2, not the C225 edge itself. On these shots
+    the C225 50% start of pulse 1 lands at about +0.161 to +0.163 us.
+
+Step 4. Subtract the pre-pulse mean of the raw signal.  lines 257, 293, 304.
+    r3_pre = (max(tPulse - 2 us, t3[0] + 0.1 us), tPulse - 0.3 us)
+    open interval (inwin(), line 103: t > a and t < b)
+    v = CH4 - mean(CH4 over r3_pre)
+    Window -2.000 to -0.300 us on all four shots. premean_v in edges.csv.
+
+Step 5. Activity mask, the samples left OUT of the baseline fit.
+    lines 305-307.
+    act = "above" from detect_activity(t3, v) on the step-4 signal, same
+    parameters as step 2, run over the WHOLE scope 3 record.
+    Then widened by 0.3 us on each side: padN = round(0.3 us / dt) = 750
+    samples, act = movmax(act, 2*padN + 1) > 0.
+    Result on these shots: one interval each, about -0.25 us to tEnd + 0.3 us
+    (shot 43: -0.246 to 1.970 us). 3,669 to 5,541 samples excluded out of
+    1,000,000. Exact intervals: edges.csv, excluded_intervals_us.
+
+Step 6. Filtering or smoothing of the signal: NONE.
+    The only moving windows in the C225 path are inside detect_activity
+    (200 ns moving max, used only to build the mask) and the 1501-sample
+    moving max that widens the mask. The trace itself is never smoothed.
+
+Step 7. Offset step removal or piecewise correction: NONE for C225.
+    remove_offset_step() (line 191) is used only for the rigol2 D-dots and
+    B-dots, not for C225.
+
+Step 8. Integrate.  reconstruct_quiet(), line 211, cumtrapz() line 91.
+    integ = cumulative trapezoid of v (step 4) against t in seconds,
+    scipy cumulative_trapezoid with initial = 0.
+    Starts at the FIRST sample of the record (about -200 us), not at the
+    pulse. Units V*s. Nothing else is subtracted before integrating.
+
+Step 9. Baseline: cubic fit on the INTEGRATED trace.  reconstruct_quiet(),
+    lines 212-214, polyfit_mu() lines 95-100.
+    Fit samples: every sample where act is False, over the WHOLE record
+    (about -200 to +200 us). Only the step-5 interval is left out.
+    Fit variable: x = (t_record - mu0) / mu1, t_record in SECONDS (record
+    time, not t_pipeline), mu0 = mean of t over the fit samples,
+    mu1 = std of t over the fit samples (ddof 1, about 115.7 us). This is
+    MATLAB's [p, S, mu] = polyfit(t, y, 3) centring and scaling.
+    Model: integ ~ p3 x^3 + p2 x^2 + p1 x + p0 (numpy.polyfit, ordinary least
+    squares, all fit samples weighted equally).
+    baseline(t) = polyval(p, (t - mu0) / mu1), units V*s.
+    integ = integ - baseline.
+    Coefficients, mu0, mu1: edges.csv (fit_p3..fit_p0, fit_mu0_record_s,
+    fit_mu1_s).
+
+Step 10. Zero the trace just before the pulse.  reconstruct_quiet(), line 215.
+    c3_zero = (max(tPulse - 0.9 us, t3[0]), tPulse - 0.1 us), line 258,
+    open interval.
+    integ = integ - mean(integ over c3_zero)    (one constant, V*s)
+    Window -0.900 to -0.100 us on all four shots. zero_offset_Vs in edges.csv.
+
+Step 11. Calibrate to kV.  reconstruct_quiet() line 216, process_waveforms()
+    lines 308 and 310.
+    C225 [V] = CF3_CH4 * integ,   CF3_CH4 = 1.56e11 V per V*s  (line 32)
+    S["C225"] = C225 / 1e3   -> kV.
+    Source given in the code (lines 19-23): Multipulse_Calibrations_and_
+    Connections.xlsx, "Calibration Matrix" and "Scope Connections" sheets,
+    L-3 certificates 2019, probe FC032. The 20 dB pad is already in the scope
+    probe ratio (x10), so the exported volts include it. The sign is kept:
+    the output pulses are negative (about -195 to -211 kV peak).
+
+Step 12. Peak value.  line 311.
+    peaks["C225_Ddot"] = max |C225| over the WHOLE record, in kV.
+    This is the C225_Ddot_kV column of processed_shots/shot_summary.csv.
+    WARNING: on these shots that maximum is NOT the output pulse. It is the
+    leftover baseline drift far from the pulse (see section 3). Summary values
+    839, 834, 753, 499 kV for shots 43-46, while the pulses are about
+    195-211 kV.
+
+
+3. WHAT THE BASELINE DOES ON THESE SHOTS
+----------------------------------------
+
+The integral of the raw signal wanders slowly over the 400 us record
+(panel 2 of the plots, peak to peak about 1.2e-5 V*s). One cubic over the
+whole record cannot follow that wander, so after step 9 the trace still
+carries slow drift, and only step 10 makes it look flat near the pulse:
+
+  shot   whole-record C225 range    -3 to -0.3 us before pulse 1
+                                    mean     slope       std
+  43       -195 ..  839 kV          -5.3     +6.8 kV/us   5.6 kV
+  44       -834 ..   48 kV         +17.2    -13.2 kV/us  10.5 kV
+  45       -753 ..  130 kV         +15.4    -13.5 kV/us  10.7 kV
+  46       -265 ..  499 kV          +4.6     -5.3 kV/us   4.3 kV
+
+1.56e11 V/(V*s) turns 1e-6 V*s of drift into 156 kV, so a baseline error of
+1e-8 V*s is already 1.6 kV.
+
+
+4. HOW THE PULSE START AND WINDOW ARE FOUND
+-------------------------------------------
+
+tPulse and tEnd: step 2. The "pulse window" used for C225 is the step-5
+activity mask (detect_activity on scope 3 CH4 alone, padded 0.3 us), not
+tPulse..tEnd directly. tEnd is not used in the C225 path at all.
+
+
+5. 50% EDGES, WIDTH, GAP  (shot_timing.py only)
+-----------------------------------------------
+
+Not done in the pipeline, the .mat files or ltgs_gui3.m. shot_timing.py does
+it on its own trace:
+
+  Time axis: sensor time after T0, in ns, lines 815-816:
+      t_sensor = t_record*1e9 - record_to_sensor(3, 4)
+      record_to_sensor (line 128) = cable one way - trigger arrival - scope
+      offset = 149.672/2 - 18.391 - (-87.138) = 143.583 ns for these shots
+      (old trigger cables, before 5 Oct 2026; use_trigger_cables, line 114).
+  First C225 burst, lines 820-842 and find_bursts() line 279: in the window
+      TG-100 trigger in (map prediction, predict() line 200, Marx delay
+      180 us default) -2000 to +12000 ns; baseline = median of samples before
+      TG-100 in - 200 ns; first crossing of 30% of the largest |deviation|.
+  Its output trace, output_trace() line 315, called at line 862:
+      raw CH4 from 2000 ns before to 3500 ns after that first burst
+      minus the mean of the raw samples from 2000 ns to 150 ns before it
+      (a constant, no fit), then cumsum * dt (rectangle rule, dt = median
+      sample spacing). No calibration factor, no cubic.
+  Edges, out_edges() line 331, called at line 864 with frac = 0.5:
+      5 ns centred moving mean (movmean, line 303; 13 samples at 0.4 ns),
+      flip the sign so the largest peak is positive, pulses = runs above 50%
+      of the largest peak that last 30 ns or more, first two runs used.
+      For each pulse, level = 50% of THAT pulse's own peak. Start = last
+      sample below the level before the pulse's 50% region, linearly
+      interpolated. End = last sample at or above the level inside the run,
+      interpolated to the next sample.
+  width = end - start, gap = pulse 2 start - pulse 1 end,
+  start to start = pulse 2 start - pulse 1 start (lines 941-958).
+
+Because a 50% level on each pulse's own peak is insensitive to a constant
+offset, both traces give edges that agree to about 0.01-0.35 ns at the
+pulse 1 start. Widths and gaps differ by up to about 2.6 ns (shot 44); see
+edges.csv. make_export.py reproduces the saved
+timing_summary_20260924_170806_shots_43_to_46.csv widths and gaps exactly.
+
+
+6. THE EXPORTED FILES
+---------------------
+
+shot_00NN_c225.csv   every sample from t_pipeline = -3 us to +4 us (17,500 rows)
+shot_00NN_c225_whole_record.csv   every 100th sample of the whole record
+
+  t_record_ns           scope 3 record time, ns
+  t_pipeline_us         (t_record - tPulse)*1e6, the axis of S.C225_t
+  raw_v                 raw CH4, scope volts (exported volts, pad included)
+  baseline              the cubic of step 9, V*s. It is subtracted from
+                        integral_before, so it is in the same units.
+  integral_before       cumtrapz of (raw_v - pre-pulse mean) from the first
+                        record sample, V*s, before the cubic is removed.
+                        Note: the pre-pulse mean (step 4) is already removed
+                        from the integrand.
+  c225_kv               the final trace, = S.C225 in the .mat file, kV
+  -- extra columns, because the steps differ from the columns asked for --
+  integrand_v           raw_v - pre-pulse mean, the signal actually integrated
+  baseline_raw_equiv_v  pre-pulse mean + d/dt of the cubic, V. The same
+                        correction expressed in raw scope volts. This is what
+                        panel 1 of the plots draws on the raw signal.
+  in_fit                1 if the sample is used in the cubic fit, 0 if it is
+                        in the excluded activity interval
+
+  To rebuild c225_kv from the columns:
+      c225_kv = 1.56e11 * (integral_before - baseline - zero_offset_Vs) / 1e3
+  with zero_offset_Vs from edges.csv.
+
+edges.csv   one row per shot
+  tPulse_record_s, tEnd_record_s       step 2, record seconds
+  pulse_window_us_start/_end           0 and tEnd - tPulse, pipeline us
+  premean_window_us, premean_v         step 4
+  zero_window_us, zero_offset_Vs       step 10
+  fit_p3..fit_p0                       cubic coefficients, highest power first,
+                                       in V*s, of x = (t_record_s - mu0)/mu1
+  fit_mu0_record_s, fit_mu1_s          centring and scaling of x
+  fit_range_us                         first to last fit sample, pipeline us
+  fit_samples_used / _excluded, excluded_intervals_us   step 5
+  CF_V_per_Vs                          step 11
+  check_max_diff_vs_saved_mat_kV       0 means the export equals the .mat
+  pl_*   50% edges from shot_timing.out_edges() run unchanged on the
+         PIPELINE C225 trace, in the window -2 to +3.5 us. Times in pipeline us,
+         widths and gaps in ns, peaks in kV.
+  st_*   50% edges from shot_timing.py's own trace (section 5), recomputed
+         with its functions and moved to the pipeline time axis
+         (t_record = t_sensor + 143.583 ns, then minus tPulse). Peaks in its
+         own uncalibrated units (V*s).
+  saved_timing_summary_*   the values in the saved timing summary CSV, for
+         comparison with st_*.
+
+shot_00NN_baseline.png   three panels
+  1. raw CH4, -2.3 to 0 us, with the baseline in raw volts
+     (baseline_raw_equiv_v) and the pre-mean window. The y range is set by
+     the raw codes: CH4 moves in 1.36 V steps, so the baseline sits inside
+     the quantisation noise.
+  2. integral_before and the cubic baseline over the whole record, excluded
+     interval shaded.
+  3. c225_kv from -0.4 to +1.4 us with both sets of 50% edges.
+
+make_export.py   the script that wrote all of the above. Read-only on the
+  data. Calls the existing functions unchanged.

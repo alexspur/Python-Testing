@@ -26,7 +26,7 @@ QLIM_V = (-1, 6)
 COL = {
     "D1": "#0000ff", "D2": "#ff0000", "B1": "#009900", "B2": "#00b3b3",
     "C225": "#ff00ff", "C315": "#8c4512", "R1": "#666666", "R2": "#b3b3b3",
-    "Q1": "#d9541a", "Q2": "#7d2e8f",
+    "Q1": "#d9541a", "Q2": "#7d2e8f", "T3": "#808000", "T4": "#000000",
 }
 
 STYLE = {
@@ -98,10 +98,18 @@ def shot_title(S):
 
 def analysis_figure(S, path):
     """Four panels for a fired shot: LTGS voltage with RVMs, B-dots,
-    C225/C315, and the Q-switch monitors with the spacing check."""
+    C225/C315, and the Q-switch monitors with the spacing check. When the
+    shot has them, a fifth full-width panel below shows the scope 1 trigger
+    signals (CH4 trig gen out, CH3 trig monitor)."""
     pk = S["peaks"]
+    trig = np.size(S.get("Trig_t", [])) > 0
     with plt.rc_context(STYLE):
-        fig, axs = plt.subplots(2, 2, figsize=(15, 9.5), constrained_layout=True)
+        if trig:
+            fig = plt.figure(figsize=(15, 13), constrained_layout=True)
+            gs = fig.add_gridspec(3, 2, height_ratios=(1, 1, 0.65))
+            axs = np.array([[fig.add_subplot(gs[r, c]) for c in range(2)] for r in range(2)])
+        else:
+            fig, axs = plt.subplots(2, 2, figsize=(15, 9.5), constrained_layout=True)
 
         ax = axs[0, 0]
         for key, lab, t, y, ls in (
@@ -156,6 +164,29 @@ def analysis_figure(S, path):
         ax.text(0.02, 0.97, spacing_text(S), transform=ax.transAxes, va="top",
                 family="monospace", fontsize=10,
                 bbox=dict(boxstyle="round", fc="white", ec="0.6"))
+
+        if trig:
+            # Raw volts as recorded. The two have very different scales, so
+            # the trig monitor gets its own axis on the right.
+            meta = S.get("meta") or {}
+            inv = "  [scope invert on]" if str(meta.get("rigol1_ch4_invert", "")) == "1" else ""
+            ax = fig.add_subplot(gs[2, :])
+            ax.tick_params(axis="y", right=False, which="both")
+            tt, yy = _clip(S["Trig_t"], S["TrigOut_v"], XLIM_US)
+            h1 = ax.plot(tt, yy, "-", color=COL["T4"], lw=1.0,
+                         label=f"Trig gen out, scope 1 CH4{inv}   edge "
+                               f"{_num(pk.get('t_TrigOut'), '%.3f')} us")
+            ax.set_xlim(XLIM_US)
+            ax.set_ylabel("Trig gen out (V)")
+            ax.set_xlabel("Time from pulse 1 (us)")
+            ax.set_title("Trigger signals (scope 1)")
+            ax2 = ax.twinx()
+            ax2.grid(False)
+            tt, yy = _clip(S["Trig_t"], S["TrigMon_v"], XLIM_US)
+            h2 = ax2.plot(tt, yy, "-", color=COL["T3"], lw=0.6, alpha=0.7,
+                          label="Trig monitor, scope 1 CH3")
+            ax2.set_ylabel("Trig monitor (V)", color=COL["T3"])
+            ax.legend(handles=h1 + h2, loc="upper right")
 
         fig.suptitle(shot_title(S), fontsize=14, fontweight="bold")
         g = S.get("rvm_gain", [np.nan, np.nan])

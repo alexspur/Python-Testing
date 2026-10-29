@@ -186,8 +186,41 @@ def test_late_scope3_record_skips_c225_c315_not_the_shot(tmp_path):
     assert counts["ok"] == 1 and counts["failed"] == 0
     row = next(csv.DictReader(open(root / "processed_shots" / "shot_summary.csv")))
     assert row["status"] == "ok" and row["C225_Ddot_kV"] == "" and row["C315_Bdot_kV"] == ""
-    assert "C225/C315 skipped" in row["error"]
+    assert "C225 skipped" in row["error"] and "C315 skipped" in row["error"]
+    assert row["c225_gap_ns"] == "" and row["c315_gap_ns"] == ""
     assert float(row["LTGS1_Ddot_kV"]) > 400
+
+
+def test_out_edges_on_two_square_pulses():
+    """Two negative 120 ns pulses, 300 ns apart start to start, 2 ns ramps.
+    At 50% the edges sit mid-ramp, exactly where the pulses were placed."""
+    t = np.arange(-1.0, 2.0, 0.0004)                 # us, 0.4 ns
+    y = np.zeros_like(t)
+    for t0 in (0.1, 0.4):
+        up = np.clip((t - t0) / 0.002 + 0.5, 0, 1)
+        dn = np.clip((t - t0 - 0.120) / 0.002 + 0.5, 0, 1)
+        y -= 200.0 * (up - dn)
+    E = P.edge_summary(t, y, 0.5, (-0.5, 1.5))
+    assert np.allclose(E["lead_us"], [0.1, 0.4], atol=2e-5)
+    assert np.allclose(E["trail_us"], [0.22, 0.52], atol=2e-5)
+    assert np.allclose(E["width_ns"], 120.0, atol=0.03)
+    assert abs(E["gap_ns"] - 180.0) < 0.03 and abs(E["start_to_start_ns"] - 300.0) < 0.03
+    assert np.allclose(E["peak_kV"], -200.0)
+    # outside the window nothing counts
+    lead, trail, A = P.out_edges(t, y, 0.5, (0.3, 1.5))
+    assert abs(lead[0] - 0.4) < 2e-5 and np.isnan(lead[1])
+
+
+def test_output_probe_edges_saved(logs):
+    PS.run(root=logs, plots=False)
+    S = loadmat(logs / "processed_shots" / "shot_0041.mat", squeeze_me=True)
+    for probe in ("C225", "C315"):
+        assert probe in S["edges"].dtype.names
+        assert np.isfinite(float(S["out_onset_us"][probe]))
+    rows = {r["shot_number"]: r for r in csv.DictReader(
+        open(logs / "processed_shots" / "shot_summary.csv"))}
+    assert rows["41"]["pipeline_version"] == "py-3"
+    assert "c225_cmd_minus_gap_ns" in rows["41"]
 
 
 def test_one_bad_shot_does_not_stop_the_run(logs, monkeypatch):

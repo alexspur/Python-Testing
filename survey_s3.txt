@@ -1,0 +1,31 @@
+SURVEY, CH2
+============================================================
+  trigger sweep      AUTO
+  trigger source     EXT
+  trigger level      5.000000E-1
+  timebase s/div     5.000000E-5
+  timebase offset    0.000000
+  memory depth       1.0000E+06
+  CH2 impedance      OMEG
+  CH2 V/div          1
+  CH2 probe ratio    1
+
+  window        -400000.0 to +399999.2 ns (799999 ns span)
+  samples       1000000  at 800 ps
+  signal range  -0.085 to +2.473 V (ptp 2.559 V)
+  baseline      +0.000 V, noise 0.0 mV rms
+  signal reach  2.473 V from baseline = 2473468000000.0 sigma (needs 7.9)
+  polarity      positive-going
+  thresholds    +0.495 / +1.484 V  (20% / 60% of reach)
+
+  2 transition(s)
+              time   direction   local ptp
+    --------------------------------------
+        3398.40 ns      rising      1.791 V
+       53400.00 ns     falling      1.791 V
+
+  First rising edge at 3398.40 ns. Use
+    --search 3383 3413
+
+  A 800 us window is far too wide for this measurement. Rerun with
+  --tscale 2e-7 so the edge is sampled densely enough to fit.

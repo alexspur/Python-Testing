@@ -1,0 +1,83 @@
+Ports (connection_memory.json): dg535 COM4, bnc COM5, laser1 COM8, laser2 COM6
+DG535: A = T0 + 0.000000 us  B = A + 180.825500 us  C = T0 + 0.000000 us  D = C + 181.245800 us  trigger EXTERNAL
+Scope 3: RIGOL TECHNOLOGIES,DS7054,DS7A233300256,00.01.02.00.07
+  trigger source   EXT
+  trigger sweep    AUTO
+  timebase s/div   2.000000E-7
+  memory depth     1.0000E+06
+  CH1 L1 Q-switch  OMEG  2 V/div  display 1
+  CH2 L2 Q-switch  OMEG  2 V/div  display 1
+Laser1 on COM8: ST = 'standby'
+  WOR: I 0 F 4 S 0 Q 4
+  No interlocks present.
+Laser2 on COM6: ST = 'standby'
+  WOR: I 0 F 4 S 0 Q 4
+  No interlocks present.
+
+Plan: rows [1000, 500, 300, 200], 5 shots each, rows in turn, DG535 written and read back before every shot, 20 shots, about 5 min.
+  BOTH LASERS FIRE on every shot. Beams blocked, eyewear on, area clear.
+  The BNC 575 fires every output on each shot. In the shot setup its A
+  output drives the Marx DG535: the WJ supplies must be off and the
+  Marx grounded, or A disconnected.
+Results in C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115958
+
+=== interleaved: the DG535 is written and read back before every shot ===
+  1000 ns row: B = A + 180.5755 us, D = C + 181.6458 us, D - B = 1070.30 ns
+   500 ns row: B = A + 180.8255 us, D = C + 181.3958 us, D - B = 570.30 ns
+   300 ns row: B = A + 180.9255 us, D = C + 181.2958 us, D - B = 370.30 ns
+   200 ns row: B = A + 180.9755 us, D = C + 181.2458 us, D - B = 270.30 ns
+    DG535 try 1 of 3: read back D = C + 181.245800 us
+    DG535 try 2 of 3: read back D = C + 181.245800 us
+  1000 ns shot  1: L1 184.0814 us  L2 185.1513 us  spacing  1069.88 ns ( -0.42)  OK  DG535 verified (3 tries)
+   500 ns shot  1: L1 184.3310 us  L2 184.9011 us  spacing   570.02 ns ( -0.28)  OK  DG535 verified
+    DG535 try 1 of 3: read back D = C + 181.395800 us
+   300 ns shot  1: L1 184.4312 us  L2 184.8010 us  spacing   369.80 ns ( -0.50)  OK  DG535 verified (2 tries)
+   200 ns shot  1: L1 184.4814 us  L2 184.7515 us  spacing   270.07 ns ( -0.23)  OK  DG535 verified
+  1000 ns shot  2: L1 184.0810 us  L2 185.1510 us  spacing  1070.00 ns ( -0.30)  OK  DG535 verified
+   500 ns shot  2: L1 184.3312 us  L2 184.9010 us  spacing   569.79 ns ( -0.51)  OK  DG535 verified
+    DG535 try 1 of 3: read back B = A + 180.825500 us
+    DG535 try 2 of 3: read back B = A + 180.825500 us
+   300 ns shot  2: L1 184.4315 us  L2 184.8016 us  spacing   370.05 ns ( -0.25)  OK  DG535 verified (3 tries)
+   200 ns shot  2: L1 184.4817 us  L2 184.7516 us  spacing   269.93 ns ( -0.37)  OK  DG535 verified
+  1000 ns shot  3: L1 184.0817 us  L2 185.1514 us  spacing  1069.71 ns ( -0.59)  OK  DG535 verified
+    DG535 try 1 of 3: read back D = C + 181.645800 us
+    DG535 try 2 of 3: read back D = C + 181.645800 us
+   500 ns shot  3: L1 184.3321 us  L2 184.9019 us  spacing   569.72 ns ( -0.58)  OK  DG535 verified (3 tries)
+    DG535 try 1 of 3: read back B = A + 180.825500 us
+   300 ns shot  3: L1 184.4318 us  L2 184.8016 us  spacing   369.79 ns ( -0.51)  OK  DG535 verified (2 tries)
+    DG535 try 1 of 3: read back D = C + 181.295800 us
+   200 ns shot  3: L1 184.4813 us  L2 184.7513 us  spacing   269.91 ns ( -0.39)  OK  DG535 verified (2 tries)
+    DG535 try 1 of 3: read back D = C + 181.245800 us
+    DG535 try 2 of 3: read back D = C + 181.245800 us
+  1000 ns shot  4: L1 184.0812 us  L2 185.1512 us  spacing  1070.01 ns ( -0.29)  OK  DG535 verified (3 tries)
+   500 ns shot  4: L1 184.3315 us  L2 184.9013 us  spacing   569.75 ns ( -0.55)  OK  DG535 verified
+    DG535 try 1 of 3: read back B = A + 180.825500 us
+   300 ns shot  4: L1 184.4313 us  L2 184.8011 us  spacing   369.83 ns ( -0.47)  OK  DG535 verified (2 tries)
+    DG535 try 1 of 3: read back D = C + 181.295800 us
+    DG535 try 2 of 3: read back D = C + 181.295800 us
+   200 ns shot  4: L1 184.4812 us  L2 184.7512 us  spacing   269.98 ns ( -0.32)  OK  DG535 verified (3 tries)
+  1000 ns shot  5: L1 184.0812 us  L2 185.1513 us  spacing  1070.17 ns ( -0.13)  OK  DG535 verified
+   500 ns shot  5: L1 184.3315 us  L2 184.9017 us  spacing   570.26 ns ( -0.04)  OK  DG535 verified
+    DG535 try 1 of 3: read back D = C + 181.395800 us
+   300 ns shot  5: L1 184.4311 us  L2 184.8012 us  spacing   370.13 ns ( -0.17)  OK  DG535 verified (2 tries)
+    DG535 try 1 of 3: read back D = C + 181.295800 us
+    DG535 try 2 of 3: read back D = C + 181.295800 us
+   200 ns shot  5: L1 184.4817 us  L2 184.7515 us  spacing   269.77 ns ( -0.53)  OK  DG535 verified (3 tries)
+  traces saved: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115958\traces_1000ns.csv
+  traces saved: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115958\traces_500ns.csv
+  traces saved: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115958\traces_300ns.csv
+  traces saved: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115958\traces_200ns.csv
+DG535 B and D restored: B = A + 180.825500 us  D = C + 181.245800 us
+
+RESULTS (spacing = L2 Q-switch - L1 Q-switch at 50 %)
+================================================================================================
+   target      D - B    good  in tol       mean      sd       min       max  mean-cmd   L1 jit   L2 jit
+       ns         ns                         ns      ns        ns        ns        ns       ps       ps
+     1000    1070.30   5/5         5    1069.95    0.17   1069.71   1070.17     -0.35      276      163
+      500     570.30   5/5         5     569.91    0.23    569.72    570.26     -0.39      417      382
+      300     370.30   5/5         5     369.92    0.16    369.79    370.13     -0.38      289      265
+      200     270.30   5/5         5     269.93    0.11    269.77    270.07     -0.37      217      176
+plot: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115958\traces.png
+plot: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115958\spacing.png
+summary: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115958\summary.csv
+time: 4.5 min
