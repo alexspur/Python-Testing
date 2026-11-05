@@ -1,18 +1,20 @@
 """
 Vacuum chamber calibration: capture and export from Rigol scope 3 over USB.
 
-Standalone. Imports nothing from ScopeDelayGUI and opens only the one scope.
+Standalone GUI. Imports nothing from ScopeDelayGUI and opens only the one scope.
 
-The scope is found by USB serial, not by "first Rigol on the bus": Rigol2
-(DS7A230800035) shares this PC's USB, and calibration data silently taken
-from the wrong scope would be worse than no data. If rigol3 is not attached
-the script lists what is and stops.
+    python VacuumChamberCalibration.py
 
-Each capture writes, into VacuumChamberCalibration_data/YYYY.MM.DD/:
+The scope list shows every USB instrument and preselects rigol3 by serial.
+Picking a different scope is allowed but deliberate, and its files are then
+named scope_<serial>_... rather than rigol3_..., so calibration data can never
+be silently attributed to the wrong scope.
+
+Each capture writes, into <save folder>/YYYY.MM.DD/:
     rigol3_<stamp>[_label].csv         Time (s), Voltage_CH<n> (V)
     rigol3_<stamp>[_label].json        IDN, timebase, per-channel setup,
                                        preamble and ADC clip counts
-    rigol3_<stamp>[_label].png         decimated preview (skip: --no-plot)
+    rigol3_<stamp>[_label].png         preview (untick "Save PNG" to skip)
 
 Only displayed channels are read, at full memory depth (RAW mode). Nothing
 in the scope's setup is changed: the script writes :SINGle, :STOP and the
@@ -20,33 +22,30 @@ in the scope's setup is changed: the script writes :SINGle, :STOP and the
 
 Do not run this while the main GUI is capturing on rigol3 over Ethernet.
 Both would be driving :WAVeform:SOURce on the same scope.
-
-    python VacuumChamberCalibration.py              interactive loop
-    python VacuumChamberCalibration.py --now        grab what is on screen, exit
-    python VacuumChamberCalibration.py --shots 10   arm/capture 10 times, exit
-    python VacuumChamberCalibration.py --list       show attached USB scopes
-
-Interactive commands (anything after the letter is used as a file label):
-    <Enter> or a [label]   arm SINGLE, wait for a trigger, capture
-    n [label]              stop and capture whatever is in memory now
-    q                      quit
 """
 
-import argparse
 import json
 import os
 import re
 import sys
+import threading
 import time
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import pyqtgraph as pg
 import pyvisa
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QPixmap
+from PyQt6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+    QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
+    QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 
 RIGOL3_SERIAL = "DS7A233300256"     # from *IDN? in the GUI session logs
-RIGOL_USB_PATTERN = "USB?*::0x1AB1::?*::INSTR"
 
 OUT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "VacuumChamberCalibration_data")
@@ -56,6 +55,12 @@ QUERY_TIMEOUT_MS = 3000      # settings answer in ms, or never
 CHUNK_POINTS = 250000        # Rigol caps a single :WAVeform:DATA? in BYTE mode
 
 ADC_MIN, ADC_MAX = 0, 255
+
+# Same channel colours as the main GUI's scope screen (white background).
+CH_COLORS = {1: "#C9A000", 2: "#00A0B0", 3: "#D000D0", 4: "#1F3FBF"}
+
+STATE_COLORS = {"off": "#757575", "idle": "#2E7D32", "armed": "#B26A00",
+                "busy": "#1565C0", "error": "#C62828"}
 
 SCOPE_QUERIES = {
     "idn": "*IDN?",
@@ -82,6 +87,8 @@ CHANNEL_QUERIES = {
 }
 
 _SI = {"": 1, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
+_PREFIX = {-15: "f", -12: "p", -9: "n", -6: "µ", -3: "m",
+           0: "", 3: "k", 6: "M", 9: "G", 12: "T"}
 
 
 def parse_points(text):
@@ -91,40 +98,90 @@ def parse_points(text):
     return int(float(m.group(1)) * _SI[m.group(2)]) if m else None
 
 
-def find_rigol_usb(rm):
-    """{serial: resource} for every Rigol on USB."""
-    found = {}
+def eng(x, unit=""):
+    """1.234e-6, 's' -> '1.234 µs'."""
+    if x is None or not np.isfinite(x):
+        return "-"
+    if abs(x) < 1e-15:      # float noise around zero, e.g. a cursor at t = 0
+        return f"0 {unit}"
+    exp = int(np.floor(np.log10(abs(x)) / 3) * 3)
+    exp = max(-15, min(12, exp))
+    return f"{x / 10 ** exp:.4g} {_PREFIX[exp]}{unit}"
+
+
+def make_resource_manager():
+    """pyvisa-py first, since that is what reaches rigol3 on the chamber PC;
+    the system VISA (NI/Keysight) where pyvisa-py is not installed."""
     try:
-        resources = rm.list_resources(RIGOL_USB_PATTERN)
-    except pyvisa.errors.VisaIOError:
-        resources = ()              # NI-VISA raises when nothing matches
-    for res in resources:
+        return pyvisa.ResourceManager("@py"), "pyvisa-py"
+    except (ValueError, OSError):
+        return pyvisa.ResourceManager(), "system VISA"
+
+
+def find_usb_instruments(rm):
+    """{serial: resource} for every USB instrument.
+
+    Not filtered by vendor ID: pyvisa-py writes the IDs in decimal
+    (USB0::6833::1300::...) where NI-VISA writes 0x1AB1, so a Rigol pattern
+    match misses the scope on one backend or the other.
+    """
+    found = {}
+    for res in rm.list_resources():
+        if not res.upper().startswith("USB"):
+            continue
         parts = res.split("::")
         if len(parts) >= 4:
             found[parts[3]] = res
     return found
 
 
+def minmax_decimate(t, v, bins=4000):
+    """Keep each bin's min and max, so a narrow pulse survives decimation."""
+    n = len(v)
+    if n <= 2 * bins:
+        return t, v
+    step = n // bins
+    m = step * bins
+    vv = v[:m].reshape(bins, step)
+    out_v = np.empty(2 * bins)
+    out_v[0::2] = vv.min(axis=1)
+    out_v[1::2] = vv.max(axis=1)
+    return np.repeat(t[:m:step], 2), out_v
+
+
 class Rigol3:
-    def __init__(self, resource):
-        self.rm = pyvisa.ResourceManager()
+    def __init__(self, rm, resource):
+        self.rm = rm
         self.resource = resource
         self.inst = None
         self.idn = ""
+        self.log = print
 
     def connect(self):
         self.inst = self.rm.open_resource(self.resource)
-        self.inst.timeout = DATA_TIMEOUT_MS
         self.inst.read_termination = "\n"
         self.inst.write_termination = "\n"
         self.inst.chunk_size = 1024 * 1024
-        self.idn = self.query("*IDN?")
+        self.inst.timeout = 5000        # a silent scope fails fast at connect
+        try:
+            self.idn = self.query("*IDN?")
+        except Exception:
+            self.close()
+            raise
+        self.inst.timeout = DATA_TIMEOUT_MS
         return self.idn
+
+    @property
+    def serial(self):
+        parts = [p.strip() for p in self.idn.split(",")]
+        return parts[2] if len(parts) > 2 else ""
 
     def close(self):
         if self.inst is not None:
-            self.inst.close()
-            self.inst = None
+            try:
+                self.inst.close()
+            finally:
+                self.inst = None
 
     def write(self, cmd):
         self.inst.write(cmd)
@@ -146,8 +203,10 @@ class Rigol3:
     def trigger_status(self):
         return self.query(":TRIGger:STATus?")
 
-    def arm_and_wait(self, timeout_s):
+    def arm_and_wait(self, timeout_s, abort, on_status=None):
         """:SINGle, then poll until the acquisition is finished (STOP).
+
+        Returns 'done', 'timeout' or 'aborted'.
 
         TD means triggered but the post-trigger record may still be filling,
         so keep polling for STOP rather than reading at TD. *OPC? makes sure
@@ -158,17 +217,23 @@ class Rigol3:
         self.query_quick("*OPC?")
         t0 = time.monotonic()
         seen_td = None
-        while time.monotonic() - t0 < timeout_s:
+        while True:
+            if abort.is_set():
+                return "aborted"
+            elapsed = time.monotonic() - t0
+            if elapsed >= timeout_s:
+                return "timeout"
             status = self.trigger_status()
             if status == "STOP":
-                return True
+                return "done"
             if status == "TD" and seen_td is None:
                 seen_td = time.monotonic()
             # Should never stick at TD in single mode; don't hang on it if it does.
             if seen_td is not None and time.monotonic() - seen_td > 5.0:
-                return True
+                return "done"
+            if on_status:
+                on_status(status, elapsed)
             time.sleep(0.05)
-        return False
 
     def displayed_channels(self):
         return [ch for ch in range(1, 5)
@@ -223,7 +288,7 @@ class Rigol3:
         t = pre["xorigin"] + (np.arange(codes.size) - pre["xreference"]) * pre["xincrement"]
         return t, volts, codes, pre
 
-    def capture(self):
+    def capture(self, on_progress=None):
         """Stop, then read every displayed channel at full depth."""
         self.write(":STOP")
         channels = self.displayed_channels()
@@ -241,6 +306,8 @@ class Rigol3:
         info["capture"] = {"expected_points": total, "channels": {}}
         data = {}
         for ch in channels:
+            if on_progress:
+                on_progress(f"reading CH{ch} ({total:,} points)")
             t, v, codes, pre = self.read_channel(ch, total)
             low = int(np.count_nonzero(codes <= ADC_MIN))
             high = int(np.count_nonzero(codes >= ADC_MAX))
@@ -252,22 +319,22 @@ class Rigol3:
             }
             data[ch] = (t, v)
             if v.size == 0:
-                print(f"  CH{ch}: no data returned")
+                self.log(f"CH{ch}: no data returned")
                 continue
             note = ""
             if v.size < total:
                 note += f"  SHORT ({v.size} of {total})"
             if low or high:
                 note += f"  CLIPPED ({low} low, {high} high)"
-            print(f"  CH{ch}: {v.size} pts, {v.min():+.4g} .. {v.max():+.4g} V{note}")
+            self.log(f"CH{ch}: {v.size} pts, {v.min():+.4g} .. {v.max():+.4g} V{note}")
         return data, info
 
 
-def export(data, info, label, make_plot, show_plot):
+def export(data, info, label, out_root, prefix, save_png):
     stamp = datetime.now()
-    out_dir = os.path.join(OUT_ROOT, stamp.strftime("%Y.%m.%d"))
+    out_dir = os.path.join(out_root, stamp.strftime("%Y.%m.%d"))
     os.makedirs(out_dir, exist_ok=True)
-    name = "rigol3_" + stamp.strftime("%Y%m%d_%H%M%S")
+    name = prefix + "_" + stamp.strftime("%Y%m%d_%H%M%S")
     if label:
         name += "_" + re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("_")
     base = os.path.join(out_dir, name)
@@ -287,15 +354,14 @@ def export(data, info, label, make_plot, show_plot):
     with open(base + ".json", "w") as f:
         json.dump(info, f, indent=2, default=str)
 
-    if make_plot or show_plot:
-        import matplotlib
-        if not show_plot:
-            matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        step = max(1, n // 20000)
-        fig, ax = plt.subplots(figsize=(11, 5))
+    if save_png:
+        # Figure without pyplot: no GUI backend, safe off the Qt thread.
+        from matplotlib.figure import Figure
+        fig = Figure(figsize=(11, 5))
+        ax = fig.add_subplot()
         for ch, (t, v) in data.items():
-            ax.plot(t[::step], v[::step], lw=0.8, label=f"CH{ch}")
+            if len(v):
+                ax.plot(*minmax_decimate(t, v), lw=0.8, color=CH_COLORS[ch], label=f"CH{ch}")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Voltage (V)")
         ax.set_title(name)
@@ -303,114 +369,429 @@ def export(data, info, label, make_plot, show_plot):
         ax.legend()
         fig.tight_layout()
         fig.savefig(base + ".png", dpi=110)
-        if show_plot:
-            plt.show()
-        plt.close(fig)
 
-    print(f"  saved {base}.csv")
     return base
 
 
-def open_scope(args):
-    rm = pyvisa.ResourceManager()
-    if args.resource:
-        return Rigol3(args.resource)
-    found = find_rigol_usb(rm)
-    if args.serial in found:
-        return Rigol3(found[args.serial])
-    print(f"Rigol scope with serial {args.serial} is not on USB.")
-    if found:
-        print("Attached Rigol scopes:")
-        for serial, res in found.items():
-            print(f"  {serial}   {res}")
-        print("Use --serial <serial> to pick one of these on purpose.")
-    else:
-        print("No Rigol scopes on USB. Check the cable and that the scope's "
-              "USB device port is enabled (Utility > IO).")
-    sys.exit(1)
+class CaptureWorker(QThread):
+    """Arm/wait/read/save off the GUI thread. One scope, one worker at a time."""
 
+    status = pyqtSignal(str, str)               # state key, text
+    log = pyqtSignal(str)
+    captured = pyqtSignal(object, object, str)  # data, info, file base
 
-def do_capture(scope, arm, label, args):
-    if arm:
-        print(f"  armed SINGLE, waiting for trigger (Ctrl+C to abort, "
-              f"timeout {args.timeout:g} s) ...")
+    def __init__(self, scope, arm, shots, label, timeout_s, out_root, prefix, save_png):
+        super().__init__()
+        self.scope = scope
+        self.arm = arm
+        self.shots = shots
+        self.label = label
+        self.timeout_s = timeout_s
+        self.out_root = out_root
+        self.prefix = prefix
+        self.save_png = save_png
+        self.abort = threading.Event()
+        self.failed = False
+
+    def run(self):
+        self.scope.log = self.log.emit
         try:
-            if not scope.arm_and_wait(args.timeout):
-                print("  no trigger before timeout; nothing saved")
-                return None
-        except KeyboardInterrupt:
-            print("\n  aborted; nothing saved")
-            return None
-    t0 = time.monotonic()
-    data, info = scope.capture()
-    print(f"  read in {time.monotonic() - t0:.1f} s")
-    return export(data, info, label, not args.no_plot, args.show)
+            for i in range(1, self.shots + 1):
+                if self.abort.is_set():
+                    break
+                label, tag = self.label, ""
+                if self.shots > 1:
+                    label = f"{label}_{i:03d}" if label else f"{i:03d}"
+                    tag = f"Shot {i}/{self.shots}: "
+
+                if self.arm:
+                    self.status.emit("armed", f"{tag}armed, waiting for trigger")
+                    result = self.scope.arm_and_wait(
+                        self.timeout_s, self.abort,
+                        lambda s, e: self.status.emit(
+                            "armed", f"{tag}armed, waiting for trigger  [{s}, {e:.0f} s]"))
+                    if result == "aborted":
+                        self.log.emit("Aborted; nothing saved. The scope is still armed.")
+                        break
+                    if result == "timeout":
+                        self.log.emit(f"No trigger within {self.timeout_s:g} s; nothing saved.")
+                        break
+                    self.log.emit(f"{tag}triggered")
+
+                t0 = time.monotonic()
+                data, info = self.scope.capture(
+                    lambda msg: self.status.emit("busy", tag + msg))
+                self.log.emit(f"Read in {time.monotonic() - t0:.1f} s")
+                self.status.emit("busy", f"{tag}saving")
+                base = export(data, info, label, self.out_root, self.prefix, self.save_png)
+                self.log.emit(f"Saved {base}.csv")
+                self.captured.emit(data, info, base)
+        except Exception as e:
+            self.failed = True
+            self.log.emit(f"ERROR: {type(e).__name__}: {e}")
+            self.status.emit("error", f"Error: {e}")
+        finally:
+            self.scope.log = print
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Vacuum Chamber Calibration - Rigol 3")
+        self.resize(1200, 820)
+
+        self.rm, self.backend = make_resource_manager()
+        self.scope = None
+        self.prefix = "rigol3"
+        self.worker = None
+        self.last_data = {}
+        self.out_root = OUT_ROOT
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+
+        # ---- scope ----
+        box = QGroupBox("Scope (USB)")
+        lay = QGridLayout(box)
+        self.combo = QComboBox()
+        self.combo.setMinimumWidth(380)
+        self.btn_rescan = QPushButton("Rescan")
+        self.btn_connect = QPushButton("Connect")
+        self.btn_connect.setMinimumWidth(110)
+        self.idn_label = QLabel("Not connected")
+        self.idn_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(QLabel("Instrument"), 0, 0)
+        lay.addWidget(self.combo, 0, 1)
+        lay.addWidget(self.btn_rescan, 0, 2)
+        lay.addWidget(self.btn_connect, 0, 3)
+        lay.addWidget(self.idn_label, 1, 1, 1, 3)
+        lay.setColumnStretch(1, 1)
+        root.addWidget(box)
+
+        # ---- capture ----
+        box = QGroupBox("Capture")
+        lay = QGridLayout(box)
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText("added to the file name, e.g. 1e-5 torr run 3")
+        self.shots = QSpinBox()
+        self.shots.setRange(1, 10000)
+        self.shots.setToolTip("Arm & Capture repeats this many times; files get _001, _002 ...")
+        self.timeout = QDoubleSpinBox()
+        self.timeout.setRange(1, 86400)
+        self.timeout.setDecimals(0)
+        self.timeout.setValue(600)
+        self.timeout.setSuffix(" s")
+        self.png_check = QCheckBox("Save PNG preview")
+        self.png_check.setChecked(True)
+        self.btn_arm = QPushButton("Arm && Capture")
+        self.btn_arm.setToolTip("SINGLE, wait for a trigger, read all displayed channels, save")
+        self.btn_arm.setStyleSheet("font-weight: bold; padding: 6px 16px;")
+        self.btn_now = QPushButton("Capture Now")
+        self.btn_now.setToolTip("STOP and save whatever is in the scope's memory now")
+        self.btn_abort = QPushButton("Abort")
+        self.btn_abort.setToolTip("Stop waiting for a trigger (a read in progress finishes first)")
+        self.dir_edit = QLineEdit(self.out_root)
+        self.dir_edit.setReadOnly(True)
+        self.btn_browse = QPushButton("Browse...")
+        self.btn_open = QPushButton("Open Folder")
+
+        lay.addWidget(QLabel("Label"), 0, 0)
+        lay.addWidget(self.label_edit, 0, 1, 1, 3)
+        lay.addWidget(QLabel("Shots"), 0, 4)
+        lay.addWidget(self.shots, 0, 5)
+        lay.addWidget(QLabel("Trigger timeout"), 0, 6)
+        lay.addWidget(self.timeout, 0, 7)
+        buttons = QHBoxLayout()
+        for b in (self.btn_arm, self.btn_now, self.btn_abort):
+            buttons.addWidget(b)
+        buttons.addSpacing(20)
+        buttons.addWidget(self.png_check)
+        buttons.addStretch(1)
+        lay.addLayout(buttons, 1, 0, 1, 8)
+        lay.addWidget(QLabel("Save to"), 2, 0)
+        lay.addWidget(self.dir_edit, 2, 1, 1, 5)
+        lay.addWidget(self.btn_browse, 2, 6)
+        lay.addWidget(self.btn_open, 2, 7)
+        lay.setColumnStretch(1, 1)
+        root.addWidget(box)
+
+        self.state_label = QLabel()
+        self.state_label.setStyleSheet("font-size: 11pt; padding: 2px 4px;")
+        root.addWidget(self.state_label)
+
+        # ---- plot ----
+        pg.setConfigOptions(antialias=False)
+        self.plot = pg.PlotWidget(background="w")
+        pi = self.plot.getPlotItem()
+        pi.showGrid(x=True, y=True, alpha=0.25)
+        pi.setLabel("bottom", "Time", units="s", color="#333")
+        pi.setLabel("left", "Voltage", units="V", color="#333")
+        for ax in ("left", "bottom"):
+            pi.getAxis(ax).setPen("#888")
+            pi.getAxis(ax).setTextPen("#333")
+        pi.setDownsampling(auto=True, mode="peak")
+        pi.setClipToView(True)
+        self.legend = pi.addLegend(offset=(10, 10), labelTextColor="#222")
+        self.curves = {ch: pi.plot([], [], pen=pg.mkPen(CH_COLORS[ch], width=1.5))
+                       for ch in CH_COLORS}
+        self.vline = pg.InfiniteLine(angle=90, movable=False,
+                                     pen=pg.mkPen("#888", style=Qt.PenStyle.DashLine))
+        self.vline.hide()
+        pi.addItem(self.vline, ignoreBounds=True)
+        self.plot.scene().sigMouseMoved.connect(self.on_mouse)
+        self.readout = QLabel("Move the cursor over the plot to read values")
+        self.readout.setStyleSheet("color: #333; padding: 2px 6px;")
+        self.readout.setTextFormat(Qt.TextFormat.RichText)
+
+        plot_box = QWidget()
+        pl = QVBoxLayout(plot_box)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.addWidget(self.plot, 1)
+        pl.addWidget(self.readout)
+
+        # ---- per-channel table + log ----
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["Channel", "Points", "Min", "Max", "Vpp", "Mean", "Clipped"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setWordWrap(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(5000)
+
+        bottom = QSplitter(Qt.Orientation.Horizontal)
+        bottom.addWidget(self.table)
+        bottom.addWidget(self.log_view)
+        bottom.setSizes([700, 500])
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(plot_box)
+        split.addWidget(bottom)
+        split.setSizes([560, 220])
+        root.addWidget(split, 1)
+
+        self.btn_rescan.clicked.connect(self.rescan)
+        self.btn_connect.clicked.connect(self.toggle_connect)
+        self.btn_arm.clicked.connect(lambda: self.start_capture(arm=True))
+        self.btn_now.clicked.connect(lambda: self.start_capture(arm=False))
+        self.btn_abort.clicked.connect(self.abort_capture)
+        self.btn_browse.clicked.connect(self.browse)
+        self.btn_open.clicked.connect(self.open_folder)
+
+        self.log(f"VISA backend: {self.backend}")
+        self.set_state("off", "Not connected")
+        self.rescan()
+        self.update_controls()
+
+    # ---- helpers ----
+
+    def log(self, msg):
+        self.log_view.appendPlainText(f"{datetime.now():%H:%M:%S}  {msg}")
+
+    def set_state(self, state, text):
+        self.state_label.setText(
+            f'<span style="color:{STATE_COLORS[state]}">●</span> {text}')
+
+    def busy(self):
+        return self.worker is not None
+
+    def update_controls(self):
+        connected, busy = self.scope is not None, self.busy()
+        self.combo.setEnabled(not connected and not busy)
+        self.btn_rescan.setEnabled(not connected and not busy)
+        self.btn_connect.setEnabled(not busy and (connected or self.combo.currentData() is not None))
+        self.btn_connect.setText("Disconnect" if connected else "Connect")
+        self.btn_arm.setEnabled(connected and not busy)
+        self.btn_now.setEnabled(connected and not busy)
+        self.btn_abort.setEnabled(busy)
+        self.btn_browse.setEnabled(not busy)
+
+    # ---- connection ----
+
+    def rescan(self):
+        self.combo.clear()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            found = find_usb_instruments(self.rm)
+        except Exception as e:
+            self.log(f"USB scan failed: {e}")
+            found = {}
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        for serial, res in found.items():
+            text = f"{serial}   (rigol3)" if serial == RIGOL3_SERIAL else serial
+            self.combo.addItem(text, res)
+            self.combo.setItemData(self.combo.count() - 1, res, Qt.ItemDataRole.ToolTipRole)
+
+        if RIGOL3_SERIAL in found:
+            self.combo.setCurrentIndex(self.combo.findData(found[RIGOL3_SERIAL]))
+            self.log(f"rigol3 found: {found[RIGOL3_SERIAL]}")
+        elif found:
+            self.log(f"rigol3 ({RIGOL3_SERIAL}) is not on USB. Found: {', '.join(found)}. "
+                     f"Pick one on purpose if you mean a different scope.")
+        else:
+            self.combo.addItem("No USB instruments found", None)
+            self.log("No USB instruments found. Check the cable and that the scope's "
+                     "USB device port is enabled (Utility > IO).")
+        self.update_controls()
+
+    def toggle_connect(self):
+        if self.scope is not None:
+            self.scope.close()
+            self.scope = None
+            self.idn_label.setText("Not connected")
+            self.log("Disconnected")
+            self.set_state("off", "Not connected")
+            self.update_controls()
+            return
+
+        res = self.combo.currentData()
+        if not res:
+            return
+        scope = Rigol3(self.rm, res)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            idn = scope.connect()
+        except Exception as e:
+            self.log(f"Connect failed on {res}: {e}")
+            self.set_state("error", "Connect failed")
+            QMessageBox.warning(self, "Connect failed", f"{res}\n\n{e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.scope = scope
+        self.log(f"Connected: {idn}")
+        if scope.serial == RIGOL3_SERIAL:
+            self.prefix = "rigol3"
+            self.idn_label.setText(idn)
+        else:
+            self.prefix = f"scope_{scope.serial or 'unknown'}"
+            self.idn_label.setText(f"{idn}   <b>- not rigol3</b>")
+            self.log(f"WARNING: this is not rigol3 ({RIGOL3_SERIAL}); "
+                     f"files will be named {self.prefix}_...")
+        self.set_state("idle", "Ready")
+        self.update_controls()
+
+    # ---- capture ----
+
+    def start_capture(self, arm):
+        if self.scope is None or self.busy():
+            return
+        self.worker = CaptureWorker(
+            self.scope, arm, self.shots.value() if arm else 1,
+            self.label_edit.text().strip(), self.timeout.value(),
+            self.out_root, self.prefix, self.png_check.isChecked())
+        self.worker.status.connect(self.set_state)
+        self.worker.log.connect(self.log)
+        self.worker.captured.connect(self.on_captured)
+        self.worker.finished.connect(self.on_worker_finished)
+        self.log("Arming SINGLE" if arm else "Capturing what is in memory now")
+        self.set_state("armed" if arm else "busy", "starting")
+        self.worker.start()
+        self.update_controls()
+
+    def abort_capture(self):
+        if self.worker is not None:
+            self.worker.abort.set()
+            self.set_state("busy", "aborting...")
+
+    def on_worker_finished(self):
+        failed = self.worker.failed
+        self.worker.deleteLater()
+        self.worker = None
+        if not failed:
+            self.set_state("idle", "Ready")
+        self.update_controls()
+
+    def on_captured(self, data, info, base):
+        self.last_data = {ch: tv for ch, tv in data.items() if len(tv[1])}
+        self.legend.clear()
+        for ch, curve in self.curves.items():
+            if ch in self.last_data:
+                curve.setData(*self.last_data[ch])
+                self.legend.addItem(curve, f"CH{ch}")
+            else:
+                curve.setData([], [])
+        pi = self.plot.getPlotItem()
+        pi.setTitle(os.path.basename(base), color="#222", size="10pt")
+        pi.enableAutoRange()
+
+        chans = info["capture"]["channels"]
+        self.table.setRowCount(len(data))
+        for row, (ch, (_, v)) in enumerate(data.items()):
+            c = chans[ch]
+            pm = QPixmap(12, 12)
+            pm.fill(QColor(CH_COLORS[ch]))
+            name = QTableWidgetItem(QIcon(pm), f"CH{ch}")
+            clipped = c["clipped_low"] + c["clipped_high"]
+            clip_text = (f"⚠ {clipped:,} ({c['clipped_low']:,} low, {c['clipped_high']:,} high)"
+                         if clipped else "0")
+            if len(v):
+                vmin, vmax, mean = float(v.min()), float(v.max()), float(v.mean())
+            else:
+                vmin = vmax = mean = float("nan")
+            cells = [name, QTableWidgetItem(f"{c['points']:,}"),
+                     QTableWidgetItem(eng(vmin, "V")), QTableWidgetItem(eng(vmax, "V")),
+                     QTableWidgetItem(eng(vmax - vmin, "V")), QTableWidgetItem(eng(mean, "V")),
+                     QTableWidgetItem(clip_text)]
+            if clipped:
+                cells[-1].setToolTip("Samples on the ADC rail: the signal went off screen. "
+                                     "Increase V/div for this channel.")
+            for col, item in enumerate(cells):
+                self.table.setItem(row, col, item)
+
+    def on_mouse(self, pos):
+        if not self.last_data:
+            return
+        vb = self.plot.getPlotItem().vb
+        if not vb.sceneBoundingRect().contains(pos):
+            return
+        x = vb.mapSceneToView(pos).x()
+        self.vline.setPos(x)
+        self.vline.show()
+        parts = [f"t = {eng(x, 's')}"]
+        for ch, (t, v) in self.last_data.items():
+            i = int(np.clip(np.searchsorted(t, x), 0, len(t) - 1))
+            parts.append(f'<span style="color:{CH_COLORS[ch]}">■</span> CH{ch} {eng(v[i], "V")}')
+        self.readout.setText("&nbsp;&nbsp;&nbsp;&nbsp;".join(parts))
+
+    # ---- output folder ----
+
+    def browse(self):
+        d = QFileDialog.getExistingDirectory(self, "Save captures to", self.out_root)
+        if d:
+            self.out_root = d
+            self.dir_edit.setText(d)
+
+    def open_folder(self):
+        os.makedirs(self.out_root, exist_ok=True)
+        os.startfile(self.out_root)
+
+    def closeEvent(self, event):
+        if self.worker is not None:
+            if QMessageBox.question(self, "Capture in progress",
+                                    "A capture is running. Abort it and quit?") \
+                    != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self.worker.abort.set()
+            self.worker.wait(60000)     # a read in progress finishes first
+        if self.scope is not None:
+            self.scope.close()
+        event.accept()
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--serial", default=RIGOL3_SERIAL,
-                    help=f"USB serial of the scope (default rigol3, {RIGOL3_SERIAL})")
-    ap.add_argument("--resource", help="full VISA resource string; overrides --serial")
-    ap.add_argument("--list", action="store_true", help="list Rigol scopes on USB and exit")
-    ap.add_argument("--now", action="store_true",
-                    help="capture what is in memory now, without arming, and exit")
-    ap.add_argument("--shots", type=int, default=0,
-                    help="arm and capture this many triggers, then exit")
-    ap.add_argument("--label", default="", help="text appended to file names")
-    ap.add_argument("--timeout", type=float, default=600.0,
-                    help="seconds to wait for each trigger (default 600)")
-    ap.add_argument("--no-plot", action="store_true", help="skip the PNG preview")
-    ap.add_argument("--show", action="store_true",
-                    help="open each preview in a window (blocks until closed)")
-    args = ap.parse_args()
-
-    if args.list:
-        found = find_rigol_usb(pyvisa.ResourceManager())
-        for serial, res in found.items():
-            tag = "  <- rigol3" if serial == RIGOL3_SERIAL else ""
-            print(f"{serial}   {res}{tag}")
-        if not found:
-            print("No Rigol scopes on USB.")
-        return
-
-    scope = open_scope(args)
-    print(f"Connecting to {scope.resource} ...")
-    print(f"Connected: {scope.connect()}")
-    try:
-        if args.now:
-            do_capture(scope, False, args.label, args)
-            return
-        if args.shots:
-            for i in range(1, args.shots + 1):
-                print(f"Shot {i}/{args.shots}")
-                label = f"{args.label}_{i:03d}" if args.label else f"{i:03d}"
-                do_capture(scope, True, label, args)
-            return
-
-        print(f"Saving to {OUT_ROOT}")
-        print("Enter/a [label] = arm & capture   n [label] = capture now   q = quit")
-        while True:
-            try:
-                line = input("> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
-            cmd, _, rest = line.partition(" ")
-            cmd = cmd.lower()
-            label = rest.strip() or args.label
-            if cmd == "q":
-                break
-            if cmd not in ("", "a", "n"):
-                print("  ? Enter/a = arm, n = now, q = quit")
-                continue
-            try:
-                do_capture(scope, cmd != "n", label, args)
-            except (pyvisa.errors.VisaIOError, RuntimeError, ValueError) as e:
-                print(f"  capture failed: {e}")
-    finally:
-        scope.close()
+    app = QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

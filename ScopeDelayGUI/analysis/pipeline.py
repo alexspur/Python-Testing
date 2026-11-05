@@ -15,26 +15,16 @@ import numpy as np
 from scipy.integrate import cumulative_trapezoid
 from scipy.ndimage import maximum_filter1d
 
-# ---------------------------------------------------------------------------
-# Calibration and channel map.
-# Source: Multipulse_Calibrations_and_Connections.xlsx, "Calibration Matrix"
-# and "Scope Connections" sheets (L-3 certificates, 2019). The 20 dB pads are
-# already in the scope probe ratio (x10), so exported volts include them.
-# ---------------------------------------------------------------------------
+# Which probe is on which scope channel, and each probe's calibration
+# factor, live in scope_channels.py (one entry per wiring, by shot number).
+from .scope_channels import (  # noqa: E402,F401  re-exported for callers
+    PROBES, WIRINGS, channel_names, output_probes, scope_channel, wiring_for,
+)
+
+# B-dot geometry and scale, the same for every B-dot probe.
 CAL = {
-    # rigol2
-    "CF_CH1": 1.85e11,   # CH1 LTGS2-232 D-dot, FC011
-    "CF_CH2": -6.51e8,   # CH2 LTGS2-007 B-dot, FC013
-    "CF_CH3": 1.83e11,   # CH3 LTGS1-232 D-dot, FC017
-    "CF_CH4": -6.70e8,   # CH4 LTGS1-007 B-dot, FC016
-    # rigol3
-    "CF3_CH3": -6.96e8,  # CH3 C315 B-dot, FC027
-    "CF3_CH4": 1.56e11,  # CH4 C225 D-dot, FC032
     "geom": 2 * np.pi * 7.5,
     "bScale": -4.5,
-    # rigol1 RVM divider corrections (scope probe ratio is 20000:1)
-    "DIV_CH1": 19588.6 / 20000,
-    "DIV_CH2": 19970.7 / 20000,
 }
 
 # B-dot baseline windows (all B-dots: LTGS1, LTGS2, C315). Not the July
@@ -42,13 +32,6 @@ CAL = {
 BDOT_PRE_S = 1.0e-6         # offset / zero window: this long, ending 50 ns before pulse 1
 BDOT_POST_GAP_S = 0.3e-6    # post window starts this long after the last activity
 BDOT_POST_LEN_S = 1.0e-6    # and is this long; the trace ends with it
-
-# Signal names per scope channel, for the raw-channel plot.
-CHANNEL_NAMES = {
-    1: ["RVM 1", "RVM 2", "Trig monitor", "Trig gen out"],
-    2: ["LTGS2-232 D-dot", "LTGS2-007 B-dot", "LTGS1-232 D-dot", "LTGS1-007 B-dot"],
-    3: ["L1 Q-switch", "L2 Q-switch", "C315 B-dot", "C225 D-dot"],
-}
 
 
 class NoPulse(Exception):
@@ -310,20 +293,40 @@ def reconstruct_ddot(t, v, CF, tPulse, tEnd):
 
 
 # ===================== main pipeline =====================
-def process_waveforms(fr, fd, f3, cal=CAL):
+def process_waveforms(fr, fd, f3, cal=CAL, wiring=None):
     """Process one shot. fr, fd, f3 are the rigol1, rigol2 and rigol3 files,
     or already-loaded arrays. Returns a dict with the same field names as
-    the MATLAB struct S. Raises NoPulse for a dry shot."""
+    the MATLAB struct S. Raises NoPulse for a dry shot.
+
+    wiring is an entry of scope_channels.WIRINGS (default: the first one).
+    It says which scope channel carries which signal. Signals the wiring
+    does not record are saved as empty traces with NaN peaks."""
     c = cal
-    Md = fd if isinstance(fd, np.ndarray) else read_rigol(fd)
-    M3 = f3 if isinstance(f3, np.ndarray) else read_rigol(f3)
-    Mr = fr if isinstance(fr, np.ndarray) else read_rigol(fr)
-    td, t3, tr = Md[:, 0], M3[:, 0], Mr[:, 0]
+    if wiring is None:
+        wiring = WIRINGS[0]
+    M = {1: fr if isinstance(fr, np.ndarray) else read_rigol(fr),
+         2: fd if isinstance(fd, np.ndarray) else read_rigol(fd),
+         3: f3 if isinstance(f3, np.ndarray) else read_rigol(f3)}
+
+    def chan(signal):
+        """(t, v, CF) of a signal in this wiring, or None."""
+        ch = scope_channel(wiring, signal)
+        if ch is None:
+            return None
+        k, col, cf = ch
+        return M[k][:, 0], M[k][:, col], cf
+
+    for req in ("LTGS1_Ddot", "LTGS2_Ddot", "RVM1", "RVM2"):
+        if chan(req) is None:
+            raise ValueError(f"wiring from shot {wiring['from_shot']} has no {req}")
+    td = chan("LTGS1_Ddot")[0]      # scope 2 time axis
+    tr = chan("RVM1")[0]            # scope 1 time axis
 
     # ---- detection ----
     starts, ends = [], []
-    for tt, vv in ((td, Md[:, 3]), (td, Md[:, 4]), (t3, M3[:, 4])):
-        s0, e0, _ = detect_activity(tt, vv)
+    for scope, ch in wiring["anchors"]:
+        Mk = M[int(scope[-1])]
+        s0, e0, _ = detect_activity(Mk[:, 0], Mk[:, ch])
         if s0 is not None:
             starts.append(s0)
             ends.append(e0)
@@ -338,103 +341,113 @@ def process_waveforms(fr, fd, f3, cal=CAL):
     droop_post = (tEnd + 3e-6, min(tEnd + 8e-6, td[-1]))
     int_win = (tPulse - 6e-6, droop_post[1])
     evt_win = (tPulse - 1e-6, tEnd + 1e-6)
-    r3_pre = (max(tPulse - 2e-6, t3[0] + 0.1e-6), tPulse - 0.3e-6)
-    c3_zero = (max(tPulse - 0.9e-6, t3[0]), tPulse - 0.1e-6)
 
     S = {"tPulse": tPulse, "tEnd": tEnd, "peaks": {}, "warnings": []}
     pk = S["peaks"]
 
-    # ---- D-dots (rigol2): LTGS1 = CH3, LTGS2 = CH1 ----
+    # ---- LTGS D-dots ----
     S["Dt"], S["Dv"], S["Dv_raw"] = [None, None], [None, None], [None, None]
-    for k, (col, CF) in enumerate(((3, c["CF_CH3"]), (1, c["CF_CH1"]))):
-        v = remove_offset_step(td, Md[:, col], base_win, droop_post, tPulse, tEnd)
-        im = (td >= int_win[0]) & (td <= int_win[1])
-        ti, vi = td[im], v[im]
+    for k, name in enumerate(("LTGS1_Ddot", "LTGS2_Ddot")):
+        t, v, CF = chan(name)
+        v = remove_offset_step(t, v, base_win, droop_post, tPulse, tEnd)
+        im = (t >= int_win[0]) & (t <= int_win[1])
+        ti, vi = t[im], v[im]
         Vr = reconstruct(ti, vi, CF, base_win, droop_pre, droop_post)
         S["Dt"][k] = (ti - tPulse) * 1e6
         S["Dv_raw"][k] = Vr / 1e3
 
-    # ---- B-dots (rigol2), Z*I: LTGS1 = CH4, LTGS2 = CH2 ----
-    S["Bt"], S["Bv"] = [None, None], [None, None]
-    for k, (col, CF, tag) in enumerate(((4, c["CF_CH4"], "LTGS1_Bdot"),
-                                        (2, c["CF_CH2"], "LTGS2_Bdot"))):
-        ti, Vr, warn = reconstruct_bdot(td, Md[:, col], CF * c["geom"] * c["bScale"],
-                                        tPulse, tEnd)
+    # ---- LTGS B-dots, Z*I (empty when the wiring has none) ----
+    S["Bt"], S["Bv"] = [np.array([]), np.array([])], [np.array([]), np.array([])]
+    for k, tag in enumerate(("LTGS1_Bdot", "LTGS2_Bdot")):
+        ch = chan(tag)
+        if ch is None:
+            pk[tag] = np.nan
+            continue
+        t, v, CF = ch
+        ti, Vr, warn = reconstruct_bdot(t, v, CF * c["geom"] * c["bScale"], tPulse, tEnd)
         if warn:
             S["warnings"].append(f"{tag}: {warn}")
         S["Bt"][k] = (ti - tPulse) * 1e6
         S["Bv"][k] = Vr / 1e3
         pk[tag] = np.abs(Vr[inwin(ti, evt_win)]).max() / 1e3
 
-    # ---- rigol3: C225 and C315, both with the B-dot pre/post baseline ----
-    # Both need rigol3 samples before pulse 1. When scope 3's record starts
-    # too late (its own timebase delay), C225 and C315 are skipped with a
-    # warning instead of failing the whole shot. The LTGS and RVM results
-    # above do not depend on them.
+    # ---- output probes (C225, C315, A225, B225, ...), B-dot pre/post baseline ----
+    # Each needs samples before pulse 1. When its scope's record starts too
+    # late (its own timebase delay), that probe is skipped with a warning
+    # instead of failing the whole shot. The LTGS and RVM results above do
+    # not depend on them.
     #
-    # C225 (py-5): reconstruct_ddot, the B-dot windows with a cubic baseline
-    # through both windows, D-dot factor only (no geom, no bScale). It used the whole-record cubic (reconstruct_quiet), and before
+    # D-dot probes (py-5): reconstruct_ddot, the B-dot windows with a cubic
+    # baseline through both windows, D-dot factor only (no geom, no bScale).
+    # C225 used the whole-record cubic (reconstruct_quiet), and before
     # that a zero set only before the pulse. C225 sits at 25 V/div, 1.075 V
     # per count, so a 0.1 V offset error is 15.6 kV per us. On shot 51
     # (13 Oct 2026) the raw offset sagged about 0.10 V during the pulses and
     # the pre-only zero turned that into a 15 to 25 kV false step after
     # pulse 1, while C315 stayed at zero. Pinning a window after the pulse
     # as well removes it. Edges move under 2 ns, peaks up to 16 kV.
-    # See reconstruct_ddot.
-    bm = inwin(t3, r3_pre)
-    if bm.sum() < 10 or inwin(t3, c3_zero).sum() < 10:
-        S["warnings"].append(
-            f"C225/C315 skipped: scope 3 record starts at {t3[0] * 1e6:.2f} us, "
-            f"after the pre-pulse window (pulse 1 at {tPulse * 1e6:.2f} us)")
-        S["C225_t"], S["C225"] = np.array([]), np.array([])
-        S["C315_t"], S["C315"] = np.array([]), np.array([])
-        pk["C225_Ddot"] = np.nan
-        pk["C315_Bdot"] = np.nan
-    else:
-        ti3c, C225, warn = reconstruct_ddot(t3, M3[:, 4], c["CF3_CH4"], tPulse, tEnd)
+    # See reconstruct_ddot. B-dot probes use reconstruct_bdot.
+    S["out_probes"] = []
+    for name, kind, k, col, CF in output_probes(wiring):
+        S["out_probes"].append(name)
+        t, v = M[k][:, 0], M[k][:, col]
+        tag = f"{name}_{'Ddot' if kind == 'ddot' else 'Bdot'}"
+        r3_pre = (max(tPulse - 2e-6, t[0] + 0.1e-6), tPulse - 0.3e-6)
+        c3_zero = (max(tPulse - 0.9e-6, t[0]), tPulse - 0.1e-6)
+        if inwin(t, r3_pre).sum() < 10 or inwin(t, c3_zero).sum() < 10:
+            S["warnings"].append(
+                f"{name} skipped: scope {k} record starts at {t[0] * 1e6:.2f} us, "
+                f"after the pre-pulse window (pulse 1 at {tPulse * 1e6:.2f} us)")
+            S[f"{name}_t"], S[name] = np.array([]), np.array([])
+            pk[tag] = np.nan
+            continue
+        if kind == "ddot":
+            ti, V, warn = reconstruct_ddot(t, v, CF, tPulse, tEnd)
+        else:
+            ti, V, warn = reconstruct_bdot(t, v, CF * c["geom"] * c["bScale"], tPulse, tEnd)
         if warn:
-            S["warnings"].append(f"C225_Ddot: {warn}")
-        S["C225_t"] = (ti3c - tPulse) * 1e6
-        S["C225"] = C225 / 1e3
-        pk["C225_Ddot"] = np.abs(C225[inwin(ti3c, evt_win)]).max() / 1e3
+            S["warnings"].append(f"{tag}: {warn}")
+        S[f"{name}_t"] = (ti - tPulse) * 1e6
+        S[name] = V / 1e3
+        # Peak over the event only, like every other channel.
+        pk[tag] = np.abs(V[inwin(ti, evt_win)]).max() / 1e3
 
-        ti3, C315, warn = reconstruct_bdot(t3, M3[:, 3],
-                                           c["CF3_CH3"] * c["geom"] * c["bScale"], tPulse, tEnd)
-        if warn:
-            S["warnings"].append(f"C315_Bdot: {warn}")
-        S["C315_t"] = (ti3 - tPulse) * 1e6
-        S["C315"] = C315 / 1e3
-        # Peak over the event only, like every other channel. It was the max
-        # over the whole integrated record, i.e. wherever the drift ended up.
-        pk["C315_Bdot"] = np.abs(C315[inwin(ti3, evt_win)]).max() / 1e3
-
-    # ---- rigol3 Q-switch monitors: CH1 = Laser1, CH2 = Laser2 ----
-    S["Qt"], S["Qv"] = [None, None], [None, None]
-    for k, (col, tag) in enumerate(((1, "Qsw1"), (2, "Qsw2"))):
-        vg, tRise = gate_qsw(t3, M3[:, col])
-        S["Qt"][k] = (t3 - tPulse) * 1e6
+    # ---- Q-switch monitors (empty when the wiring has none) ----
+    S["Qt"], S["Qv"] = [np.array([]), np.array([])], [np.array([]), np.array([])]
+    for k, tag in enumerate(("Qsw1", "Qsw2")):
+        ch = chan(tag)
+        if ch is None:
+            pk["t_" + tag] = np.nan
+            continue
+        t, v, _ = ch
+        vg, tRise = gate_qsw(t, v)
+        S["Qt"][k] = (t - tPulse) * 1e6
         S["Qv"][k] = vg
         pk["t_" + tag] = (tRise - tPulse) * 1e6 if np.isfinite(tRise) else np.nan
 
-    # ---- RVMs (rigol1), trimmed to the analysis span ----
+    # ---- RVMs, trimmed to the analysis span ----
     S["Rt"], S["Rv"] = [None, None], [None, None]
     imr = (tr >= int_win[0]) & (tr <= int_win[1])
     bmr = inwin(tr, base_win)
-    for k, (col, div, tag) in enumerate(((1, c["DIV_CH1"], "RVM1"),
-                                         (2, c["DIV_CH2"], "RVM2"))):
-        v = Mr[:, col]
+    for k, tag in enumerate(("RVM1", "RVM2")):
+        t, v, div = chan(tag)
         Vr = div * (v - v[bmr].mean())
-        S["Rt"][k] = (tr[imr] - tPulse) * 1e6
+        S["Rt"][k] = (t[imr] - tPulse) * 1e6
         S["Rv"][k] = Vr[imr] / 1e3
-        pk[tag] = np.abs(Vr[inwin(tr, evt_win)]).max() / 1e3
+        pk[tag] = np.abs(Vr[inwin(t, evt_win)]).max() / 1e3
 
-    # ---- trigger signals (rigol1), raw volts as recorded, same span as the
-    # RVMs: CH3 trig monitor, CH4 trig gen out. For viewing, plus the time of
-    # the trig gen out edge (us from pulse 1, NaN if there is no pulse).
-    S["Trig_t"] = (tr[imr] - tPulse) * 1e6
-    S["TrigMon_v"] = Mr[imr, 3]
-    S["TrigOut_v"] = Mr[imr, 4]
-    pk["t_TrigOut"] = (first_edge(tr[imr], Mr[imr, 4]) - tPulse) * 1e6
+    # ---- trigger signals, raw volts as recorded, same span as the RVMs
+    # (both on scope 1): trig monitor and trig gen out. For viewing, plus
+    # the time of the trig gen out edge (us from pulse 1, NaN if no pulse).
+    mon, out = chan("TrigMon"), chan("TrigOut")
+    if mon is not None and out is not None:
+        S["Trig_t"] = (tr[imr] - tPulse) * 1e6
+        S["TrigMon_v"] = mon[1][imr]
+        S["TrigOut_v"] = out[1][imr]
+        pk["t_TrigOut"] = (first_edge(tr[imr], out[1][imr]) - tPulse) * 1e6
+    else:
+        S["Trig_t"], S["TrigMon_v"], S["TrigOut_v"] = np.array([]), np.array([]), np.array([])
+        pk["t_TrigOut"] = np.nan
 
     # ---- RVM-referenced baseline correction for the D-dots ----
     S["rvm_gain"] = np.zeros(2)

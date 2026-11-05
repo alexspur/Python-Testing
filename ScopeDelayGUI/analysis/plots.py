@@ -15,8 +15,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from .pipeline import CHANNEL_NAMES  # noqa: E402
-
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 XLIM_US = (-4.7, 4.7)
@@ -133,26 +131,40 @@ def analysis_figure(S, path):
             ("B1", "LTGS1-007 B-dot Z*I", S["Bt"][0], S["Bv"][0], "--"),
             ("B2", "LTGS2-007 B-dot Z*I", S["Bt"][1], S["Bv"][1], "--"),
         ):
+            if np.size(t) == 0:      # not recorded on the new wiring
+                continue
             tt, yy = _clip(t, y, XLIM_US)
             ax.plot(tt, yy, ls, color=COL[key], lw=LW, label=lab)
         ax.set_xlim(XLIM_US)
         ax.set_ylabel("Z*I (kV)")
         ax.set_title("LTGS B-dots")
-        ax.legend(loc="best")
+        if ax.lines:
+            ax.legend(loc="best")
 
         ax = axs[1, 0]
-        tt, yy = _clip(S["C225_t"], S["C225"], XLIM_US)
-        ax.plot(tt, yy, "-.", color=COL["C225"], lw=LW, label="C225 D-dot")
-        tt, yy = _clip(S["C315_t"], S["C315"], XLIM_US)
-        ax.plot(tt, yy, ":", color=COL["C315"], lw=LW + 0.3, label="C315 B-dot Z*I")
+        # Every output probe the wiring has (C225, C315, A225, B225, ...).
+        # D-dots dash-dot, B-dots dotted; named colors where defined.
+        spare = iter(["#00a0a0", "#c9a200", "#000080", "#7d2e8f", "#808000"])
+        for name in S.get("out_probes", ["C225", "C315"]):
+            t, y = S.get(f"{name}_t", np.array([])), S.get(name, np.array([]))
+            if np.size(t) == 0:
+                continue
+            bdot = f"{name}_Bdot" in pk
+            tt, yy = _clip(t, y, XLIM_US)
+            ax.plot(tt, yy, ":" if bdot else "-.", color=COL.get(name) or next(spare),
+                    lw=LW + 0.3 if bdot else LW,
+                    label=f"{name} B-dot Z*I" if bdot else f"{name} D-dot")
         ax.set_xlim(XLIM_US)
         ax.set_ylabel("Voltage (kV)")
         ax.set_xlabel("Time from pulse 1 (us)")
-        ax.set_title("C225 / C315 monitors")
-        ax.legend(loc="best")
+        ax.set_title("Output probes")
+        if ax.lines:
+            ax.legend(loc="best")
 
         ax = axs[1, 1]
         for i, key, lab in ((0, "Q1", "Laser1 Q-switch"), (1, "Q2", "Laser2 Q-switch")):
+            if np.size(S["Qt"][i]) == 0:      # not recorded on the new wiring
+                continue
             tt, yy = _clip(S["Qt"][i], S["Qv"][i], XLIM_US)
             ax.plot(tt, yy, "-", color=COL[key], lw=LW, label=lab)
         ax.set_xlim(XLIM_US)
@@ -160,7 +172,8 @@ def analysis_figure(S, path):
         ax.set_ylabel("Q-switch (V)")
         ax.set_xlabel("Time from pulse 1 (us)")
         ax.set_title("Q-switch monitors")
-        ax.legend(loc="upper right")
+        if ax.lines:
+            ax.legend(loc="upper right")
         ax.text(0.02, 0.97, spacing_text(S), transform=ax.transAxes, va="top",
                 family="monospace", fontsize=10,
                 bbox=dict(boxstyle="round", fc="white", ec="0.6"))
@@ -216,6 +229,7 @@ def raw_figure(S, scopes, path):
     scope showed on screen (timebase delay +/- 5 divisions). Made for
     every shot, including dry runs."""
     st = S["meta"]
+    names = S.get("channels", {})
     with plt.rc_context(STYLE):
         fig, axs = plt.subplots(3, 4, figsize=(17, 9.5), constrained_layout=True)
         for r, k in enumerate((1, 2, 3)):
@@ -227,7 +241,8 @@ def raw_figure(S, scopes, path):
                 off = scl = np.nan
             for c in range(4):
                 ax = axs[r, c]
-                ax.set_title(f"Scope {k} CH{c + 1}: {CHANNEL_NAMES[k][c]}", fontsize=10)
+                nm = (names.get(f"rigol{k}") or ["", "", "", ""])[c] or "not used"
+                ax.set_title(f"Scope {k} CH{c + 1}: {nm}", fontsize=10)
                 if M is None:
                     ax.text(0.5, 0.5, "file missing", ha="center", va="center",
                             transform=ax.transAxes)

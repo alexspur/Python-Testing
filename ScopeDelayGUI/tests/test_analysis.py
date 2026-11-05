@@ -10,6 +10,13 @@ from analysis import pipeline as P
 from analysis import process_shots as PS
 
 CF = P.CAL
+W0 = P.wiring_for(0)                  # the July wiring the synthetic shots mimic
+
+
+def _cf(signal):
+    return P.scope_channel(W0, signal)[2]
+
+
 HDR = ["Time (s)", "Voltage_CH1 (V)", "Voltage_CH2 (V)", "Voltage_CH3 (V)", "Voltage_CH4 (V)"]
 
 
@@ -39,18 +46,18 @@ def make_shot(folder, stamp, idx, spacing_ns, fired=True, seed=0):
     bk = CF["geom"] * CF["bScale"]
     r2 = np.column_stack([
         t,
-        np.gradient(V2, t) / CF["CF_CH1"] + rng.normal(0, .5, n),
-        np.gradient(I2, t) / (CF["CF_CH2"] * bk) + rng.normal(0, .05, n),
-        np.gradient(V1, t) / CF["CF_CH3"] * 1.05 + rng.normal(0, .5, n),
-        np.gradient(I1, t) / (CF["CF_CH4"] * bk) + rng.normal(0, .05, n)])
+        np.gradient(V2, t) / _cf("LTGS2_Ddot") + rng.normal(0, .5, n),
+        np.gradient(I2, t) / (_cf("LTGS2_Bdot") * bk) + rng.normal(0, .05, n),
+        np.gradient(V1, t) / _cf("LTGS1_Ddot") * 1.05 + rng.normal(0, .5, n),
+        np.gradient(I1, t) / (_cf("LTGS1_Bdot") * bk) + rng.normal(0, .05, n)])
     q1 = np.where((t > t1 - 2.5e-6) & (t < t1 - 2.0e-6), 3.5, 0.0)
     q2 = np.where((t > t2 - 2.5e-6) & (t < t2 - 2.0e-6), 3.5, 0.0)
     r3 = np.column_stack([
         t, q1 + rng.normal(0, .02, n), q2 + rng.normal(0, .02, n),
-        np.gradient((I1 + I2) / 2, t) / (CF["CF3_CH3"] * bk) + rng.normal(0, .05, n),
-        np.gradient((V1 + V2) / 2, t) / CF["CF3_CH4"] + rng.normal(0, .5, n)])
+        np.gradient((I1 + I2) / 2, t) / (_cf("C315") * bk) + rng.normal(0, .05, n),
+        np.gradient((V1 + V2) / 2, t) / _cf("C225") + rng.normal(0, .5, n)])
     r1 = np.column_stack([
-        t, V1 / CF["DIV_CH1"] + rng.normal(0, 300, n), V2 / CF["DIV_CH2"] + rng.normal(0, 300, n),
+        t, V1 / _cf("RVM1") + rng.normal(0, 300, n), V2 / _cf("RVM2") + rng.normal(0, 300, n),
         rng.normal(0, .1, n), np.where(t > 0, 2.4, 0)])
     names = []
     for k, M in ((1, r1), (2, r2), (3, r3)):
