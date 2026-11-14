@@ -2,7 +2,8 @@
 
 Experimental records kept in the repository. These files are research data.
 Do not edit or delete them. New shot data from the GUI goes to the `logs/`
-folder at the repository root, which git ignores.
+folder at the repository root, which git ignores. `.gitignore` also skips `*.csv` and `*.mat`, so a new
+record that belongs here is added on purpose with `git add -f <file>`.
 
 | Path | Contents | Source |
 | --- | --- | --- |
