@@ -39,7 +39,7 @@ from . import pipeline as P
 
 # Bump when the pipeline or the plots change: shots processed by an older
 # version are redone automatically on the next run.
-PIPELINE_VERSION = "py-4"
+PIPELINE_VERSION = "py-5"
 
 SUMMARY_COLS = [
     "shot_number", "stamp", "session_shot_index", "datetime", "status",
@@ -174,6 +174,9 @@ def process_one(sh, sdir: Path, stamp: str, out_dir: Path, plots=True):
         "status": "ok", "error": "", "peaks": {},
         "qsw_rise_trig_us": np.array([np.nan, np.nan]),
         "pipeline_version": PIPELINE_VERSION,
+        # B-dot scale the traces were built with. ltgs_gui3_6.m reads it and
+        # only rescales files that lack it (those were built with -5.5).
+        "bScale": float(P.CAL["bScale"]),
     }
     have = [f.exists() for f in sh["files"]]
     scopes = {}
@@ -189,20 +192,28 @@ def process_one(sh, sdir: Path, stamp: str, out_dir: Path, plots=True):
                 S["status"] = "failed"
                 S["error"] = f"could not read {f.name}: {e}"
 
-    # Q-switch rise from the scope trigger. Measured on every shot with a
-    # rigol3 file, so dry runs still check the laser DG535 timing.
-    if 3 in scopes:
-        t3 = scopes[3][:, 0]
-        for i, col in enumerate((1, 2)):
-            try:
-                _, tr = P.gate_qsw(t3, scopes[3][:, col])
-                S["qsw_rise_trig_us"][i] = tr * 1e6
-            except Exception as e:  # noqa: BLE001
-                say(f"{name}: Q-switch {i + 1} timing not measured ({e})")
+    # Which signal is on which scope channel for this shot (scope_channels.py).
+    wiring = P.wiring_for(sh["shot_number"])
+    S["wiring_from_shot"] = float(wiring["from_shot"])
+    S["channels"] = P.channel_names(wiring)
+
+    # Q-switch rise from the scope trigger. Measured on every shot whose
+    # wiring records the Q-switches, so dry runs still check the laser DG535
+    # timing.
+    for i, sig in enumerate(("Qsw1", "Qsw2")):
+        ch = P.scope_channel(wiring, sig)
+        if ch is None or ch[0] not in scopes:
+            continue
+        k, col, _ = ch
+        try:
+            _, tr = P.gate_qsw(scopes[k][:, 0], scopes[k][:, col])
+            S["qsw_rise_trig_us"][i] = tr * 1e6
+        except Exception as e:  # noqa: BLE001
+            say(f"{name}: Q-switch {i + 1} timing not measured ({e})")
 
     if S["status"] == "ok":
         try:
-            W = P.process_waveforms(scopes[1], scopes[2], scopes[3])
+            W = P.process_waveforms(scopes[1], scopes[2], scopes[3], wiring=wiring)
             S.update(W)
             if W.get("warnings"):
                 S["error"] = "; ".join(W["warnings"])
@@ -270,7 +281,12 @@ def summary_row(S):
     st, pk = S["settings"], S.get("peaks", {})
     g = S.get("rvm_gain", [np.nan, np.nan])
     q = S.get("qsw_rise_trig_us", [np.nan, np.nan])
-    return {
+    # Output probes other than C225 / C315 (A225, B225, ...) get their own
+    # <peak>_kV column after the fixed ones; see write_summary.
+    extra = {f"{k}_kV": v for k, v in pk.items()
+             if (k.endswith("_Ddot") or k.endswith("_Bdot"))
+             and f"{k}_kV" not in SUMMARY_COLS}
+    return {**extra, **{
         "shot_number": S["shot_number"], "stamp": S["stamp"],
         "session_shot_index": S["session_shot_index"], "datetime": st["datetime"],
         "status": S["status"], "pressure_psi": st["pressure_psi"],
@@ -289,7 +305,13 @@ def summary_row(S):
         "analysis_png": S["analysis_png"], "raw_png": S["raw_png"],
         "pipeline_version": S["pipeline_version"],
         "label": S["name"],
-    }
+    }}
+
+
+def summary_cols(rows):
+    """SUMMARY_COLS plus any extra output-probe peak columns the rows carry."""
+    extra = sorted({c for r in rows for c in r if c.endswith("_kV") and c not in SUMMARY_COLS})
+    return SUMMARY_COLS + extra
 
 
 def _fmt(v):
@@ -305,13 +327,36 @@ def _fmt(v):
 
 
 def write_summary(path: Path, rows):
+    """Write the summary. If the CSV is locked (open in Excel), retry for
+    about 2 s, then leave it alone and write <name>_pending.csv beside it
+    with a warning. The next write that gets through removes the pending
+    file. Returns the path actually written."""
     tmp = path.with_suffix(".tmp")
+    cols = summary_cols(rows)
     with open(tmp, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(SUMMARY_COLS)
+        w.writerow(cols)
         for r in rows:
-            w.writerow([_fmt(r.get(c)) for c in SUMMARY_COLS])
-    os.replace(tmp, path)
+            w.writerow([_fmt(r.get(c)) for c in cols])
+    pending = path.with_name(path.stem + "_pending.csv")
+    for _ in range(10):
+        try:
+            os.replace(tmp, path)
+            if pending.exists():
+                try:
+                    pending.unlink()
+                except OSError:
+                    pass
+            return path
+        except PermissionError:
+            time.sleep(0.2)
+    try:
+        os.replace(tmp, pending)
+    except OSError:
+        pending = tmp
+    say(f"WARNING: {path} is locked (open in Excel?), left unchanged. "
+        f"This run's summary is in {pending}. Close the file and run again to update it.")
+    return pending
 
 
 def _sort_key(r):

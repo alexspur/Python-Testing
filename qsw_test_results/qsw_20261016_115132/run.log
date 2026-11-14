@@ -1,0 +1,47 @@
+Ports (connection_memory.json): dg535 COM4, bnc COM5, laser1 COM8, laser2 COM6
+DG535: A = T0 + 0.000000 us  B = A + 180.975500 us  C = T0 + 0.000000 us  D = C + 181.245800 us  trigger EXTERNAL
+Scope 3: RIGOL TECHNOLOGIES,DS7054,DS7A233300256,00.01.02.00.07
+  trigger source   EXT
+  trigger sweep    AUTO
+  timebase s/div   2.000000E-7
+  memory depth     1.0000E+06
+  CH1 L1 Q-switch  OMEG  2 V/div  display 1
+  CH2 L2 Q-switch  OMEG  2 V/div  display 1
+Laser1 on COM8: ST = 'standby'
+  WOR: I 0 F 4 S 0 Q 4
+  No interlocks present.
+Laser2 on COM6: ST = 'standby'
+  WOR: I 0 F 4 S 0 Q 4
+  No interlocks present.
+
+Plan: rows [500], 10 shots each, 10 shots, about 2 min.
+  BOTH LASERS FIRE on every shot. Beams blocked, eyewear on, area clear.
+  The BNC 575 fires every output on each shot. In the shot setup its A
+  output drives the Marx DG535: the WJ supplies must be off and the
+  Marx grounded, or A disconnected.
+Results in C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115132
+
+=== 500 ns row: B = A + 180.8255 us, D = C + 181.3958 us, D - B = 570.30 ns ===
+  DG535 written and read back: B = A + 180.825500 us, D = C + 181.395800 us
+  shot  1: L1 184.3318 us  L2 184.9017 us  spacing   569.90 ns ( -0.40)  OK
+  shot  2: L1 184.3315 us  L2 184.9014 us  spacing   569.94 ns ( -0.36)  OK
+  shot  3: L1 184.3314 us  L2 184.9013 us  spacing   569.85 ns ( -0.45)  OK
+  shot  4: L1 184.3313 us  L2 184.9015 us  spacing   570.21 ns ( -0.09)  OK
+  shot  5: L1 184.3313 us  L2 184.9012 us  spacing   569.91 ns ( -0.39)  OK
+  shot  6: L1 184.3318 us  L2 184.9018 us  spacing   569.98 ns ( -0.32)  OK
+  shot  7: L1 184.3319 us  L2 184.9019 us  spacing   569.99 ns ( -0.31)  OK
+  shot  8: L1 184.3312 us  L2 184.9011 us  spacing   569.85 ns ( -0.45)  OK
+  shot  9: L1 184.3319 us  L2 184.9016 us  spacing   569.76 ns ( -0.54)  OK
+  shot 10: L1 184.3312 us  L2 184.9009 us  spacing   569.69 ns ( -0.61)  OK
+  traces saved: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115132\traces_500ns.csv
+DG535 B and D NOT restored: B = A + 180.825500 us  D = C + 181.245800 us
+
+RESULTS (spacing = L2 Q-switch - L1 Q-switch at 50 %)
+================================================================================================
+   target      D - B    good  in tol       mean      sd       min       max  mean-cmd   L1 jit   L2 jit
+       ns         ns                         ns      ns        ns        ns        ns       ps       ps
+      500     570.30  10/10       10     569.91    0.14    569.69    570.21     -0.39      277      313
+plot: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115132\traces.png
+plot: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115132\spacing.png
+summary: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_115132\summary.csv
+time: 1.9 min

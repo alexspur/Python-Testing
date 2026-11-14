@@ -78,14 +78,17 @@ class ScopeDelayMainWindow(QMainWindow):
 
     def __init__(self, auto_connect=None, auto_save_delay_sec=2.0,
                  pressure_gauge_min=0.0, pressure_gauge_max=100.0,
-                 startup_charge_kv=60.0, opta_host="192.168.10.20",
-                 opta_port=502, opta_poll_ms=200):
+                 startup_charge_kv=60.0, startup_charge_ma=6.0,
+                 opta_host="192.168.10.20", opta_port=502, opta_poll_ms=200):
         super().__init__()
 
         # Startup "Set Voltage" (kV) preloaded into both supplies' voltage boxes
         # (main WJ panel + SF6 window). HV ON sends this kV to the WJ supplies.
         # Configurable from main.py.
         self.startup_charge_kv = startup_charge_kv
+        # Startup "Set Current" (mA) preloaded the same way. Configurable from
+        # main.py; the default keeps the old full-current behavior.
+        self.startup_charge_ma = startup_charge_ma
 
         # Dome pressure gauge range (PSI), configurable from main.py.
         self.pressure_gauge_min = pressure_gauge_min
@@ -170,8 +173,9 @@ class ScopeDelayMainWindow(QMainWindow):
 
         # Panel now supports 2 units
         self.wj_panel = WJPanel(num_units=2)
-        # Preload the configured startup charge voltage.
+        # Preload the configured startup charge voltage and current.
         self.wj_panel.voltage.setValue(self.startup_charge_kv)
+        self.wj_panel.current.setValue(self.startup_charge_ma)
 
         self.wj_panel.setSizePolicy(
             QSizePolicy.Policy.Preferred,

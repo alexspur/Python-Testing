@@ -10,6 +10,13 @@ from analysis import pipeline as P
 from analysis import process_shots as PS
 
 CF = P.CAL
+W0 = P.wiring_for(0)                  # the July wiring the synthetic shots mimic
+
+
+def _cf(signal):
+    return P.scope_channel(W0, signal)[2]
+
+
 HDR = ["Time (s)", "Voltage_CH1 (V)", "Voltage_CH2 (V)", "Voltage_CH3 (V)", "Voltage_CH4 (V)"]
 
 
@@ -39,18 +46,18 @@ def make_shot(folder, stamp, idx, spacing_ns, fired=True, seed=0):
     bk = CF["geom"] * CF["bScale"]
     r2 = np.column_stack([
         t,
-        np.gradient(V2, t) / CF["CF_CH1"] + rng.normal(0, .5, n),
-        np.gradient(I2, t) / (CF["CF_CH2"] * bk) + rng.normal(0, .05, n),
-        np.gradient(V1, t) / CF["CF_CH3"] * 1.05 + rng.normal(0, .5, n),
-        np.gradient(I1, t) / (CF["CF_CH4"] * bk) + rng.normal(0, .05, n)])
+        np.gradient(V2, t) / _cf("LTGS2_Ddot") + rng.normal(0, .5, n),
+        np.gradient(I2, t) / (_cf("LTGS2_Bdot") * bk) + rng.normal(0, .05, n),
+        np.gradient(V1, t) / _cf("LTGS1_Ddot") * 1.05 + rng.normal(0, .5, n),
+        np.gradient(I1, t) / (_cf("LTGS1_Bdot") * bk) + rng.normal(0, .05, n)])
     q1 = np.where((t > t1 - 2.5e-6) & (t < t1 - 2.0e-6), 3.5, 0.0)
     q2 = np.where((t > t2 - 2.5e-6) & (t < t2 - 2.0e-6), 3.5, 0.0)
     r3 = np.column_stack([
         t, q1 + rng.normal(0, .02, n), q2 + rng.normal(0, .02, n),
-        np.gradient((I1 + I2) / 2, t) / (CF["CF3_CH3"] * bk) + rng.normal(0, .05, n),
-        np.gradient((V1 + V2) / 2, t) / CF["CF3_CH4"] + rng.normal(0, .5, n)])
+        np.gradient((I1 + I2) / 2, t) / (_cf("C315") * bk) + rng.normal(0, .05, n),
+        np.gradient((V1 + V2) / 2, t) / _cf("C225") + rng.normal(0, .5, n)])
     r1 = np.column_stack([
-        t, V1 / CF["DIV_CH1"] + rng.normal(0, 300, n), V2 / CF["DIV_CH2"] + rng.normal(0, 300, n),
+        t, V1 / _cf("RVM1") + rng.normal(0, 300, n), V2 / _cf("RVM2") + rng.normal(0, 300, n),
         rng.normal(0, .1, n), np.where(t > 0, 2.4, 0)])
     names = []
     for k, M in ((1, r1), (2, r2), (3, r3)):
@@ -186,8 +193,41 @@ def test_late_scope3_record_skips_c225_c315_not_the_shot(tmp_path):
     assert counts["ok"] == 1 and counts["failed"] == 0
     row = next(csv.DictReader(open(root / "processed_shots" / "shot_summary.csv")))
     assert row["status"] == "ok" and row["C225_Ddot_kV"] == "" and row["C315_Bdot_kV"] == ""
-    assert "C225/C315 skipped" in row["error"]
+    assert "C225 skipped" in row["error"] and "C315 skipped" in row["error"]
+    assert row["c225_gap_ns"] == "" and row["c315_gap_ns"] == ""
     assert float(row["LTGS1_Ddot_kV"]) > 400
+
+
+def test_out_edges_on_two_square_pulses():
+    """Two negative 120 ns pulses, 300 ns apart start to start, 2 ns ramps.
+    At 50% the edges sit mid-ramp, exactly where the pulses were placed."""
+    t = np.arange(-1.0, 2.0, 0.0004)                 # us, 0.4 ns
+    y = np.zeros_like(t)
+    for t0 in (0.1, 0.4):
+        up = np.clip((t - t0) / 0.002 + 0.5, 0, 1)
+        dn = np.clip((t - t0 - 0.120) / 0.002 + 0.5, 0, 1)
+        y -= 200.0 * (up - dn)
+    E = P.edge_summary(t, y, 0.5, (-0.5, 1.5))
+    assert np.allclose(E["lead_us"], [0.1, 0.4], atol=2e-5)
+    assert np.allclose(E["trail_us"], [0.22, 0.52], atol=2e-5)
+    assert np.allclose(E["width_ns"], 120.0, atol=0.03)
+    assert abs(E["gap_ns"] - 180.0) < 0.03 and abs(E["start_to_start_ns"] - 300.0) < 0.03
+    assert np.allclose(E["peak_kV"], -200.0)
+    # outside the window nothing counts
+    lead, trail, A = P.out_edges(t, y, 0.5, (0.3, 1.5))
+    assert abs(lead[0] - 0.4) < 2e-5 and np.isnan(lead[1])
+
+
+def test_output_probe_edges_saved(logs):
+    PS.run(root=logs, plots=False)
+    S = loadmat(logs / "processed_shots" / "shot_0041.mat", squeeze_me=True)
+    for probe in ("C225", "C315"):
+        assert probe in S["edges"].dtype.names
+        assert np.isfinite(float(S["out_onset_us"][probe]))
+    rows = {r["shot_number"]: r for r in csv.DictReader(
+        open(logs / "processed_shots" / "shot_summary.csv"))}
+    assert rows["41"]["pipeline_version"] == "py-3"
+    assert "c225_cmd_minus_gap_ns" in rows["41"]
 
 
 def test_one_bad_shot_does_not_stop_the_run(logs, monkeypatch):

@@ -1,0 +1,216 @@
+WHAT CHANGED: C225 AND C315 OUTPUT TRACES, PIPELINE py-2 -> py-3
+================================================================
+
+Date: 6 Oct 2026. Session checked: logs/2026.09.24/experiment_log_20260924_170806.
+Line numbers refer to the files in source/.
+
+
+WHY
+---
+Up to py-2, C225 was the integral of the whole 400 us record minus one cubic
+fitted to that integral. The cubic cannot follow the slow drift of the
+integral, so near the pulse the trace kept a slope (up to 18 kV/us) and an
+offset (up to 9.5 kV), and the 50% edges moved by up to 2.6 ns from shot to
+shot. C315 was a linear fit on a short pre-pulse window and drifted even
+more over its span. py-3 uses a baseline local to the pulse.
+
+
+THE NEW METHOD (C225 and C315 the same way, each from its own raw signal)
+------------------------------------------------------------------------
+1. act = detect_activity(t3, raw), the existing function, unchanged.
+2. Onset t_on: dev = |raw - median(raw)|, set to 0 where act is false,
+   t_on = time of the first sample with dev >= 0.3 * max(dev).
+3. Baseline = mean of raw over t_on - 2.0 us <= t < t_on - 0.15 us.
+   Fewer than 100 samples there: the probe is skipped with a warning.
+4. integ = trapezoid integral of (raw - baseline) over the whole record.
+5. integ minus its mean over t_on - 60 ns < t < t_on - 20 ns.
+6. Trace in kV = factor * integ / 1000.
+   C225: factor CF3_CH4 = 1.56e11. C315: CF3_CH3 * geom * bScale.
+Saved extents unchanged: C225 over the whole record, C315 from
+tPulse - 0.9 us to the end of the record. Both on (t3 - tPulse) * 1e6.
+Peaks are now the largest |value| inside evt_win (tPulse - 1 us to
+tEnd + 1 us) only.
+
+
+FILES AND FUNCTIONS CHANGED
+---------------------------
+ScopeDelayGUI/analysis/pipeline.py
+  - Module docstring: notes that C225/C315 no longer follow process_shots.m.
+  - New constants, lines 44-52: OUT_PRE, OUT_ZERO, OUT_ONSET_FRAC,
+    OUT_EDGE_LEVEL, plus OUT_PRE_MIN_SAMPLES = 100 (the 100-sample rule).
+  - New functions:
+      output_onset(), line 242      step 2
+      reconstruct_local(), line 258 steps 3-6 (volts, before /1000)
+      _xcross(), line 284           port of xcross in ltgs_gui3_5.m
+      out_edges(), line 291         port of outEdges in ltgs_gui3_5.m
+      edge_summary(), line 359      out_edges plus widths and spacing
+  - process_waveforms(), rigol3 block from line 433: builds C225 and C315
+    with reconstruct_local, saves S["out_onset_us"] = {C225, C315} and
+    S["edges"][probe] = level, lead_us[2], trail_us[2], peak_kV[2],
+    width_ns[2], gap_ns, start_to_start_ns (level 0.5, window evt_win on
+    the pulse-relative axis). Peaks taken inside evt_win.
+  - reconstruct_quiet and reconstruct_pre are still in the file, unused.
+  - Nothing changed for the LTGS D-dots, LTGS B-dots, RVMs or Q-switch
+    monitors (confirmed bit for bit, check 1).
+
+ScopeDelayGUI/analysis/process_shots.py
+  - PIPELINE_VERSION = "py-3" (line 42).
+  - SUMMARY_COLS: 9 columns added at the end: c225_p1_width_ns,
+    c225_p2_width_ns, c225_gap_ns, c225_start_to_start_ns,
+    c225_cmd_minus_gap_ns, c315_p1_width_ns, c315_p2_width_ns, c315_gap_ns,
+    c315_start_to_start_ns.
+  - summary_row(), line 273: fills them from S["edges"].
+    c225_cmd_minus_gap_ns = commanded spacing - c225_gap_ns.
+
+ScopeDelayGUI/tests/test_analysis.py
+  - test_late_scope3_record_skips_c225_c315_not_the_shot: the warning is
+    now one per probe ("C225 skipped: ...", "C315 skipped: ..."), so the
+    assertion checks both, and that the new gap columns are empty.
+  - New test_out_edges_on_two_square_pulses: known 50% edges, widths, gap,
+    and the window rule.
+  - New test_output_probe_edges_saved: S["edges"], S["out_onset_us"] and
+    the py-3 summary columns are written.
+  Result: 14 passed (12 existing, 2 new).
+
+logs/shot_timing.py
+  - output_trace() (line 325) now calls pipeline.reconstruct_local, so it
+    is the same method by construction: same onset rule, same two windows,
+    trapezoid integration on the whole record, then cropped to the same
+    2000 ns before / 3500 ns after the first burst as before. Returns V s
+    (was a rectangle-rule sum). New helper _pipeline() (line 316) imports
+    analysis/pipeline.py from the ScopeDelayGUI folder next to logs/.
+  - Its out_edges is unchanged. The comment at line 71 was updated.
+
+ScopeDelayGUI/analysis/plots.py: read, nothing broke, NOT changed.
+
+Not edited: logs/ltgs_gui3_5.m (the MATLAB GUI), process_shots.m.
+
+
+BACKUP
+------
+analysis_backup_py2/ holds, from before any edit:
+  pipeline.py, process_shots.py, plots.py, test_analysis.py, shot_timing.py
+  processed_shots/shot_0034.mat ... shot_0046.mat  (all 13 shots of the
+    session, py-2), shot_summary.csv, summary_cache.json, summary.png
+  session_pngs/shot_00NN_analysis.png  (py-2 analysis figures)
+More than the four .mat files asked for: the edge table needs the py-2
+traces of every ok shot in the session.
+
+
+REPROCESSING
+------------
+python -m analysis.process_shots --session logs/2026.09.24/experiment_log_20260924_170806
+All 13 shots processed: 9 ok (34, 35, 36, 37, 40, 43, 44, 45, 46), 4 no_fire
+(38, 39, 41, 42), no failures. New shot_NNNN.mat files and
+shot_NNNN_analysis.png / _raw.png figures were written.
+
+
+THE FIVE CHECKS (shots 43-46)
+-----------------------------
+1. LTGS D-dots, B-dots, RVMs, Q-switch monitors identical to py-2: PASS.
+   Compared against the py-2 .mat files in the backup, exact equality
+   (NaN = NaN): Dt, Dv, Dv_raw, Bt, Bv, Rt, Rv, Qt, Qv, rvm_gain, rvm_ref,
+   rvm_rampRMS, G, ddot_factor, rvm_factor, G_consistency, tPulse, tEnd,
+   qsw_rise_trig_us, spacing_rvm_ns, spacing_qsw_ns, and peaks LTGS1_Ddot,
+   LTGS2_Ddot, LTGS1_Bdot, LTGS2_Bdot, RVM1, RVM2, t_Qsw1, t_Qsw2.
+   C225_t and C315_t extents also identical. No differences on any shot.
+
+2. C225 baseline: PASS.
+   "Pulse 1" read two ways. The onset t_on (where the zero window is
+   anchored, so the level is zero by construction) and the 50% start of
+   pulse 1.
+                level 60-20 ns before     slope 2.0-0.15 us before
+   shot  onset     t_on     50% start     t_on      50% start      py-2 at 50% start
+   43   0.1539 us  0.000    +0.37 kV      +2.08     +1.98 kV/us    -2.41 kV, +2.19 kV/us
+   44   0.1519 us  0.000    +0.14 kV      -0.23     -0.25 kV/us    -9.56 kV, -17.80 kV/us
+   45   0.1527 us  0.001    -0.02 kV      -1.65     -1.68 kV/us    -7.95 kV, -12.45 kV/us
+   46   0.1527 us  0.003    -0.18 kV      -1.44     -1.42 kV/us    -0.50 kV, -3.08 kV/us
+   (onset on the pulse-relative axis; C315 onsets 0.4 ns later on each shot)
+   All levels within 1 kV, all slopes within 3 kV/us.
+
+3. Widths and commanded minus gap at 50% on C225: PASS, all within 0.3 ns.
+   shot  P1 width (expected)       cmd - gap (expected)    P2 width   gap        start-start
+   43    129.54 ns (129.6) -0.06   71.04 ns (71.1) -0.06   124.76     928.96     1058.50
+   44    129.76 ns (129.8) -0.04   70.18 ns (70.2) -0.02   123.79     429.82      559.58
+   45    129.69 ns (129.7) -0.01   70.09 ns (70.1) -0.01   124.68     229.91      359.61
+   46    129.63 ns (129.6) +0.03   70.55 ns (70.5) +0.05   124.14     129.45      259.08
+   py-2 P1 widths for comparison: 129.93, 131.43, 130.92, 129.69 ns.
+   New C225 peaks inside evt_win: 192.9, 195.7, 203.4, 204.2 kV
+   (py-2 saved 838.8, 834.2, 752.8, 499.3 kV).
+   New C315 peaks: 236.3, 244.7, 249.6, 248.9 kV (py-2 saved 12830, 2507,
+   1063, 4846 kV, all drift).
+
+4. shot_timing.py vs pipeline: PASS. shot_timing.run_shot() run on each
+   shot (no figures). P1 width, P2 width and gap agree to better than
+   1e-8 ns on all four shots (limit 0.05 ns).
+
+5. MATLAB outEdges vs the Python port: DONE, PASS.
+   MATLAB R2025b, command line (matlab -batch). outEdges, xcross and
+   pulseWin are local functions inside ltgs_gui3_5.m, so they cannot be
+   called from outside. Their lines (2057-2116 and 2021-2027) were copied
+   verbatim into scratch files and called from a small driver that crops
+   each trace the way outputCrop does (win +/- 0.2 us). ltgs_gui3_5.m was
+   not edited. Run on the py-3 .mat files of all 9 ok shots, C225 and C315,
+   levels 10, 15, 20, 25, 50, 90 %: 648 values. Largest difference
+   2e-11 ns in time and 3e-12 kV in peak. Both sides return "not found" for
+   the same 26 edges (low levels on shots 34-37, where the trace does not
+   fall to 10-20% between the two pulses). The S["edges"] the pipeline
+   saved at 50% agree with MATLAB to 1e-8 ns.
+
+
+EXPORT FILES
+------------
+shot_00NN_output.csv (43-46)  every sample from 3 us before to 4 us after
+    tPulse. t_record_ns, t_pipeline_us, c225_raw_v, c225_kv_py2, c225_kv_py3,
+    c315_raw_v, c315_kv_py2, c315_kv_py3. raw = rigol3 CH4 / CH3 volts.
+edge_table.csv  9 ok shots x C225, C315 x 10, 15, 20, 25, 50, 90 % x
+    py-2, py-3 = 216 rows. Columns as doEdgeTable in ltgs_gui3_5.m, with
+    Version first. Edges by out_edges on the trace cropped as outputCrop
+    does, window pulseWin. Laser ns by a Python port of qswCross on the
+    saved Q-switch traces (unchanged between versions). Times in us on the
+    pulse-at-0 axis.
+shot_summary_20260924_170806.csv  the session's 13 py-3 summary rows.
+shot_00NN_before_after.png (43-46)  left: C225 2 us before tPulse to
+    tPulse, both versions, y -26..26 kV. Right: 104-152 ns after the 50%
+    start of pulse 1, each version measured from its own start, so the
+    marked crossing sits at that version's width.
+checks.json  the numbers behind checks 1-4.
+make_export_v2.py  the script that made these files (read-only on data).
+source/  unchanged copies of the final pipeline.py, process_shots.py,
+    plots.py, tests/test_analysis.py, logs/shot_timing.py and
+    logs/ltgs_gui3_5.m.
+
+
+WHAT DID NOT GO AS ASKED, OR NEEDS A DECISION
+---------------------------------------------
+- logs/processed_shots/shot_summary.csv was NOT updated. Windows refused to
+  replace it (Access is denied, twice), most likely because it is open in
+  Excel. The new rows are in summary_cache.json, and the pipeline left them
+  in logs/processed_shots/shot_summary.tmp. summary.png was not redrawn
+  either. Close the file and run
+      python -m analysis.process_shots --session logs/2026.09.24/experiment_log_20260924_170806 --no-plots
+  from ScopeDelayGUI. Every shot is cached, so it only rewrites the summary.
+  The session rows in this export were written from the cache with the
+  pipeline's own write_summary().
+- Skips are now per probe, with warnings "C225 skipped: ..." and
+  "C315 skipped: ..." instead of one "C225/C315 skipped". A probe is also
+  skipped if it shows no activity at all or the zero window holds no
+  samples. Both are guards, not part of the method; neither happens on
+  these shots.
+- C315 kV in edge_table.csv is the pipeline value. ltgs_gui3_5.m multiplies
+  C315 by -4.5/-5.5 = 0.818 when it shows it (bdotRescale), so its own
+  edge table would print C315 peak and level kV 0.818 times these. Times,
+  widths and gaps are not affected. The pipeline still builds C315 with
+  bScale = -5.5.
+- edge_table.csv has more decimals than the GUI prints (it prints widths
+  to 0.1 ns), so 0.05 ns differences stay visible.
+- In shot_00NN_output.csv the C315 columns are empty before -0.9 us,
+  because that is where the saved C315 span starts (unchanged, as asked).
+- The other copy at Downloads/ltgs_gui3.m is the older GUI. Only
+  logs/ltgs_gui3_5.m has outEdges.
+- PIPELINE_VERSION py-3 means every other session is redone the next time
+  someone runs a full reprocess. The GUI's automatic analysis after a
+  shot processes only that shot, and it runs this working copy, so the
+  next shot fired is processed with py-3.
+- The rest of the test folder (test_analysis_gui.py and others) does not
+  reference the analysis package and was not run.

@@ -1,6 +1,8 @@
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QFont
 from gui.main_window import ScopeDelayMainWindow
+from pathlib import Path
+import os
 import sys
 
 
@@ -42,10 +44,20 @@ PRESSURE_GAUGE_MAX_PSI = 100.0
 
 # Startup charge voltage (kV) preloaded into the "Set Voltage" box for the WJ
 # power supplies. This is the kV that HV ON commands.
-STARTUP_CHARGE_KV = 60.0
+STARTUP_CHARGE_KV = 65.0
+
+# Startup charge current (mA) preloaded into the "Set Current" box for the WJ
+# power supplies. This is the mA limit Apply Program sends. Max is 6.0 mA.
+STARTUP_CHARGE_MA = 3.0
 
 
 if __name__ == "__main__":
+    # The logs folder and the global shot counter are relative to the working
+    # folder. Always run from "Python Testing" (the folder above this one), so
+    # a launch from a terminal sitting in ScopeDelayGUI still uses
+    # Python Testing\logs instead of starting a second counter at shot 1.
+    os.chdir(Path(__file__).resolve().parent.parent)
+
     app = QApplication(sys.argv)
 
     # Global font and color
@@ -66,6 +78,7 @@ if __name__ == "__main__":
         pressure_gauge_min=PRESSURE_GAUGE_MIN_PSI,
         pressure_gauge_max=PRESSURE_GAUGE_MAX_PSI,
         startup_charge_kv=STARTUP_CHARGE_KV,
+        startup_charge_ma=STARTUP_CHARGE_MA,
         opta_host=OPTA_HOST,
         opta_port=OPTA_PORT,
         opta_poll_ms=OPTA_POLL_MS,

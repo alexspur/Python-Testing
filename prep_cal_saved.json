@@ -1,9 +1,16 @@
 {
   "DS7A232900210": {
-    ":TIMebase:MAIN:OFFSet": "0.000000",
-    ":TIMebase:MAIN:SCALe": "2.000000E-8",
+    ":TIMebase:MAIN:OFFSet": "4.683300E-7",
+    ":TIMebase:MAIN:SCALe": "2.000000E-9",
     ":ACQuire:MDEPth": "1.0000E+06",
     "channel": 4,
     "impedance": "FIFT"
+  },
+  "DS7A233300256": {
+    ":TIMebase:MAIN:OFFSet": "1.840800E-4",
+    ":TIMebase:MAIN:SCALe": "5.000000E-7",
+    ":ACQuire:MDEPth": "1.0000E+06",
+    "channel": 4,
+    "impedance": "OMEG"
   }
 }

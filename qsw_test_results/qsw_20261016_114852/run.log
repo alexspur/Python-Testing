@@ -1,0 +1,40 @@
+Ports (connection_memory.json): dg535 COM4, bnc COM5, laser1 COM8, laser2 COM6
+DG535: A = T0 + 0.000000 us  B = A + 180.975500 us  C = T0 + 0.000000 us  D = C + 181.245800 us  trigger EXTERNAL
+Scope 3: RIGOL TECHNOLOGIES,DS7054,DS7A233300256,00.01.02.00.07
+  trigger source   EXT
+  trigger sweep    AUTO
+  timebase s/div   2.000000E-7
+  memory depth     1.0000E+06
+  CH1 L1 Q-switch  OMEG  2 V/div  display 1
+  CH2 L2 Q-switch  OMEG  2 V/div  display 1
+Laser1 on COM8: ST = 'standby'
+  WOR: I 0 F 4 S 0 Q 4
+  No interlocks present.
+Laser2 on COM6: ST = 'standby'
+  WOR: I 0 F 4 S 0 Q 4
+  No interlocks present.
+
+Plan: rows [1000], 5 shots each, 5 shots, about 1 min.
+  BOTH LASERS FIRE on every shot. Beams blocked, eyewear on, area clear.
+  The BNC 575 fires every output on each shot. In the shot setup its A
+  output drives the Marx DG535: the WJ supplies must be off and the
+  Marx grounded, or A disconnected.
+Results in C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_114852
+
+=== 1000 ns row: B = A + 180.5755 us, D = C + 181.6458 us, D - B = 1070.30 ns ===
+  DG535 written and read back: B = A + 180.575500 us, D = C + 181.645800 us
+  shot  1: L1 184.0814 us  L2 185.1514 us  spacing  1070.04 ns ( -0.26)  OK
+  shot  2: L1 184.0817 us  L2 185.1518 us  spacing  1070.07 ns ( -0.23)  OK
+  shot  3: L1 184.0817 us  L2 185.1518 us  spacing  1070.10 ns ( -0.20)  OK
+  traces saved: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_114852\traces_1000ns.csv
+DG535 B and D restored: B = A + 180.975500 us  D = C + 181.245800 us
+
+RESULTS (spacing = L2 Q-switch - L1 Q-switch at 50 %)
+================================================================================================
+   target      D - B    good  in tol       mean      sd       min       max  mean-cmd   L1 jit   L2 jit
+       ns         ns                         ns      ns        ns        ns        ns       ps       ps
+     1000    1070.30   3/3         3    1070.07    0.03   1070.04   1070.10     -0.23      185      210
+plot: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_114852\traces.png
+plot: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_114852\spacing.png
+summary: C:\Users\ESpurbeck.P3E-HIGHBAY-01\Desktop\LANL Project\GUI\Python Testing\qsw_test_results\qsw_20261016_114852\summary.csv
+time: 0.8 min
