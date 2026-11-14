@@ -19,10 +19,13 @@ import json
 import os
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from calibrate_channel import connect      # noqa: E402
 
-SAVED = "prep_cal_saved.json"
+# Stores live beside this script (tools/calibration/), so the tool reads the
+# same calibration records whatever folder it is started from.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+SAVED = os.path.join(_HERE, "prep_cal_saved.json")
 
 # Queried and restored. Trigger settings are deliberately absent.
 KEYS = [

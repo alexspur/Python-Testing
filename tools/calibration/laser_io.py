@@ -229,7 +229,7 @@ class Laser1:
     """
 
     def __init__(self, port):
-        gui_dir = os.path.join(HERE, "ScopeDelayGUI")
+        gui_dir = os.path.join(os.path.dirname(os.path.dirname(HERE)), "ScopeDelayGUI")
         if gui_dir not in sys.path:
             sys.path.append(gui_dir)
         from PyQt6.QtWidgets import QApplication

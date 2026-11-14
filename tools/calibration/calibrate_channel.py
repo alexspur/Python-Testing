@@ -29,7 +29,7 @@ import time
 
 import numpy as np
 
-sys.path.insert(0, ".")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from edge_timing import edge_time, edge_stats          # noqa: E402
 
 
@@ -201,8 +201,8 @@ def open_bnc(port, assume_yes=False):
     :PULSE0:MODE SING and :PULSE0:STATE ON, which in TRIG/DUAL just re-arms
     it for an external edge and produces no pulse.
     """
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "ScopeDelayGUI"))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "ScopeDelayGUI"))
     from instruments.bnc575 import BNC575Controller, TriggerMode
 
     bnc = BNC575Controller()
