@@ -1,0 +1,4 @@
+# Test and lint tools. Includes the runtime requirements.
+-r requirements.txt
+pytest>=8
+ruff>=0.5
