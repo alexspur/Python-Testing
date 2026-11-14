@@ -35,9 +35,12 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, ".")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-STORE = "fiber_transit.json"
+# Stores live beside this script (tools/calibration/), so the tool reads the
+# same calibration records whatever folder it is started from.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+STORE = os.path.join(_HERE, "fiber_transit.json")
 
 # TTL input thresholds, volts. The TF1 is spec'd only as "TTL Levels", so
 # 2.0 V is the worst-case guaranteed logic-high threshold for TTL families.

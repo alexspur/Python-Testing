@@ -4,7 +4,16 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 
-from utils.connect_memory import scope_resource
+import os
+import sys
+
+# This check moved from ScopeDelayGUI/ to tools/instrument_checks/. Put the
+# app folder on the path so utils.connect_memory still imports. Run it from
+# the repo root so it reads the GUI's connection_memory.json.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "ScopeDelayGUI"))
+
+from utils.connect_memory import scope_resource  # noqa: E402
 
 
 class RigolScope:
