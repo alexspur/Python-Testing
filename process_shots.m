@@ -1,9 +1,18 @@
-function process_shots(logsRoot, force)
+function process_shots(logsRoot, varargin)
 %PROCESS_SHOTS  Process every shot under a logs folder into shot_NNNN.mat files.
 %
 %   process_shots                 run from the logs folder (or a day folder)
 %   process_shots(logsRoot)       point at the logs folder
 %   process_shots(logsRoot, true) reprocess everything
+%
+%   Reprocess only some shots:
+%   process_shots(logsRoot, 'shots', [40 43 44 45 46])
+%   process_shots(logsRoot, 'shots', [40 43], 'stamps', {'20260924_164325'})
+%     'shots'   global shot numbers from the shot log
+%     'stamps'  session time stamps, for old sessions with no shot number.
+%               Every shot in a matching session is reprocessed.
+%   Selected shots are always reprocessed. Other shots are not touched.
+%   Their cached .mat files are only read back for shot_summary.csv.
 %
 %   Works with the current ScopeDelayGUI session layout:
 %     logs/<date>/experiment_log_<ts>/
@@ -28,21 +37,49 @@ function process_shots(logsRoot, force)
 %
 %   A cached .mat is skipped if it is newer than this file, so editing the
 %   pipeline reprocesses everything automatically.
+%
+%   Sept 2026: LTGS1, LTGS2 and C315 B-dots use reconstruct_bdot_sep
+%   (short quiet windows next to the pulse, bScale = -4.5). S.bScale is
+%   saved so ltgs_gui3 knows not to rescale these files.
 
 if nargin < 1 || isempty(logsRoot), logsRoot = pwd; end
-if nargin < 2, force = false; end
+
+% ---- options ----
+force = false; shotSel = []; stampSel = {};
+if ~isempty(varargin) && (islogical(varargin{1}) || isnumeric(varargin{1}))
+    force = logical(varargin{1});
+    varargin(1) = [];
+end
+for a = 1:2:numel(varargin)
+    switch lower(varargin{a})
+        case 'force',  force = logical(varargin{a+1});
+        case 'shots',  shotSel = varargin{a+1};
+        case 'stamps'
+            stampSel = varargin{a+1};
+            if ischar(stampSel) || isstring(stampSel), stampSel = cellstr(stampSel); end
+        otherwise
+            error('process_shots: unknown option %s', varargin{a});
+    end
+end
+useSel = ~isempty(shotSel) || ~isempty(stampSel);
 
 outDir = fullfile(logsRoot, 'processed_shots');
 if ~exist(outDir, 'dir'), mkdir(outDir); end
 
 sessions = find_sessions(logsRoot);
-fprintf('found %d session folders under %s\n\n', numel(sessions), logsRoot);
+fprintf('found %d session folders under %s\n', numel(sessions), logsRoot);
+if useSel
+    fprintf('reprocessing only shots [%s] and stamps {%s}\n', ...
+        num2str(shotSel(:)'), strjoin(stampSel, ', '));
+end
+fprintf('\n');
 
 me = dir([mfilename('fullpath') '.m']);
 if isempty(me), myTime = 0; else, myTime = me(1).datenum; end
 
 summary = {};
 nOK = 0; nOther = 0; nSkip = 0; nFail = 0;
+foundShots = []; foundStamps = {};
 
 for i = 1:numel(sessions)
     sdir  = sessions{i};
@@ -61,9 +98,22 @@ for i = 1:numel(sessions)
             key = sprintf('shot_%04d', sh.shot_number);
         end
         matFile = fullfile(outDir, [key '.mat']);
-
         mf = dir(matFile);
-        if ~force && ~isempty(mf) && mf(1).datenum > myTime
+
+        if useSel
+            pick = any(sh.shot_number == shotSel) || any(strcmp(stamp, stampSel));
+            if ~pick
+                % not selected: leave the file alone, keep it in the summary
+                if ~isempty(mf)
+                    S = load(matFile);
+                    summary(end+1, :) = summary_row(S); %#ok<AGROW>
+                    nSkip = nSkip + 1;
+                end
+                continue;
+            end
+            if ~isnan(sh.shot_number), foundShots(end+1) = sh.shot_number; end %#ok<AGROW>
+            if any(strcmp(stamp, stampSel)), foundStamps{end+1} = stamp; end %#ok<AGROW>
+        elseif ~force && ~isempty(mf) && mf(1).datenum > myTime
             S = load(matFile);
             summary(end+1, :) = summary_row(S); %#ok<AGROW>
             nSkip = nSkip + 1;
@@ -115,9 +165,9 @@ for i = 1:numel(sessions)
         switch S.status
             case 'ok'
                 nOK = nOK + 1;
-                fprintf('%s (%s): OK  D %0.f/%0.f  B %0.f/%0.f kV  spacing cmd %s / RVM %s / Qsw %s ns\n', ...
+                fprintf('%s (%s): OK  D %0.f/%0.f  B %0.f/%0.f  C315 %0.f kV  spacing cmd %s / RVM %s / Qsw %s ns\n', ...
                     key, stamp, getpk(S,'LTGS1_Ddot'), getpk(S,'LTGS2_Ddot'), ...
-                    getpk(S,'LTGS1_Bdot'), getpk(S,'LTGS2_Bdot'), ...
+                    getpk(S,'LTGS1_Bdot'), getpk(S,'LTGS2_Bdot'), getpk(S,'C315_Bdot'), ...
                     numtxt(S.settings.pulse_spacing_cmd_ns), ...
                     numtxt(S.spacing_rvm_ns), numtxt(S.spacing_qsw_ns));
             case 'failed'
@@ -130,8 +180,19 @@ for i = 1:numel(sessions)
     end
 end
 
+if useSel
+    notFound = setdiff(shotSel, foundShots);
+    if ~isempty(notFound)
+        fprintf(2, 'shot numbers not found in any shot log: %s\n', num2str(notFound(:)'));
+    end
+    badStamps = setdiff(stampSel, foundStamps);
+    if ~isempty(badStamps)
+        fprintf(2, 'stamps not found: %s\n', strjoin(badStamps, ', '));
+    end
+end
+
 write_summary(fullfile(outDir, 'shot_summary.csv'), summary);
-fprintf(['\ndone: %d processed, %d dry or missing, %d failed, %d cached\n' ...
+fprintf(['\ndone: %d processed, %d dry or missing, %d failed, %d cached or untouched\n' ...
          'summary: %s\n'], nOK, nOther, nFail, nSkip, ...
          fullfile(outDir, 'shot_summary.csv'));
 end
@@ -357,7 +418,7 @@ row = { ...
     getpk(S,'t_Qsw1'), getpk(S,'t_Qsw2'), ...
     vecget(S, 'rvm_gain', 1), vecget(S, 'rvm_gain', 2), ...
     scalarget(S, 'G_consistency'), ...
-    st.master_interlock_pass, S.error};
+    st.master_interlock_pass, scalarget(S, 'bScale'), S.error};
 end
 
 
@@ -368,7 +429,7 @@ hdr = {'shot_number','stamp','session_shot_index','datetime','status', ...
        'LTGS1_Ddot_kV','LTGS2_Ddot_kV','LTGS1_Bdot_kV','LTGS2_Bdot_kV', ...
        'C225_Ddot_kV','C315_Bdot_kV','RVM1_kV','RVM2_kV', ...
        't_Qsw1_us','t_Qsw2_us','rvm_gain_1','rvm_gain_2','G_consistency', ...
-       'master_interlock_pass','error'};
+       'master_interlock_pass','bScale','error'};
 fid = fopen(f, 'w');
 if fid < 0, warning('could not write %s', f); return; end
 fprintf(fid, '%s\n', strjoin(hdr, ','));
@@ -415,7 +476,8 @@ end
 
 %% ===================== waveform pipeline =====================
 function S = process_waveforms(fr, fd, f3)
-% The July double-pulse pipeline, unchanged in its math. Time axes in us,
+% The July double-pulse pipeline for the D-dots, C225 and RVMs. The three
+% B-dots use the Sept 2026 short-window method. Time axes in us,
 % pulse 1 at t = 0.
 %
 % CONFIRM BEFORE TRUSTING NEW SHOTS: channel map and probe calibration are
@@ -431,7 +493,7 @@ CF_CH4 = -6.70e8;    % CH4 = LTGS1-007 B-dot, FC016
 CF3_CH3 = -6.96e8;   % CH3 = C315 B-dot, FC027
 CF3_CH4 = 1.56e11;   % CH4 = C225 D-dot, FC032
 geom    = 2*pi*7.5;
-bScale  = -5.5;
+bScale  = -4.5;      % was -5.5 before Sept 2026
 % rigol1 RVM dividers
 DIV_CH1 = 19588.6/20000;
 DIV_CH2 = 19970.7/20000;
@@ -457,17 +519,20 @@ droop_pre  = base_win;
 droop_post = [tEnd+3e-6, min(tEnd+8e-6, td(end))];
 int_win    = [tPulse-6e-6, droop_post(2)];
 evt_win    = [tPulse-1e-6, tEnd+1e-6];
-b_zero_win = [tPulse-0.3e-6, tPulse-0.05e-6];
-b_int_win  = [b_zero_win(1), min(tEnd+8e-6, td(end))];
 r3_pre  = [max(tPulse-2e-6, t3(1)+0.1e-6), tPulse-0.3e-6];
 c3_zero = [max(tPulse-0.9e-6, t3(1)), tPulse-0.1e-6];
-c3_int  = [c3_zero(1), t3(end)];
+
+% B-dot quiet windows, Sept 2026 (same as analysis/pipeline.py)
+b_pre  = [tPulse-1.0e-6,  tPulse-0.05e-6];
+b_post = [tEnd+0.3e-6,    tEnd+1.3e-6];
 
 S = struct();
 S.tPulse = tPulse; S.tEnd = tEnd;
+S.bScale = bScale;
+S.bdot_method = 'sept2026_short_windows';
 S.peaks = struct();
 
-% ---- D-dots (rigol2) ----
+% ---- D-dots (rigol2), July method ----
 dcols = [4 2]; dCF = [CF_CH3 CF_CH1];
 dtag  = {'LTGS1_Ddot','LTGS2_Ddot'};
 S.Dt = cell(1,2); S.Dv = cell(1,2); S.Dv_raw = cell(1,2);
@@ -480,22 +545,20 @@ for k = 1:2
     S.Dv_raw{k} = Vr/1e3;
 end
 
-% ---- B-dots (rigol2), Z*I ----
+% ---- B-dots (rigol2), Z*I, Sept 2026 method ----
 bcols = [5 3]; bCF = [CF_CH4 CF_CH2]*geom*bScale;
 btag  = {'LTGS1_Bdot','LTGS2_Bdot'};
 S.Bt = cell(1,2); S.Bv = cell(1,2);
 for k = 1:2
-    v = remove_offset_step(td, Md(:,bcols(k)), base_win, droop_post, tPulse, tEnd);
-    im = (td >= b_int_win(1)) & (td <= b_int_win(2));
-    ti = td(im); vi = v(im);
-    Vr = reconstruct(ti, vi, bCF(k), b_zero_win, b_zero_win, droop_post);
+    [ti, Vr] = reconstruct_bdot_sep(td, Md(:,bcols(k)), bCF(k), ...
+                                    b_pre, b_post, tPulse, tEnd);
     S.Bt{k} = (ti - tPulse)*1e6;
     S.Bv{k} = Vr/1e3;
     wm = (ti>evt_win(1)) & (ti<evt_win(2));
     S.peaks.(btag{k}) = max(abs(Vr(wm)))/1e3;
 end
 
-% ---- rigol3: C225 quiet-mask cubic, C315 pre-only ----
+% ---- rigol3: C225 quiet-mask cubic (unchanged) ----
 v = M3(:,5);
 bm = (t3 > r3_pre(1)) & (t3 < r3_pre(2));
 v  = v - mean(v(bm));
@@ -507,14 +570,14 @@ S.C225_t = (t3 - tPulse)*1e6;
 S.C225   = C225/1e3;
 S.peaks.C225_Ddot = max(abs(C225))/1e3;
 
-v = M3(:,4);
-v = v - mean(v(bm));
-im3 = (t3 >= c3_int(1)) & (t3 <= c3_int(2));
-ti3 = t3(im3);
-C315 = reconstruct_pre(ti3, v(im3), CF3_CH3*geom*bScale, c3_zero);
+% ---- rigol3: C315 B-dot, Sept 2026 method ----
+% Trace stops at the end of the after window. Peak over the pulse only.
+[ti3, C315] = reconstruct_bdot_sep(t3, M3(:,4), CF3_CH3*geom*bScale, ...
+                                   b_pre, b_post, tPulse, tEnd);
 S.C315_t = (ti3 - tPulse)*1e6;
 S.C315   = C315/1e3;
-S.peaks.C315_Bdot = max(abs(C315))/1e3;
+wm = (ti3>evt_win(1)) & (ti3<evt_win(2));
+S.peaks.C315_Bdot = max(abs(C315(wm)))/1e3;
 
 % ---- rigol3 Q-switch monitors (CH1 = Laser1, CH2 = Laser2) ----
 qcols = [2 3]; qtag = {'Qsw1','Qsw2'};
@@ -610,7 +673,7 @@ end
 
 %% ===================== pipeline helpers =====================
 % Same math as the July pipeline, except the gate_qsw pulse height (see
-% below). gate_qsw finds the longest high run with
+% below) and reconstruct_bdot_sep. gate_qsw finds the longest high run with
 % diff() instead of a sample-by-sample loop: same result, much faster on
 % 1,000,000-point records.
 function [vg, tRise] = gate_qsw(t, v, min_dur, pad, thr_frac)
@@ -675,6 +738,37 @@ off(t > tEnd) = vq;
 vc = v - off;
 end
 
+function [ti, Vr] = reconstruct_bdot_sep(t, v, CF, pre_win, post_win, tPulse, tEnd)
+% Sept 2026 B-dot method. Times in seconds.
+%   1. Offset: mean of pre_win before the pulse, mean of post_win after,
+%      linear ramp across the pulse. If the record ends before post_win,
+%      subtract the pre_win mean only.
+%   2. Cut the trace to pre_win(1) .. post_win(2).
+%   3. Integrate.
+%   4. Fit one line to the integral over both quiet windows and subtract.
+%   5. Zero on pre_win.
+%   6. Scale by CF (CF already includes geom and bScale).
+havePost = t(end) >= post_win(2);
+if havePost
+    v = remove_offset_step(t, v, pre_win, post_win, tPulse, tEnd);
+    tStop = post_win(2);
+else
+    v = v - mean(v((t > pre_win(1)) & (t < pre_win(2))));
+    tStop = t(end);
+end
+im = (t >= pre_win(1)) & (t <= tStop);
+ti = t(im); vi = v(im);
+integ = cumtrapz(ti, vi);
+zm = (ti > pre_win(1)) & (ti < pre_win(2));
+if havePost
+    pm = zm | ((ti > post_win(1)) & (ti < post_win(2)));
+    [p, ~, mu] = polyfit(ti(pm), integ(pm), 1);
+    integ = integ - polyval(p, ti, [], mu);
+end
+integ = integ - mean(integ(zm));
+Vr = CF * integ;
+end
+
 function Vr = reconstruct(ti, vi, CF, zero_win, droop_pre, droop_post)
 integ = cumtrapz(ti, vi);
 pm = ((ti>droop_pre(1))&(ti<droop_pre(2))) | ((ti>droop_post(1))&(ti<droop_post(2)));
@@ -693,11 +787,4 @@ integ = integ - polyval(p, ti, [], mu);
 zm = (ti > zero_win(1)) & (ti < zero_win(2));
 integ = integ - mean(integ(zm));
 Vr = CF * integ;
-end
-
-function Ir = reconstruct_pre(ti, vi, CF, pre_win)
-integ = cumtrapz(ti, vi);
-zm = (ti > pre_win(1)) & (ti < pre_win(2));
-p  = polyfit(ti(zm), integ(zm), 1);
-Ir = CF * (integ - polyval(p, ti));
 end
