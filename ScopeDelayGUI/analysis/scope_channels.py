@@ -181,6 +181,18 @@ def output_probes(wiring):
     return sorted(out)
 
 
+def raw_channels(wiring):
+    """[(signal, scope, column)] for every kind-raw channel except the scope 1
+    trigger lines, which have their own fields. Saved into the .mat as
+    raw_<signal>_t / raw_<signal>_v for ltgs_gui4 to plot and integrate."""
+    out = []
+    for k in (1, 2, 3):
+        for ch, entry in wiring[f"rigol{k}"].items():
+            if entry and entry[1] == "raw" and entry[0] not in ("TrigMon", "TrigOut"):
+                out.append((entry[0], k, int(ch)))
+    return sorted(out)
+
+
 def channel_names(wiring):
     """{"rigol1": [4 names], ...}, "" for an unused channel. Saved into the
     .mat as S.channels and used for the raw-channel figure titles."""
