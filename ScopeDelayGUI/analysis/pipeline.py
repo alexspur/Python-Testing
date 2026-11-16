@@ -18,7 +18,7 @@ from scipy.ndimage import maximum_filter1d
 # Which probe is on which scope channel, and each probe's calibration
 # factor, live in scope_channels.py (one entry per wiring, by shot number).
 from .scope_channels import (  # noqa: E402,F401  re-exported for callers
-    PROBES, WIRINGS, channel_names, output_probes, scope_channel, wiring_for,
+    PROBES, WIRINGS, channel_names, output_probes, raw_channels, scope_channel, wiring_for,
 )
 
 # B-dot geometry and scale, the same for every B-dot probe.
@@ -448,6 +448,19 @@ def process_waveforms(fr, fd, f3, cal=CAL, wiring=None):
     else:
         S["Trig_t"], S["TrigMon_v"], S["TrigOut_v"] = np.array([]), np.array([]), np.array([])
         pk["t_TrigOut"] = np.nan
+
+    # ---- raw channels (uncalibrated probes, CVR, ...): volts as recorded,
+    # trimmed to the analysis span, time in us from pulse 1. Nothing is
+    # subtracted or scaled. ltgs_gui4 plots them and integrates them with a
+    # factor typed in there; once a probe has a certificate, change its kind
+    # in scope_channels.py and it is processed like the others instead.
+    S["raw_channels"] = []
+    for name, k, col in raw_channels(wiring):
+        t = M[k][:, 0]
+        im = (t >= int_win[0]) & (t <= int_win[1])
+        S["raw_channels"].append(name)
+        S[f"raw_{name}_t"] = (t[im] - tPulse) * 1e6
+        S[f"raw_{name}_v"] = M[k][im, col]
 
     # ---- RVM-referenced baseline correction for the D-dots ----
     S["rvm_gain"] = np.zeros(2)
