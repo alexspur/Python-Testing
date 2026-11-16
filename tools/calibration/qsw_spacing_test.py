@@ -45,8 +45,9 @@ from types import SimpleNamespace
 
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-GUI_DIR = os.path.join(HERE, "ScopeDelayGUI")
+HERE = os.path.dirname(os.path.abspath(__file__))          # tools/calibration
+REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
+GUI_DIR = os.path.join(REPO_ROOT, "ScopeDelayGUI")
 sys.path.insert(0, HERE)
 sys.path.append(GUI_DIR)
 
@@ -77,7 +78,7 @@ DG_GPIB = 15
 RESTORE_DG535 = True      # put B and D back as found when the test ends
 SAVE_BEFORE_US = 1.0      # saved traces start this long before the L1 edge
 SAVE_AFTER_US = 3.0       # and end this long after the L2 edge
-OUT_ROOT = os.path.join(HERE, "qsw_test_results")
+OUT_ROOT = os.path.join(REPO_ROOT, "data", "qsw_test_results")
 
 DG_MATCH_S = 1e-11        # readback must equal what was written (the GUI's rule)
 DG_TRIES = 3              # DG535 write-and-read-back attempts before stopping
@@ -662,7 +663,9 @@ def main():
         print(f"No table row for {unknown}. Rows: {list(TABLE)}")
         return 1
 
-    os.chdir(HERE)            # connection_memory.json and calibrate_channel's imports
+    # connection_memory.json is the GUI's file at the repo root. The sibling
+    # imports (calibrate_channel, edge_timing) come from HERE on sys.path.
+    os.chdir(REPO_ROOT)
     from PyQt6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])   # noqa: F841, LaserColumn needs it
     from calibrate_channel import SCOPE_IPS, connect, open_bnc

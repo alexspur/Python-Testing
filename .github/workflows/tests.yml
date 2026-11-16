@@ -1,0 +1,56 @@
+name: Tests
+
+# Hardware-independent checks only. No job opens a serial port, a VISA
+# resource or a Modbus connection: the GUI tests run with every
+# auto-connect flag off, and tools/ scripts that touch hardware at import
+# are never imported (see tools/README.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Lint (errors only)
+        run: ruff check .
+
+      - name: Byte-compile application and tools
+        run: python -m compileall -q ScopeDelayGUI tools
+
+      - name: Run tests
+        run: python -m pytest

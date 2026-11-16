@@ -1,13 +1,37 @@
-﻿logs/
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Data written by the GUI and the analysis. Shot data stays out of git.
+# Records that belong in git are added with "git add -f" (see data/README.md).
+logs/
+processed_shots/
+replay_output/
+VacuumChamberCalibration_data/
+ScopeDelayGUI/analysis/pulse_spacing_out/
 *.csv
 *.mat
 *.fig
+*.tdms
+
+# MATLAB autosave
+*.asv
+
+# Archives and media
 *.zip
 *.7z
 *.mp4
 *.avi
-*.tdms
-__pycache__/
-*.pyc
-.venv/
-replay_output/
+
+# Editors and OS
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

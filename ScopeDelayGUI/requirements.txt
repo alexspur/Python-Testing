@@ -1,10 +1,2 @@
-PyQt6
-pyqtgraph
-pyserial
-pyvisa
-numpy
-pandas
-pymodbus>=3.6,<4
-openpyxl
-scipy
-matplotlib
+# Kept for existing lab instructions. The list lives at the repo root.
+-r ../requirements.txt

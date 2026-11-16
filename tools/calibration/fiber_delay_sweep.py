@@ -50,9 +50,12 @@ import time
 
 import numpy as np
 
-sys.path.insert(0, ".")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-STORE = "fiber_sweep.json"
+# Stores live beside this script (tools/calibration/), so the tool reads the
+# same calibration records whatever folder it is started from.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+STORE = os.path.join(_HERE, "fiber_sweep.json")
 
 FIBER_NS_PER_M = 4.90
 FIBER_NS_PER_M_RANGE = (4.85, 4.98)
