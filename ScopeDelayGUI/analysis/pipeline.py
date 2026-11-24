@@ -18,7 +18,8 @@ from scipy.ndimage import maximum_filter1d
 # Which probe is on which scope channel, and each probe's calibration
 # factor, live in scope_channels.py (one entry per wiring, by shot number).
 from .scope_channels import (  # noqa: E402,F401  re-exported for callers
-    PROBES, WIRINGS, channel_names, output_probes, raw_channels, scope_channel, wiring_for,
+    LOAD_OHM, PROBES, WIRINGS, channel_names, output_probes, raw_channels, scope_channel,
+    wiring_for,
 )
 
 # B-dot geometry and scale, the same for every B-dot probe.
@@ -436,6 +437,23 @@ def process_waveforms(fr, fd, f3, cal=CAL, wiring=None):
         S["Rv"][k] = Vr[imr] / 1e3
         pk[tag] = np.abs(Vr[inwin(t, evt_win)]).max() / 1e3
 
+    # ---- CVR (empty when the wiring has none): baseline-subtracted scope
+    # volts times the probe factor (A per V) gives amps; times LOAD_OHM the
+    # voltage across the load stack, kV. Same span as the RVM traces.
+    cv = chan("CVR")
+    if cv is None:
+        S["CVR_t"], S["CVR_A"], S["CVR_kV"] = np.array([]), np.array([]), np.array([])
+        pk["CVR_A"], pk["CVR_kV"] = np.nan, np.nan
+    else:
+        t, v, apv = cv
+        imc = (t >= int_win[0]) & (t <= int_win[1])
+        I = apv * (v - v[inwin(t, base_win)].mean())
+        S["CVR_t"] = (t[imc] - tPulse) * 1e6
+        S["CVR_A"] = I[imc]
+        S["CVR_kV"] = I[imc] * LOAD_OHM / 1e3
+        pk["CVR_A"] = np.abs(I[inwin(t, evt_win)]).max()
+        pk["CVR_kV"] = pk["CVR_A"] * LOAD_OHM / 1e3
+
     # ---- trigger signals, raw volts as recorded, same span as the RVMs
     # (both on scope 1): trig monitor and trig gen out. For viewing, plus
     # the time of the trig gen out edge (us from pulse 1, NaN if no pulse).
@@ -449,7 +467,7 @@ def process_waveforms(fr, fd, f3, cal=CAL, wiring=None):
         S["Trig_t"], S["TrigMon_v"], S["TrigOut_v"] = np.array([]), np.array([]), np.array([])
         pk["t_TrigOut"] = np.nan
 
-    # ---- raw channels (uncalibrated probes, CVR, ...): volts as recorded,
+    # ---- raw channels (uncalibrated probes, ...): volts as recorded,
     # trimmed to the analysis span, time in us from pulse 1. Nothing is
     # subtracted or scaled. ltgs_gui4 plots them and integrates them with a
     # factor typed in there; once a probe has a certificate, change its kind

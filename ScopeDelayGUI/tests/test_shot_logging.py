@@ -1918,6 +1918,68 @@ class TestGuiShotLogging(GuiWindowTestCase):
         self.assertTrue(Path(self.dl.scope_read_path(1, 2)).exists(),
                         "the second Read must get its own _read02 file")
 
+    # ------------------------------------- captures that are not the shot
+    # 16 Nov 2026, shots 72 and 78: after the shot the scopes were armed
+    # again, triggered on their own with no Fire, and the GUI saved that
+    # capture over the shot's rigol<N>_<session ts>.csv files.
+    def _land_and_save(self, n):
+        """A capture of n points lands on scope 1 and is saved. Returns the
+        path it was written to."""
+        self.win.rigol1 = FakeScope()
+        self.win.on_four_channel_capture_finished(self._capture(n), "Rigol #1", 1)
+        self.win._captures_dirty = True
+        saved, failed = self.win._save_captures_sync()
+        self.assertEqual(failed, [])
+        self.assertEqual(len(saved), 1)
+        return Path(saved[0])
+
+    def test_a_capture_with_no_fire_since_the_last_one_gets_a_cap_file(self):
+        self.win.shot_logger.session_shot_index = 1       # a Fire claimed shot 1
+        shot_file = self._land_and_save(1000)
+        self.assertEqual(shot_file, Path(self.dl.scope_export_path(1, shot_index=1)))
+        before = shot_file.read_bytes()
+
+        extra = self._land_and_save(500)                   # no new Fire in between
+
+        self.assertTrue(extra.name.endswith("_cap01.csv"), extra.name)
+        self.assertTrue(extra.exists(), "the extra capture must get its own file")
+        self.assertEqual(shot_file.read_bytes(), before,
+                         "the shot's file must not be rewritten by a later capture")
+        self.assertEqual(self.win.system_state.get("rigol1")["file"], extra.name)
+
+    def test_the_first_capture_after_the_next_fire_is_a_shot_file_again(self):
+        self.win.shot_logger.session_shot_index = 1
+        self._land_and_save(1000)
+        self._land_and_save(500)                           # _cap01
+        self.win.shot_logger.session_shot_index = 2        # next Fire
+        third = self._land_and_save(700)
+        self.assertEqual(third, Path(self.dl.scope_export_path(1, shot_index=2)))
+        self.assertIn("_shot02", third.name)
+        fourth = self._land_and_save(300)                  # and again no Fire
+        self.assertTrue(fourth.name.endswith("_cap02.csv"), fourth.name)
+
+    def test_a_capture_before_the_first_fire_never_takes_shot_1s_filename(self):
+        """A scope tripped before any Fire this session used to be saved as
+        rigol<N>_<ts>.csv; shot 1's capture then landed on the same name."""
+        self.win.shot_logger.session_shot_index = 0
+        early = self._land_and_save(400)
+        self.assertTrue(early.name.endswith("_cap01.csv"), early.name)
+        self.win.shot_logger.session_shot_index = 1        # first Fire
+        shot = self._land_and_save(1000)
+        self.assertEqual(shot, Path(self.dl.scope_export_path(1, shot_index=1)))
+        self.assertTrue(early.exists() and shot.exists())
+        self.assertNotEqual(early, shot)
+
+    def test_resaving_the_same_capture_rewrites_its_own_file_only(self):
+        """Auto-save followed by save-on-close writes the same capture twice;
+        the second write must go to the same file, not to a new _cap."""
+        self.win.shot_logger.session_shot_index = 1
+        first = self._land_and_save(1000)
+        self.win._captures_dirty = True
+        saved, failed = self.win._save_captures_sync()
+        self.assertEqual((failed, [Path(p) for p in saved]), ([], [first]))
+        self.assertFalse(Path(self.dl.scope_capture_path(1, 1)).exists())
+
     # ----------------------------------------------------- laser prep gate
     # _arm_fire_path() preps the lasers; each test below then adjusts that.
     def test_fire_is_blocked_until_the_lasers_are_prepped(self):

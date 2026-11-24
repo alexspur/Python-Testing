@@ -765,7 +765,7 @@ class ShotReplayWindow(QMainWindow):
             it = self.tbl_cal.item(r, 2)
             if it and it.text().strip():
                 keep[self.tbl_cal.item(r, 0).text()] = it.text().strip()
-        cal = R.P.CAL
+        cal = R.calibration()          # CAL (geom, bScale) plus every probe factor
         self.tbl_cal.blockSignals(True)
         self.tbl_cal.setRowCount(len(cal))
         for i, (k, v) in enumerate(cal.items()):
@@ -801,7 +801,7 @@ class ShotReplayWindow(QMainWindow):
         differ from the code; '' when it ran on the code values."""
         if res is None or not res.cal_used:
             return ""
-        code = R.P.CAL
+        code = R.calibration()
         return ", ".join(f"{k} = {v:.6g} (code {code[k]:.6g})"
                          for k, v in res.cal_used.items()
                          if k in code and v != code[k])
@@ -810,7 +810,7 @@ class ShotReplayWindow(QMainWindow):
         """Highlight overridden rows and say whether the latest run used them."""
         if not hasattr(self, "lbl_cal"):
             return
-        code = R.P.CAL
+        code = R.calibration()
         pending = {k: v for k, v in self.cal_overrides().items() if v != code.get(k)}
         self.tbl_cal.blockSignals(True)
         for r in range(self.tbl_cal.rowCount()):
