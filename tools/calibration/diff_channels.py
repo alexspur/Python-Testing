@@ -26,12 +26,13 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import time
 
 import numpy as np
 
-sys.path.insert(0, ".")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from calibrate_channel import connect, read_channel, arm_and_wait   # noqa: E402
 from edge_timing import edge_time, edge_stats                       # noqa: E402
 

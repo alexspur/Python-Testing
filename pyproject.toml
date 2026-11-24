@@ -1,0 +1,54 @@
+[project]
+name = "ltgs-scope-delay-control"
+version = "0.1.0"
+description = "Control, data capture and shot analysis for the P3E laser-triggered gas switch pulsed-power test stand"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Ethan Spurbeck" }]
+dependencies = [
+    "PyQt6>=6.5",
+    "pyqtgraph>=0.13",
+    "pyserial>=3.5",
+    "pyvisa>=1.13",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pymodbus>=3.6,<4",
+    "openpyxl>=3.1",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+tools = ["python-pptx>=0.6"]   # tools/post_test_analysis/create_powerpoint.py
+
+# The application runs from source (python ScopeDelayGUI/main.py). Its
+# top-level packages (gui, utils, instruments, analysis) are not installed
+# into site-packages. `pip install .[dev]` installs the dependencies only.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
+
+[tool.pytest.ini_options]
+# Only the real test suite. Never collect the hardware scripts in tools/,
+# whose names (qsw_spacing_test.py) would otherwise match.
+testpaths = ["ScopeDelayGUI/tests"]
+pythonpath = ["ScopeDelayGUI"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["archive", "firmware"]
+
+[tool.ruff.lint]
+# Errors only: syntax errors, undefined names and similar. Style is not
+# enforced, so existing code does not need reformatting.
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.ruff.lint.per-file-ignores]
+# anchor_d is set on the first pass of the sweep loop before it is read.
+"tools/calibration/fiber_delay_sweep.py" = ["F821"]

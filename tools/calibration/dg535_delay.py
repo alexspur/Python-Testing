@@ -44,10 +44,13 @@ import time
 
 import numpy as np
 
-sys.path.insert(0, ".")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-STORE = "dg535_delay.json"
-CAL = "timing_cal.json"
+# Stores live beside this script (tools/calibration/), so the tool reads the
+# same calibration records whatever folder it is started from.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+STORE = os.path.join(_HERE, "dg535_delay.json")
+CAL = os.path.join(_HERE, "timing_cal.json")
 
 TAU_BNC_TO_DG = 1.455      # BNC575 chA -> DG535 EXT TRIG, measured
 CH3_CH4_SKEW = -0.0176     # measured CH3 - CH4 front-end skew, scope 1, ns

@@ -47,8 +47,10 @@ from PyQt6.QtWidgets import (
 
 RIGOL3_SERIAL = "DS7A233300256"     # from *IDN? in the GUI session logs
 
-OUT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "VacuumChamberCalibration_data")
+# Output stays at the repo root, where it was before the script moved to
+# tools/calibration/.
+OUT_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "VacuumChamberCalibration_data")
 
 DATA_TIMEOUT_MS = 30000      # one 250k-point chunk is far under this on USB
 QUERY_TIMEOUT_MS = 3000      # settings answer in ms, or never
