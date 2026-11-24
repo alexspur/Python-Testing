@@ -322,6 +322,16 @@ class ScopeDelayMainWindow(QMainWindow):
         self._read_counts = {}
         self._read_workers = []
         self._read_export_points = {}
+        # Where each scope's held capture will be written, decided once when
+        # the capture lands (_assign_capture_path) and reused by every save
+        # of it. Only the first capture a scope delivers after a Fire claimed
+        # a session shot index is that shot's capture and gets the shot's
+        # filename. Any other capture (re-armed and tripped by noise, an
+        # external trigger, anything before the first Fire of the session)
+        # goes to rigol<N>_<ts>_cap<NN>.csv, so it can never replace a shot.
+        self._capture_paths = {}          # scope_id -> path of the held capture
+        self._capture_shot_index = {}     # scope_id -> session index its shot capture served
+        self._cap_counts = {}             # scope_id -> number of _cap files so far
         # Monotonic 'begin' stamp of each scope's last capture, so the export
         # completion can be placed on the same timeline as the worker's stamps.
         self._capture_t0 = {}
@@ -1392,6 +1402,59 @@ class ScopeDelayMainWindow(QMainWindow):
         return any(w is not None and w.isRunning()
                    for w in (getattr(self, "export_workers", None) or []))
 
+    def _assign_capture_path(self, scope_id, name=None):
+        """Decide, as a capture lands, which file it will be saved to.
+
+        The shot's filename (data_logger.scope_export_path for the current
+        session shot index) goes only to the first capture a scope delivers
+        after a Fire claimed that index. Everything else is written as
+        rigol<N>_<ts>_cap<NN>.csv:
+          - a second capture under the same index: the scope was re-armed
+            after the shot and triggered with no Fire (noise, an external
+            trigger). This is how shots 72 and 78 were overwritten on
+            16 Nov 2026.
+          - a capture before the first Fire of the session (index 0): not a
+            GUI shot, so it must not sit on the name shot 1 will use.
+          - the shot's file already exists: never overwrite it.
+        Returns the path and remembers it for every later save of this
+        capture, so a re-save (auto-save, then save on close) rewrites its
+        own file and nothing else.
+        """
+        idx = self.shot_logger.session_shot_index
+        label = name or f"Rigol #{scope_id}"
+        shot_path = Path(self.data_logger.scope_export_path(scope_id, shot_index=idx))
+        reason = None
+        if not idx:
+            reason = "no Fire yet this session"
+        elif self._capture_shot_index.get(scope_id) == idx:
+            reason = "no Fire since this scope's last capture"
+        elif shot_path.exists():
+            reason = f"{shot_path.name} already exists"
+        if reason is None:
+            self._capture_shot_index[scope_id] = idx
+            path = str(shot_path)
+        else:
+            n = self._cap_counts.get(scope_id, 0) + 1
+            self._cap_counts[scope_id] = n
+            path = self.data_logger.scope_capture_path(scope_id, n)
+            self.log(f"[CAPTURE] {label}: {reason} - this capture is not a shot; "
+                     f"saving it as {Path(path).name}, the shot's file is left alone")
+            self.data_logger.log_info(
+                f"Rigol{scope_id}", f"capture with {reason} saved as {Path(path).name}")
+        self._capture_paths[scope_id] = path
+        return path
+
+    def _export_path_for(self, scope_id):
+        """The file a scope's held capture is written to. Captures that
+        arrived through on_four_channel_capture_finished already have one;
+        anything placed in captured_scopes directly (tests, older callers)
+        gets the shot's filename for the current index, as before."""
+        path = self._capture_paths.get(scope_id)
+        if path is None:
+            path = self.data_logger.scope_export_path(
+                scope_id, shot_index=self.shot_logger.session_shot_index)
+        return path
+
     def _auto_save_fire(self):
         """Auto-save timer elapsed — silently write captures if still unsaved."""
         if not self._captures_dirty or not self.captured_scopes:
@@ -1447,8 +1510,7 @@ class ScopeDelayMainWindow(QMainWindow):
 
         shot = self._current_shot_number if self._current_shot_number else ''
         for scope_id in sorted(self.captured_scopes):
-            path = self.data_logger.scope_export_path(
-                scope_id, shot_index=self.shot_logger.session_shot_index)
+            path = self._export_path_for(scope_id)
 
             # An export with no samples is a failure, not a saved file. It
             # used to write a headers-only CSV, report it as saved and clear
@@ -2962,6 +3024,7 @@ class ScopeDelayMainWindow(QMainWindow):
             # Store data for export
             self.current_data = data
             self.captured_scopes[scope_id] = data
+            self._assign_capture_path(scope_id, name)
             self._mark_captures_dirty()
 
         # Plot the DISPLAY copy - two points per pixel column, min and max
@@ -3010,8 +3073,7 @@ class ScopeDelayMainWindow(QMainWindow):
             self.system_state.update(f"rigol{scope_id}", {
                 "armed": False,
                 "capture_ok": ok,
-                "file": Path(self.data_logger.scope_export_path(
-                    scope_id, shot_index=self.shot_logger.session_shot_index)).name,
+                "file": Path(self._export_path_for(scope_id)).name,
             }, source=SOURCE_READBACK)
 
         if ok:
@@ -3938,8 +4000,7 @@ class ScopeDelayMainWindow(QMainWindow):
         shot = self._current_shot_number if self._current_shot_number else ''
         for scope_id in sorted(self.captured_scopes):
             data = self.captured_scopes[scope_id]
-            path = self.data_logger.scope_export_path(
-                scope_id, shot_index=self.shot_logger.session_shot_index)
+            path = self._export_path_for(scope_id)
             name = Path(path).name
 
             if self._total_points(data) == 0:

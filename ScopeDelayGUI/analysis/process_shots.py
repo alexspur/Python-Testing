@@ -47,6 +47,7 @@ SUMMARY_COLS = [
     "spacing_cmd_ns", "spacing_qsw_ns", "spacing_rvm_ns",
     "LTGS1_Ddot_kV", "LTGS2_Ddot_kV", "LTGS1_Bdot_kV", "LTGS2_Bdot_kV",
     "C225_Ddot_kV", "C315_Bdot_kV", "RVM1_kV", "RVM2_kV",
+    "CVR_A_peak", "CVR_kV_peak",
     "t_Qsw1_us", "t_Qsw2_us", "rvm_gain_1", "rvm_gain_2", "G_consistency",
     "master_interlock_pass", "error",
     # added after the MATLAB columns
@@ -297,6 +298,7 @@ def summary_row(S):
         "LTGS1_Bdot_kV": pk.get("LTGS1_Bdot"), "LTGS2_Bdot_kV": pk.get("LTGS2_Bdot"),
         "C225_Ddot_kV": pk.get("C225_Ddot"), "C315_Bdot_kV": pk.get("C315_Bdot"),
         "RVM1_kV": pk.get("RVM1"), "RVM2_kV": pk.get("RVM2"),
+        "CVR_A_peak": pk.get("CVR_A"), "CVR_kV_peak": pk.get("CVR_kV"),
         "t_Qsw1_us": pk.get("t_Qsw1"), "t_Qsw2_us": pk.get("t_Qsw2"),
         "rvm_gain_1": g[0], "rvm_gain_2": g[1],
         "G_consistency": S.get("G_consistency"),

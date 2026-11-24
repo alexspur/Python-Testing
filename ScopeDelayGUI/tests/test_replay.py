@@ -41,12 +41,12 @@ def test_replay_matches_stored_and_writes_only_to_the_sandbox(logs, tmp_path):
 
 def test_cal_override_applies_to_one_run_only(logs, tmp_path):
     ref = R.find_shot(R.index_shots(logs), 46)
-    cal0 = dict(R.P.CAL)
+    cal0 = R.calibration()                       # CAL plus the PROBES table
     base = R.run_shot(ref, plots=False, out_base=tmp_path)
     hot = R.run_shot(ref, plots=False, out_base=tmp_path,
-                     cal_overrides={"DIV_CH1": cal0["DIV_CH1"] * 1.1})
+                     cal_overrides={"RVM1": cal0["RVM1"] * 1.1})
     assert float(hot.row["RVM1_kV"]) == pytest.approx(float(base.row["RVM1_kV"]) * 1.1, rel=1e-3)
-    assert R.P.CAL == cal0
+    assert R.calibration() == cal0
 
 
 def test_scope_settings_from_row():

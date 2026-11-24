@@ -666,6 +666,20 @@ class DataLogger:
         stem = f"rigol{scope_id}_{self.session_timestamp}_read{int(read_index):02d}"
         return str(self.session_dir / f"{stem}.csv")
 
+    def scope_capture_path(self, scope_id, cap_index):
+        """Build the export path for a capture that is not a shot.
+
+        A scope that triggers with no Fire in between (re-armed after a shot
+        and tripped by noise, or triggered from outside the GUI) used to be
+        saved under the current shot's filename, replacing the shot's data:
+        shots 72 and 78 on 16 Nov 2026 were lost that way. Such captures get
+        rigol<N>_<session ts>_cap<NN>.csv instead. Like _read<NN>, the suffix
+        keeps them away from Post Test Analysis/parse_test_log.py; the shot
+        analysis still picks them up as unnumbered entries.
+        """
+        stem = f"rigol{scope_id}_{self.session_timestamp}_cap{int(cap_index):02d}"
+        return str(self.session_dir / f"{stem}.csv")
+
     def close(self):
         """Close logger (placeholder for future cleanup if needed)"""
         print(f"[DataLogger] Log saved to: {self.log_file}")

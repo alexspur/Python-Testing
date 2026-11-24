@@ -1,0 +1,794 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>LTGS Timing Map</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Layout: wide sheet. Two drawings carry the page: a signal map, then a
+     to-scale timing diagram. Registers below turn record times into event times. */
+  :root {
+    --bg:        #eef1f4;
+    --surface:   #ffffff;
+    --sunk:      #e3e8ed;
+    --fg:        #161c22;
+    --fg-mute:   #5a6773;
+    --rule:      #ccd5dd;
+    --rule-firm: #a8b5c0;
+    --meas:      #0d6e7a;   /* measured */
+    --derv:      #7a5a2e;   /* derived by subtraction, also fiber */
+    --est:       #6b6f86;   /* estimated or not measured */
+    --warn:      #9d2b1f;   /* scope record zero, open items */
+    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #11161b; --surface: #191f26; --sunk: #141a20;
+      --fg: #e6ecf1; --fg-mute: #96a4b1; --rule: #2c353e; --rule-firm: #45525e;
+      --meas: #4ec3cf; --derv: #d9a35e; --est: #a3a8c2; --warn: #f08a7d;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #11161b; --surface: #191f26; --sunk: #141a20;
+    --fg: #e6ecf1; --fg-mute: #96a4b1; --rule: #2c353e; --rule-firm: #45525e;
+    --meas: #4ec3cf; --derv: #d9a35e; --est: #a3a8c2; --warn: #f08a7d;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: var(--sans); font-size: 16px; line-height: 1.6;
+    margin: 0; padding-inline: 16px; padding-block: 36px 72px;
+  }
+  .wrap { max-width: 1180px; margin-inline: auto; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--meas); margin: 0 0 10px;
+  }
+  h1 {
+    font-size: clamp(1.7rem, 5vw, 2.4rem); line-height: 1.12;
+    letter-spacing: -0.022em; margin: 0 0 10px; font-weight: 600; text-wrap: balance;
+  }
+  .lede { color: var(--fg-mute); margin: 0; max-width: 62ch; }
+  h2 {
+    font-size: 1.1rem; font-weight: 600; letter-spacing: -0.01em;
+    margin: 52px 0 14px; padding-top: 15px; border-top: 1px solid var(--rule-firm);
+  }
+  p { margin: 0 0 14px; max-width: 66ch; }
+  code { font-family: var(--mono); font-size: 0.88em; }
+
+  .rules {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-left: 3px solid var(--meas);
+    padding: 16px 20px; margin: 26px 0 0; max-width: 760px;
+  }
+  .rules ul { margin: 0; padding-left: 18px; }
+  .rules li { margin-bottom: 4px; }
+  .rules li:last-child { margin-bottom: 0; }
+
+  figure { margin: 22px 0 8px; }
+  .scroll { overflow-x: auto; background: var(--surface); border: 1px solid var(--rule); padding: 14px 10px; }
+  .scroll svg { display: block; width: 100%; min-width: 1040px; height: auto; color: var(--fg); }
+  figcaption { font-size: 0.86rem; color: var(--fg-mute); margin-top: 12px; max-width: 70ch; }
+
+  .s-t   { font-family: var(--sans); font-size: 12.5px; fill: currentColor; }
+  .s-tb  { font-family: var(--sans); font-size: 12.5px; font-weight: 600; fill: currentColor; }
+  .s-m   { font-family: var(--mono); font-size: 11px; fill: var(--fg-mute); }
+  .s-mb  { font-family: var(--mono); font-size: 11.5px; font-weight: 500; fill: currentColor; }
+  .s-v   { font-family: var(--mono); font-size: 11.5px; fill: currentColor; }
+  .s-w   { font-family: var(--mono); font-size: 11px; fill: var(--warn); }
+  .s-grp { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; fill: var(--fg-mute); }
+  .g-grid { stroke: var(--rule); stroke-width: 1; fill: none; }
+  .g-zero { stroke: var(--fg); stroke-width: 1.2; fill: none; }
+  .g-rule { stroke: var(--rule-firm); stroke-width: 1; fill: none; }
+  .g-link { stroke: var(--fg-mute); stroke-width: 1; stroke-dasharray: 2 3; fill: none; }
+
+  .keyrow { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 14px 0 4px;
+            font-size: 0.82rem; color: var(--fg-mute); }
+  .keyrow span { display: inline-flex; align-items: center; gap: 8px; }
+  .sw { width: 22px; height: 5px; flex: none; }
+  .sw.dash { height: 0; border-top: 2px dashed var(--est); }
+  .sw.tri { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent;
+            border-top: 8px solid var(--warn); }
+
+  .tablewrap { overflow-x: auto; margin: 18px 0; }
+  table { border-collapse: collapse; width: 100%; min-width: 620px; font-size: 0.875rem; }
+  th, td { text-align: right; padding: 8px 11px; border-bottom: 1px solid var(--rule); }
+  th:first-child, td:first-child { text-align: left; }
+  td.l, th.l { text-align: left; }
+  thead th {
+    font-family: var(--mono); font-size: 0.68rem; font-weight: 500;
+    letter-spacing: 0.07em; text-transform: uppercase; color: var(--fg-mute);
+    border-bottom: 1px solid var(--rule-firm); white-space: nowrap;
+  }
+  tbody th { font-weight: 500; white-space: nowrap; }
+  tbody tr.first th, tbody tr.first td { border-top: 1px solid var(--rule-firm); }
+  td.f { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.strong { font-weight: 500; color: var(--meas); }
+  .dim, td.dimc { color: var(--fg-mute); }
+  td.barc { width: 170px; min-width: 120px; padding-left: 0; }
+  .bar { display: block; height: 8px; background: var(--meas); opacity: 0.75; }
+  .narrow { max-width: 760px; }
+
+  .tag {
+    font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.06em;
+    text-transform: uppercase; padding: 2px 6px; border-radius: 2px;
+    border: 1px solid currentColor; white-space: nowrap;
+  }
+  .t-meas { color: var(--meas); } .t-derv { color: var(--derv); } .t-est { color: var(--est); }
+
+  pre {
+    background: var(--sunk); border-left: 3px solid var(--rule-firm);
+    font-family: var(--mono); font-size: 0.82rem; line-height: 1.75;
+    padding: 14px 16px; overflow-x: auto; margin: 16px 0; max-width: 760px;
+  }
+  .note {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-left: 3px solid var(--warn); padding: 16px 20px; margin: 22px 0; max-width: 760px;
+  }
+  .note ul { margin: 0; padding-left: 18px; }
+  .note li { margin-bottom: 9px; }
+  .note li:last-child { margin-bottom: 0; }
+  .howto {
+    background: var(--surface); border: 1px solid var(--rule);
+    padding: 16px 20px; margin: 4px 0 6px; max-width: 760px;
+  }
+  .howto-h { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.12em;
+             text-transform: uppercase; color: var(--fg-mute); margin: 0 0 8px; }
+  .howto ul { margin: 0 0 12px; padding-left: 18px; }
+  .howto li { margin-bottom: 4px; }
+  .howto-ex { margin: 0; padding-top: 10px; border-top: 1px solid var(--rule);
+              font-size: 0.92rem; color: var(--fg-mute); }
+  h3 { font-size: 0.98rem; font-weight: 600; margin: 30px 0 8px; }
+  .foot { margin-top: 54px; padding-top: 15px; border-top: 1px solid var(--rule);
+          font-size: 0.8rem; color: var(--fg-mute); max-width: 80ch; }
+</style>
+
+<div class="wrap">
+
+  <p class="eyebrow">LTGS · trigger and diagnostic timing · 5 October 2026</p>
+  <h1>LTGS Timing Map</h1>
+  <p class="lede">
+    Every trigger path from the BNC 575 to the scopes, the trigger generator
+    and the lasers, with the delay of each cable, fiber link and instrument.
+  </p>
+
+  <div class="rules">
+    <ul>
+      <li>T0 is the instant BNC 575 channel A asserts at its own connector.</li>
+      <li>Every time on this page assumes zero programmed delay. Add the programmed delay where a row says so.</li>
+      <li>All values are in nanoseconds unless marked.</li>
+    </ul>
+  </div>
+
+  <h2>Signal map</h2>
+  <figure>
+    <div class="scroll">
+<svg viewBox="0 0 1170 548" role="img" aria-label="Signal map. BNC 575 channel A feeds two paths through a tee. One path daisy chains the three scope EXT triggers through cables of 4.471, 4.462 and 4.459 ns. The other reaches the screen room DG535 through 1.455 ns of cable, passes its 89.989 ns insertion delay, runs 129.300 ns down 84 feet of coax to the TG-100 trigger generator. The TG-100 sync output drives a TF1 after a delay of 33 ns. The TF1 sends 30 m of fiber back to an X22 inside the screen room, then 1.54 ns of cable to scope 1 channel 4. BNC 575 channel B drives a TF1 directly, then 30 m of fiber to an X22 that triggers the laser DG535 through 1.556 ns of cable, whose four outputs reach the laser flashlamp and Q-switch inputs through 3 foot cables. Each laser returns a Q-switch sync to scope 3 through about 134 ns of cable.">
+<rect x="20" y="40" width="130" height="340" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.6"/>
+<text class="s-tb" x="85" y="64" text-anchor="middle">BNC 575</text>
+<text class="s-m" x="85" y="80" text-anchor="middle">master</text>
+<text class="s-tb" x="142" y="154" text-anchor="end">CH A</text>
+<text class="s-m" x="142" y="170" text-anchor="end">T0</text>
+<text class="s-tb" x="142" y="324" text-anchor="end">CH B</text>
+<text class="s-m" x="142" y="340" text-anchor="end">−0.783 ns</text>
+<text class="s-m" x="142" y="355" text-anchor="end">+ 3.025 µs</text>
+<path d="M150 150 H190 M190 76 V200" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<circle cx="190" cy="150" r="3.5" fill="currentColor"/>
+<text class="s-m" x="196" y="140">tee</text>
+<path d="M190 76 H293" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="300,76 291,71.5 291,80.5" fill="currentColor"/>
+<text class="s-mb" x="245.0" y="69" text-anchor="middle">4.471 ns</text>
+<rect x="300" y="52" width="124" height="48" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.3"/>
+<text class="s-tb" x="362.0" y="72.5" text-anchor="middle">Scope 1 EXT</text>
+<text class="s-m" x="362.0" y="87.5" text-anchor="middle">arrives 4.471</text>
+<path d="M424 76 H517" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="524,76 515,71.5 515,80.5" fill="currentColor"/>
+<text class="s-mb" x="474.0" y="69" text-anchor="middle">4.462 ns</text>
+<rect x="524" y="52" width="124" height="48" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.3"/>
+<text class="s-tb" x="586.0" y="72.5" text-anchor="middle">Scope 2 EXT</text>
+<text class="s-m" x="586.0" y="87.5" text-anchor="middle">arrives 8.933</text>
+<path d="M648 76 H741" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="748,76 739,71.5 739,80.5" fill="currentColor"/>
+<text class="s-mb" x="698.0" y="69" text-anchor="middle">4.459 ns</text>
+<rect x="748" y="52" width="124" height="48" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.3"/>
+<text class="s-tb" x="810.0" y="72.5" text-anchor="middle">Scope 3 EXT</text>
+<text class="s-m" x="810.0" y="87.5" text-anchor="middle">arrives 13.392</text>
+<text class="s-m" x="884" y="80">50 Ω end</text>
+<text class="s-grp" x="300" y="34">SCOPE TRIGGER CHAIN</text>
+<text class="s-grp" x="300" y="150">SCREEN ROOM DG535 TO TRIGGER GENERATOR</text>
+<path d="M190 200 H293" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="300,200 291,195.5 291,204.5" fill="currentColor"/>
+<text class="s-mb" x="245.0" y="193" text-anchor="middle">1.455 ns</text>
+<rect x="300" y="168" width="150" height="64" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.3"/>
+<text class="s-tb" x="375.0" y="189.0" text-anchor="middle">DG535 screen room</text>
+<text class="s-m" x="375.0" y="204.0" text-anchor="middle">insertion 89.989 ns</text>
+<text class="s-m" x="375.0" y="219.0" text-anchor="middle">CH A = T0 + 180 µs</text>
+<path d="M450 200 H583" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="590,200 581,195.5 581,204.5" fill="currentColor"/>
+<text class="s-mb" x="520.0" y="193" text-anchor="middle">129.300 ns</text>
+<text class="s-m" x="520.0" y="216" text-anchor="middle">84 ft coax</text>
+<rect x="590" y="176" width="92" height="48" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.3"/>
+<text class="s-tb" x="636.0" y="196.5" text-anchor="middle">TG-100</text>
+<text class="s-m" x="636.0" y="211.5" text-anchor="middle">trigger gen</text>
+<path d="M682 200 H745" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="752,200 743,195.5 743,204.5" fill="currentColor"/>
+<text class="s-mb" x="717.0" y="193" text-anchor="middle">sync</text>
+<text class="s-m" x="717.0" y="216" text-anchor="middle">33 ns</text>
+<path d="M636 176 V120" stroke="var(--est)" stroke-width="1.4" fill="none" stroke-dasharray="5 4"/>
+<polygon points="636,112 631.5,121 640.5,121" fill="var(--est)"/>
+<text class="s-mb" x="648" y="122">100 kV out · +223.5 ns · check sheet</text>
+<rect x="752" y="176" width="62" height="48" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.3"/>
+<text class="s-tb" x="783.0" y="204.0" text-anchor="middle">TF1</text>
+<path d="M814 200 H885" stroke="var(--derv)" stroke-width="3" fill="none"/>
+<polygon points="892,200 883,195.5 883,204.5" fill="var(--derv)"/>
+<text class="s-m" x="853.0" y="216" text-anchor="middle">30 m fiber</text>
+<rect x="892" y="176" width="84" height="48" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.3"/>
+<text class="s-tb" x="934.0" y="196.5" text-anchor="middle">X22</text>
+<text class="s-m" x="934.0" y="211.5" text-anchor="middle">screen room</text>
+<path d="M976 200 H1037" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="1044,200 1035,195.5 1035,204.5" fill="currentColor"/>
+<text class="s-mb" x="1010.0" y="193" text-anchor="middle">1.54 ns</text>
+<text class="s-m" x="1010.0" y="216" text-anchor="middle">1 ft</text>
+<rect x="1044" y="176" width="106" height="48" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.3"/>
+<text class="s-tb" x="1097.0" y="196.5" text-anchor="middle">Scope 1 CH4</text>
+<text class="s-m" x="1097.0" y="211.5" text-anchor="middle">Trig Sync</text>
+<path d="M752 240 V248 H976 V240" stroke="var(--derv)" stroke-width="1.3" fill="none"/>
+<text class="s-mb" x="864" y="265" text-anchor="middle" fill="var(--derv)">TF1 + fiber + X22 = 162.38 ns</text>
+<text class="s-grp" x="210" y="292">LASER DG535 PATH</text>
+<path d="M150 340 H203" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="210,340 201,335.5 201,344.5" fill="currentColor"/>
+<rect x="210" y="316" width="104" height="48" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.3"/>
+<text class="s-tb" x="262.0" y="336.5" text-anchor="middle">TF1</text>
+<text class="s-m" x="262.0" y="351.5" text-anchor="middle">adapter only</text>
+<path d="M314 340 H443" stroke="var(--derv)" stroke-width="3" fill="none"/>
+<polygon points="450,340 441,335.5 441,344.5" fill="var(--derv)"/>
+<text class="s-m" x="382.0" y="356" text-anchor="middle">30 m fiber</text>
+<rect x="450" y="316" width="84" height="48" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.3"/>
+<text class="s-tb" x="492.0" y="336.5" text-anchor="middle">X22</text>
+<text class="s-m" x="492.0" y="351.5" text-anchor="middle">laser link</text>
+<path d="M534 340 H623" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="630,340 621,335.5 621,344.5" fill="currentColor"/>
+<text class="s-mb" x="582.0" y="333" text-anchor="middle">1.556 ns</text>
+<rect x="630" y="286" width="190" height="108" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.3"/>
+<text class="s-tb" x="725.0" y="329.0" text-anchor="middle">DG535 laser</text>
+<text class="s-m" x="725.0" y="344.0" text-anchor="middle">insertion 86.43 ns</text>
+<text class="s-m" x="725.0" y="359.0" text-anchor="middle">delays A to D not given</text>
+<path d="M210 380 V388 H534 V380" stroke="var(--derv)" stroke-width="1.3" fill="none"/>
+<text class="s-mb" x="372" y="405" text-anchor="middle" fill="var(--derv)">TF1 + fiber + X22 = 166.41 ns</text>
+<path d="M820 298 H933" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="940,298 931,293.5 931,302.5" fill="currentColor"/>
+<text class="s-mb" x="880.0" y="291" text-anchor="middle">A  4.523 ns</text>
+<rect x="940" y="287" width="210" height="22" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.2"/>
+<text class="s-t" x="1045" y="302.5" text-anchor="middle">Laser 1 flashlamp</text>
+<path d="M820 326 H933" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="940,326 931,321.5 931,330.5" fill="currentColor"/>
+<text class="s-mb" x="880.0" y="319" text-anchor="middle">B  4.536 ns</text>
+<rect x="940" y="315" width="210" height="22" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.2"/>
+<text class="s-t" x="1045" y="330.5" text-anchor="middle">Laser 1 Q-switch</text>
+<path d="M820 354 H933" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="940,354 931,349.5 931,358.5" fill="currentColor"/>
+<text class="s-mb" x="880.0" y="347" text-anchor="middle">C  4.596 ns</text>
+<rect x="940" y="343" width="210" height="22" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.2"/>
+<text class="s-t" x="1045" y="358.5" text-anchor="middle">Laser 2 flashlamp</text>
+<path d="M820 382 H933" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="940,382 931,377.5 931,386.5" fill="currentColor"/>
+<text class="s-mb" x="880.0" y="375" text-anchor="middle">D  4.534 ns</text>
+<rect x="940" y="371" width="210" height="22" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.2"/>
+<text class="s-t" x="1045" y="386.5" text-anchor="middle">Laser 2 Q-switch</text>
+<text class="s-grp" x="450" y="446">Q-SWITCH SYNC RETURNS</text>
+<rect x="940" y="461" width="210" height="26" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.2"/>
+<text class="s-t" x="1045" y="478.5" text-anchor="middle">Laser 1 Q-switch sync</text>
+<path d="M940 474 H617" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="610,474 619,469.5 619,478.5" fill="currentColor"/>
+<text class="s-mb" x="775.0" y="467" text-anchor="middle">134.279 ns  ·  87 ft coax</text>
+<rect x="450" y="461" width="160" height="26" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.2"/>
+<text class="s-tb" x="530" y="478.5" text-anchor="middle">Scope 3 CH1</text>
+<rect x="940" y="503" width="210" height="26" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.2"/>
+<text class="s-t" x="1045" y="520.5" text-anchor="middle">Laser 2 Q-switch sync</text>
+<path d="M940 516 H617" stroke="currentColor" stroke-width="1.4" fill="none"/>
+<polygon points="610,516 619,511.5 619,520.5" fill="currentColor"/>
+<text class="s-mb" x="775.0" y="509" text-anchor="middle">134.463 ns  ·  87 ft coax</text>
+<rect x="450" y="503" width="160" height="26" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1.2"/>
+<text class="s-tb" x="530" y="520.5" text-anchor="middle">Scope 3 CH2</text>
+</svg>
+    </div>
+    <figcaption>
+      Each arrow carries the delay of that hop. Brown arrows are the two 30 m
+      fiber runs. Each bracket is one
+      measured total. The 33 ns sync delay inside the TG-100 comes from one
+      campaign shot.
+    </figcaption>
+  </figure>
+
+  <h2>Timing diagram</h2>
+  <div class="howto">
+    <p class="howto-h">How to read it</p>
+    <ul>
+      <li>Each row is one point a trigger edge passes. The rows of a group run in the order the edge gets there.</li>
+      <li>A row's trace steps up when the edge arrives. The first number on the row is that arrival time after T0.</li>
+      <li>The equation is how that time is built: the row it follows, plus one hop. A dotted line joins the two rows. The thick bar is the hop.</li>
+      <li>A hop is one of three things: a cable, a fiber link, or the delay inside an instrument from its trigger input to its output.</li>
+      <li>Programmed delays are at zero. In a shot, add 180 µs to every row from the screen room DG535 output on, and 3.025 µs to every laser row.</li>
+    </ul>
+    <p class="howto-ex">Example: Scope 2 EXT TRIG reads 8.933 = 4.471 + 4.462. The edge reaches scope 1 at 4.471 ns. It needs 4.462 ns more on the next cable to reach scope 2.</p>
+  </div>
+  <figure>
+    <div class="scroll">
+<svg viewBox="0 0 1230 980" role="img" aria-label="Timing diagram to scale, minus 100 to 500 nanoseconds after T0 with every programmed delay at zero. Each row is one point on a trigger path. Its arrival time is the arrival time of the row it follows plus one hop: a cable, a fiber link, or the delay inside an instrument. Scope EXT triggers arrive at 4.471, 8.933 and 13.392 ns, one cable apart. The TG-100 trigger input is reached at 220.744 ns. The sync returns to scope 1 at 418.0 ns. The laser DG535 outputs fire at 253.615 ns.">
+<path class="g-grid" d="M250.0 34 V950"/>
+<text class="s-m" x="250.0" y="24" text-anchor="middle">−100</text>
+<text class="s-m" x="250.0" y="968" text-anchor="middle">−100</text>
+<path class="g-grid" d="M330.0 34 V950"/>
+<text class="s-m" x="330.0" y="24" text-anchor="middle">−50</text>
+<text class="s-m" x="330.0" y="968" text-anchor="middle">−50</text>
+<path class="g-zero" d="M410.0 34 V950"/>
+<text class="s-m" x="410.0" y="24" text-anchor="middle">0</text>
+<text class="s-m" x="410.0" y="968" text-anchor="middle">0</text>
+<path class="g-grid" d="M490.0 34 V950"/>
+<text class="s-m" x="490.0" y="24" text-anchor="middle">50</text>
+<text class="s-m" x="490.0" y="968" text-anchor="middle">50</text>
+<path class="g-grid" d="M570.0 34 V950"/>
+<text class="s-m" x="570.0" y="24" text-anchor="middle">100</text>
+<text class="s-m" x="570.0" y="968" text-anchor="middle">100</text>
+<path class="g-grid" d="M650.0 34 V950"/>
+<text class="s-m" x="650.0" y="24" text-anchor="middle">150</text>
+<text class="s-m" x="650.0" y="968" text-anchor="middle">150</text>
+<path class="g-grid" d="M730.0 34 V950"/>
+<text class="s-m" x="730.0" y="24" text-anchor="middle">200</text>
+<text class="s-m" x="730.0" y="968" text-anchor="middle">200</text>
+<path class="g-grid" d="M810.0 34 V950"/>
+<text class="s-m" x="810.0" y="24" text-anchor="middle">250</text>
+<text class="s-m" x="810.0" y="968" text-anchor="middle">250</text>
+<path class="g-grid" d="M890.0 34 V950"/>
+<text class="s-m" x="890.0" y="24" text-anchor="middle">300</text>
+<text class="s-m" x="890.0" y="968" text-anchor="middle">300</text>
+<path class="g-grid" d="M970.0 34 V950"/>
+<text class="s-m" x="970.0" y="24" text-anchor="middle">350</text>
+<text class="s-m" x="970.0" y="968" text-anchor="middle">350</text>
+<path class="g-grid" d="M1050.0 34 V950"/>
+<text class="s-m" x="1050.0" y="24" text-anchor="middle">400</text>
+<text class="s-m" x="1050.0" y="968" text-anchor="middle">400</text>
+<path class="g-grid" d="M1130.0 34 V950"/>
+<text class="s-m" x="1130.0" y="24" text-anchor="middle">450</text>
+<text class="s-m" x="1130.0" y="968" text-anchor="middle">450</text>
+<path class="g-grid" d="M1210.0 34 V950"/>
+<text class="s-m" x="1210.0" y="24" text-anchor="middle">500 ns</text>
+<text class="s-m" x="1210.0" y="968" text-anchor="middle">500 ns</text>
+<text class="s-tb" x="416.0" y="10" >T0</text>
+<text class="s-m" x="12" y="24">ns after T0</text>
+<text class="s-grp" x="12" y="60">SCOPE TRIGGER CHAIN</text>
+<path class="g-rule" d="M12 66 H1210"/>
+<text class="s-m" x="12" y="82">Channel A runs through the three scope EXT inputs in a row. Each scope adds its own cable.</text>
+<rect x="410.0" y="100" width="800.0" height="18" fill="var(--meas)" opacity="0.10"/>
+<path d="M250.0 118 H410.0 V100 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="114">BNC 575 CH A</text>
+<text class="s-v" x="418.0" y="113">0 ns · T0, the reference for every time on this page</text>
+<rect x="417.2" y="136" width="792.8" height="18" fill="var(--meas)" opacity="0.10"/>
+<path d="M410.0 154 H417.2" stroke="var(--meas)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M410.0 118 V154"/>
+<path d="M250.0 154 H417.2 V136 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="150">Scope 1 EXT TRIG</text>
+<text class="s-v" x="425.2" y="149">4.471 = 0.000 + 4.471 · cable, tee to scope 1</text>
+<path d="M277.2 134 V158" stroke="var(--warn)" stroke-width="1.6" fill="none"/>
+<polygon points="273.2,134 281.2,134 277.2,141" fill="var(--warn)"/>
+<text class="s-w" x="270.2" y="148" text-anchor="end">record 0 at −82.997</text>
+<rect x="424.3" y="172" width="785.7" height="18" fill="var(--meas)" opacity="0.10"/>
+<path d="M417.2 190 H424.3" stroke="var(--meas)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M417.2 154 V190"/>
+<path d="M250.0 190 H424.3 V172 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="186">Scope 2 EXT TRIG</text>
+<text class="s-v" x="432.3" y="185">8.933 = 4.471 + 4.462 · cable, scope 1 to scope 2</text>
+<path d="M284.3 170 V194" stroke="var(--warn)" stroke-width="1.6" fill="none"/>
+<polygon points="280.3,170 288.3,170 284.3,177" fill="var(--warn)"/>
+<text class="s-w" x="277.3" y="184" text-anchor="end">record 0 at −78.572</text>
+<rect x="431.4" y="208" width="778.6" height="18" fill="var(--meas)" opacity="0.10"/>
+<path d="M424.3 226 H431.4" stroke="var(--meas)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M424.3 190 V226"/>
+<path d="M250.0 226 H431.4 V208 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="222">Scope 3 EXT TRIG</text>
+<text class="s-v" x="439.4" y="221">13.392 = 8.933 + 4.459 · cable, scope 2 to scope 3, 50 Ω end</text>
+<path d="M292.0 206 V230" stroke="var(--warn)" stroke-width="1.6" fill="none"/>
+<polygon points="288.0,206 296.0,206 292.0,213" fill="var(--warn)"/>
+<text class="s-w" x="285.0" y="220" text-anchor="end">record 0 at −73.746</text>
+<text class="s-grp" x="12" y="262">SCREEN ROOM DG535 TO THE TG-100</text>
+<path class="g-rule" d="M12 268 H1210"/>
+<text class="s-m" x="12" y="284">The same channel A edge, taken off the tee. This path decides when the Marx fires.</text>
+<rect x="412.3" y="302" width="797.7" height="18" fill="var(--meas)" opacity="0.10"/>
+<path d="M410.0 320 H412.3" stroke="var(--meas)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M410.0 118 V320"/>
+<path d="M250.0 320 H412.3 V302 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="316">DG535 screen room, EXT TRIG</text>
+<text class="s-v" x="420.3" y="315">1.455 = 0.000 + 1.455 · cable, tee to the DG535</text>
+<rect x="556.3" y="338" width="653.7" height="18" fill="var(--meas)" opacity="0.10"/>
+<path d="M412.3 356 H556.3" stroke="var(--meas)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M412.3 320 V356"/>
+<path d="M250.0 356 H556.3 V338 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="352">DG535 screen room, output A</text>
+<text class="s-v" x="564.3" y="351">91.444 = 1.455 + 89.989 · inside the DG535. Add its 180 µs setting in a shot</text>
+<rect x="763.2" y="374" width="446.8" height="18" fill="var(--meas)" opacity="0.10"/>
+<path d="M556.3 392 H763.2" stroke="var(--meas)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M556.3 356 V392"/>
+<path d="M250.0 392 H763.2 V374 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="388">TG-100 trigger input</text>
+<text class="s-v" x="771.2" y="387">220.744 = 91.444 + 129.300 · 84 ft coax</text>
+<text class="s-grp" x="12" y="428">TG-100 TO THE MARX</text>
+<path class="g-rule" d="M12 434 H1210"/>
+<text class="s-m" x="12" y="450">Two estimates of when the high voltage pulse arrives. Neither is measured on every shot.</text>
+<rect x="1120.8" y="468" width="89.2" height="18" fill="var(--est)" opacity="0.10"/>
+<path d="M763.2 486 H1120.8" stroke="var(--est)" stroke-width="5" fill="none" stroke-dasharray="5 4"/>
+<path class="g-link" d="M763.2 392 V486"/>
+<path d="M250.0 486 H1120.8 V468 H1210.0" stroke="var(--est)" stroke-width="1.6" fill="none" stroke-dasharray="5 4"/>
+<text class="s-t" x="12" y="482">TG-100 HV output, 20 ft cable</text>
+<text class="s-v" x="1112.8" y="480" text-anchor="end">444.2 = 220.7 + 223.5 · inside the TG-100, 2020 check sheet</text>
+<rect x="1152.8" y="504" width="57.2" height="18" fill="var(--derv)" opacity="0.10"/>
+<path d="M763.2 522 H1152.8" stroke="var(--derv)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M763.2 392 V522"/>
+<path d="M250.0 522 H1152.8 V504 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="518">Trig monitor spike at the Marx</text>
+<text class="s-v" x="1144.8" y="516" text-anchor="end">464.2 = 220.7 + 243.5 · TG-100 input to the spike, one July shot</text>
+<text class="s-grp" x="12" y="558">TG-100 SYNC BACK TO SCOPE 1</text>
+<path class="g-rule" d="M12 564 H1210"/>
+<text class="s-m" x="12" y="580">The sync pulse records when the TG-100 fired. It returns over fiber as Trig Sync.</text>
+<rect x="816.5" y="598" width="393.5" height="18" fill="var(--derv)" opacity="0.10"/>
+<path d="M763.2 616 H816.5" stroke="var(--derv)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M763.2 392 V616"/>
+<path d="M250.0 616 H816.5 V598 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="612">TG-100 sync output</text>
+<text class="s-v" x="808.5" y="610" text-anchor="end">254.08 = 220.74 + 33.34 · inside the TG-100, one July shot</text>
+<rect x="1076.3" y="634" width="133.7" height="18" fill="var(--derv)" opacity="0.10"/>
+<path d="M816.5 652 H1076.3" stroke="var(--derv)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M816.5 616 V652"/>
+<path d="M250.0 652 H1076.3 V634 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="648">X22 TTL output, screen room</text>
+<text class="s-v" x="1068.3" y="646" text-anchor="end">416.461 = 254.084 + 162.377 · fiber link: TF1, 30 m fiber, X22</text>
+<rect x="1078.8" y="670" width="131.2" height="18" fill="var(--est)" opacity="0.10"/>
+<path d="M1076.3 688 H1078.8" stroke="var(--est)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M1076.3 652 V688"/>
+<path d="M250.0 688 H1078.8 V670 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="684">Scope 1 CH4 input</text>
+<text class="s-v" x="1070.8" y="682" text-anchor="end">418.001 = 416.461 + 1.540 · 1 ft cable</text>
+<text class="s-grp" x="12" y="724">LASER DG535 PATH</text>
+<path class="g-rule" d="M12 730 H1210"/>
+<text class="s-m" x="12" y="746">Channel B, 3.025 µs after channel A in a shot. This path decides when the lasers fire.</text>
+<rect x="408.7" y="764" width="801.3" height="18" fill="var(--meas)" opacity="0.10"/>
+<path d="M410.0 782 H408.7" stroke="var(--meas)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M410.0 118 V782"/>
+<path d="M250.0 782 H408.7 V764 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="778">BNC 575 CH B</text>
+<text class="s-v" x="416.7" y="777">−0.783 ns · B fires 0.783 ns before A. Add its 3.025 µs setting</text>
+<rect x="675.0" y="800" width="535.0" height="18" fill="var(--derv)" opacity="0.10"/>
+<path d="M408.7 818 H675.0" stroke="var(--derv)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M408.7 782 V818"/>
+<path d="M250.0 818 H675.0 V800 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="814">X22 TTL output, laser link</text>
+<text class="s-v" x="683.0" y="813">165.627 = −0.783 + 166.410 · fiber link: TF1, 30 m fiber, X22</text>
+<rect x="677.5" y="836" width="532.5" height="18" fill="var(--meas)" opacity="0.10"/>
+<path d="M675.0 854 H677.5" stroke="var(--meas)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M675.0 818 V854"/>
+<path d="M250.0 854 H677.5 V836 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="850">DG535 laser, EXT TRIG</text>
+<text class="s-v" x="685.5" y="849">167.183 = 165.627 + 1.556 · cable, X22 to the laser DG535</text>
+<rect x="815.8" y="872" width="394.2" height="18" fill="var(--meas)" opacity="0.10"/>
+<path d="M677.5 890 H815.8" stroke="var(--meas)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M677.5 854 V890"/>
+<path d="M250.0 890 H815.8 V872 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="886">DG535 laser outputs</text>
+<text class="s-v" x="807.8" y="884" text-anchor="end">253.615 = 167.183 + 86.432 · inside the laser DG535. Add its channel settings</text>
+<rect x="823.1" y="908" width="386.9" height="18" fill="var(--meas)" opacity="0.10"/>
+<path d="M815.8 926 H823.1" stroke="var(--meas)" stroke-width="5" fill="none"/>
+<path class="g-link" d="M815.8 890 V926"/>
+<path d="M250.0 926 H823.1 V908 H1210.0" stroke="currentColor" stroke-width="1.6" fill="none"/>
+<text class="s-t" x="12" y="922">Laser inputs</text>
+<text class="s-v" x="831.1" y="921">258.13 to 258.20 ns · 3 ft cables, 4.52 to 4.60 ns</text>
+</svg>
+    </div>
+    <figcaption>
+      Drawn to scale at 1.6 px per nanosecond. The red mark on each scope row is where
+      that scope puts t = 0 of its record, about 87 ns before its trigger arrives.
+    </figcaption>
+  </figure>
+  <div class="keyrow">
+    <span><span class="sw" style="background:var(--meas)"></span>measured</span>
+    <span><span class="sw" style="background:var(--derv)"></span>derived by subtraction</span>
+    <span><span class="sw dash"></span>estimated</span>
+    <span><span class="sw tri"></span>scope record zero</span>
+  </div>
+
+  <h3>Why three scope cables</h3>
+  <p>
+    There is one trigger output for all three scopes. A tee at each scope's EXT input
+    passes the edge on to the next scope, and scope 3 ends the chain in 50 Ω. So the
+    edge reaches the scopes one after the other, and each arrival adds one cable to
+    the one before.
+  </p>
+  <p>
+    The three cables were replaced on 5 October 2026 at about noon. Shots before that
+    used longer cables of 4.599, 4.604 and 9.188 ns, so the old arrivals are 4.599,
+    9.203 and 18.391 ns. The diagram shows the new set. The analysis scripts pick the
+    set from the shot date.
+  </p>
+  <div class="tablewrap narrow">
+    <table>
+      <thead>
+        <tr><th>Scope EXT input</th><th>New cable</th><th>New arrival</th><th>Old cable</th><th>Old arrival</th></tr>
+      </thead>
+      <tbody>
+        <tr><th>Scope 1</th><td class="f">4.471</td><td class="f strong">4.471</td><td class="f">4.599</td><td class="f">4.599</td></tr>
+        <tr><th>Scope 2</th><td class="f">4.462</td><td class="f strong">8.933</td><td class="f">4.604</td><td class="f">9.203</td></tr>
+        <tr><th>Scope 3</th><td class="f">4.459</td><td class="f strong">13.392</td><td class="f">9.188</td><td class="f">18.391</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Three things stand out. Each scope places its record zero about 87 ns
+    before its own trigger edge arrives, so every record starts before T0. The
+    two fiber links cost 162.38 and 166.41 ns, more than any
+    cable in the trigger path. The laser rows show
+    where each trigger lands with the DG535 channel delays at zero.
+  </p>
+
+  <h2>Scope record zero</h2>
+  <p>
+    A DS7054 puts <code>t = 0</code> of its record a fixed time ahead of the
+    trigger edge at its EXT connector. Add the trigger arrival to get the
+    record zero on the T0 axis.
+  </p>
+  <div class="tablewrap narrow">
+    <table>
+      <thead>
+        <tr><th>Scope</th><th>EXT trigger arrives</th><th>CH4 offset</th><th>Record zero after T0</th></tr>
+      </thead>
+      <tbody>
+<tr><th>Scope 1</th><td class="f">4.471</td><td class="f">−87.4679</td><td class="f strong">−82.997</td></tr><tr><th>Scope 2</th><td class="f">8.933</td><td class="f">−87.5049</td><td class="f strong">−78.572</td></tr><tr><th>Scope 3</th><td class="f">13.392</td><td class="f">−87.1380</td><td class="f strong">−73.746</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Diagnostic returns</h2>
+  <p>
+    To place a recorded edge on the T0 axis, subtract the constant in the last
+    column from the record time. The result is the time the signal entered the
+    far end of that cable.
+  </p>
+  <pre>t_event = t_record - constant
+constant = cable one way - trigger arrival - scope offset</pre>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Channel</th><th class="l">Signal</th><th class="l">Panel</th><th>Cable, one way</th><th class="l">0 to 140 ns</th><th>Subtract</th><th>Offset used</th></tr>
+      </thead>
+      <tbody>
+<tr class="first"><th>Scope 1 CH1</th><td class="l">RVM 1<span class="dim"> · 20,000:1</span></td><td class="l dimc">1 (N)</td><td class="f">118.924</td><td class="barc"><span class="bar" style="width:84.9%"></span></td><td class="f strong">201.920</td><td><span class="tag t-est">CH4 offset</span></td></tr>
+<tr><th>Scope 1 CH2</th><td class="l">RVM 2<span class="dim"> · 20,000:1</span></td><td class="l dimc">3 (N)</td><td class="f">119.090</td><td class="barc"><span class="bar" style="width:85.1%"></span></td><td class="f strong">202.087</td><td><span class="tag t-est">CH4 offset</span></td></tr>
+<tr><th>Scope 1 CH3</th><td class="l">Trig monitor<span class="dim"></span></td><td class="l dimc">4 (N)</td><td class="f">119.135</td><td class="barc"><span class="bar" style="width:85.1%"></span></td><td class="f strong">202.132</td><td><span class="tag t-est">CH4 offset</span></td></tr>
+<tr><th>Scope 1 CH4</th><td class="l">Trig Sync<span class="dim"> · X22, fiber</span></td><td class="l dimc">Bottom TG X22</td><td class="f">1.540</td><td class="barc"><span class="bar" style="width:1.1%"></span></td><td class="f strong">84.537</td><td><span class="tag t-meas">calibrated</span></td></tr>
+<tr class="first"><th>Scope 2 CH1</th><td class="l">LTGS2-232<span class="dim"> · D-dot, FC011</span></td><td class="l dimc">10 (N)</td><td class="f">119.056</td><td class="barc"><span class="bar" style="width:85.0%"></span></td><td class="f strong">197.628</td><td><span class="tag t-est">CH4 offset</span></td></tr>
+<tr><th>Scope 2 CH2</th><td class="l">LTGS2-007<span class="dim"> · B-dot, FC013</span></td><td class="l dimc">9 (N)</td><td class="f">119.033</td><td class="barc"><span class="bar" style="width:85.0%"></span></td><td class="f strong">197.605</td><td><span class="tag t-est">CH4 offset</span></td></tr>
+<tr><th>Scope 2 CH3</th><td class="l">LTGS1-232<span class="dim"> · D-dot, FC017</span></td><td class="l dimc">7 (N)</td><td class="f">74.981</td><td class="barc"><span class="bar" style="width:53.6%"></span></td><td class="f strong">153.552</td><td><span class="tag t-est">CH4 offset</span></td></tr>
+<tr><th>Scope 2 CH4</th><td class="l">LTGS1-007<span class="dim"> · B-dot, FC016</span></td><td class="l dimc">8 (N)</td><td class="f">76.474</td><td class="barc"><span class="bar" style="width:54.6%"></span></td><td class="f strong">155.045</td><td><span class="tag t-meas">calibrated</span></td></tr>
+<tr class="first"><th>Scope 3 CH1</th><td class="l">L1 Q-switch<span class="dim"> · Laser 1 sync</span></td><td class="l dimc">13 (bnc)</td><td class="f">134.279</td><td class="barc"><span class="bar" style="width:95.9%"></span></td><td class="f strong">208.025</td><td><span class="tag t-est">CH4 offset</span></td></tr>
+<tr><th>Scope 3 CH2</th><td class="l">L2 Q-switch<span class="dim"> · Laser 2 sync</span></td><td class="l dimc">9 (bnc)</td><td class="f">134.463</td><td class="barc"><span class="bar" style="width:96.0%"></span></td><td class="f strong">208.209</td><td><span class="tag t-est">CH4 offset</span></td></tr>
+<tr><th>Scope 3 CH3</th><td class="l">C315<span class="dim"> · B-dot, FC027</span></td><td class="l dimc">5 (N)</td><td class="f">75.257</td><td class="barc"><span class="bar" style="width:53.8%"></span></td><td class="f strong">149.003</td><td><span class="tag t-est">CH4 offset</span></td></tr>
+<tr><th>Scope 3 CH4</th><td class="l">C225<span class="dim"> · D-dot, FC032</span></td><td class="l dimc">6 (N)</td><td class="f">74.836</td><td class="barc"><span class="bar" style="width:53.5%"></span></td><td class="f strong">148.582</td><td><span class="tag t-meas">calibrated</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Check on scope 3 CH2: the record showed 373.836 ns. Subtract 208.209 and
+    the X22 output lands at 165.63 ns after T0, which matches the timing
+    diagram. Scope 1 CH4 is the fiber Trig Sync, so its constant returns the
+    time at the X22 output.
+  </p>
+
+  <h2>Fiber links</h2>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Path</th><th>Measured total</th><th>Installed fiber</th><th>Electronics</th><th>Jitter</th></tr>
+      </thead>
+      <tbody>
+        <tr><th>TG-100 sync to screen room X22<br><span class="dim">TF1 + fiber + X22</span></th><td class="f strong">162.38</td><td class="f">149.0</td><td class="f strong">13.4</td><td class="f">472 ps in place</td></tr>
+        <tr><th>BNC 575 CH B to laser link X22<br><span class="dim">TF1 + fiber + X22</span></th><td class="f strong">166.41</td><td class="f">153.0</td><td class="f strong">13.4</td><td class="f">150 ps in place</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Each installed total carries about 2 ns of uncertainty. The electronics
+    figures come from the bench tests below. The fiber column is the total
+    minus the electronics. The first row was measured on 5 October with the
+    84 ft coax feeding the TF1 directly. The TG-100 was not in line.
+  </p>
+
+  <h2>Bench tests of the converters</h2>
+  <p>
+    Run on 6 October at scope 1. Each TF1 sat on BNC 575 channel B with the
+    male to male adapter. An 81 inch patch fiber joined it to its X22. One
+    cable carried the signal to CH4 in both runs, first from channel B and
+    then from the X22 output. The screen room DG535 T0 output held CH3 as a
+    fixed reference.
+  </p>
+  <div class="tablewrap narrow">
+    <table>
+      <thead>
+        <tr><th>Quantity</th><th>Laser link pair</th><th>TG-100 path pair</th></tr>
+      </thead>
+      <tbody>
+        <tr><th>TF1 + 2.057 m fiber + X22</th><td class="f strong">23.607</td><td class="f strong">23.615</td></tr>
+        <tr><th>Standard error</th><td class="f">21 ps</td><td class="f">23 ps</td></tr>
+        <tr><th>2.057 m of fiber, 4.90 to 4.99 ns/m</th><td class="f">10.08 to 10.27</td><td class="f">10.08 to 10.27</td></tr>
+        <tr><th>TF1 + X22</th><td class="f strong">13.4</td><td class="f strong">13.4</td></tr>
+        <tr><th>Scatter with the pair in line</th><td class="f">97 ps</td><td class="f">121 ps</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The two pairs match within 8 ps. Each TF1 and X22 pair takes 13.4 ns,
+    plus or minus 0.15 ns, and that uncertainty is the fiber book range.
+    The scatter without any converter was 113 ps, so neither pair adds
+    jitter this test can resolve. The laser pair adds less than 75 ps and
+    the TG-100 pair about 40 ps.
+  </p>
+  <p>
+    The installed laser link fiber takes 153.0 ns. At 4.99 ns/m that is
+    30.7 m, a little over its nominal 30 m.
+  </p>
+  <p>
+    The TG-100 path fiber takes 149.0 ns. At 4.99 ns/m that is 29.9 m. The
+    472 ps of jitter on that 5 October run did not come from the converters
+    as tested here, and the TG-100 was not in line. The likely source is the
+    drive the TF1 received through 84 ft of coax, or the unterminated scope
+    input used that day.
+  </p>
+
+  <h2>Trigger generator</h2>
+  <p>
+    The bottom TG is a Model 40230, serial 16-K-097. These values come from
+    its manual and from the performance check sheet dated 27 January 2020.
+    Nothing in this section was measured during this work.
+  </p>
+  <div class="tablewrap narrow">
+    <table>
+      <thead>
+        <tr><th>Item</th><th>Check sheet, 2020</th><th>Manual limit</th></tr>
+      </thead>
+      <tbody>
+        <tr><th>Trigger input to HV output, 20 ft cable</th><td class="f strong">223.5 ns</td><td class="f">under 250 ns</td></tr>
+        <tr><th>HV output jitter at 1 Hz, 256 shots</th><td class="f strong">1.671 ns</td><td class="f">under 3 ns</td></tr>
+        <tr><th>HV output jitter at 0.5 Hz, 251 shots</th><td class="f strong">2.667 ns</td><td class="f">under 3 ns</td></tr>
+        <tr><th>HV output amplitude</th><td class="f">103.87 kV</td><td class="f">100 kV</td></tr>
+        <tr><th>HV output rise time, 10 to 90%</th><td class="f">15.4 ns</td><td class="f">under 17 ns</td></tr>
+        <tr class="first"><th>Sync output into 50 Ω</th><td class="f">12.2 V peak</td><td class="f">+10 V</td></tr>
+        <tr><th>Sync output after trigger input</th><td class="f">not recorded</td><td class="f">under 80 ns</td></tr>
+        <tr><th>Sync output jitter</th><td class="f">not recorded</td><td class="f">under 0.20 ns</td></tr>
+        <tr class="first"><th>External trigger required</th><td class="f"></td><td class="f">+8 to +12 V, rise under 10 ns</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The sync output is taken from the solid state amplifier at the front of
+    the generator. The thyratron and the two spark gaps come after it. So
+    the Trig Sync signal on scope 1 CH4 shows when the amplifier fired. It
+    does not show the 1.7 to 2.7 ns of jitter on the high voltage pulse.
+  </p>
+  <p>
+    One campaign shot, recorded on scope 1 on 1 July 2026, fills in the
+    rest. The programmed delay was 180 µs.
+  </p>
+  <div class="tablewrap narrow">
+    <table>
+      <thead>
+        <tr><th>From the 1 July shot</th><th>Record time</th><th>After T0 + 180 µs</th><th>After TG trigger input</th></tr>
+      </thead>
+      <tbody>
+        <tr><th>Sync output, from Trig Sync on CH4</th><td class="f">180500.999</td><td class="f">254.08</td><td class="f strong">33.3</td></tr>
+        <tr><th>Trig monitor spike at the Marx, CH3</th><td class="f">180666.38</td><td class="f">464.2</td><td class="f strong">243.5</td></tr>
+        <tr><th>RVM 2 starts to move, CH2</th><td class="f">180782.7</td><td class="f">581</td><td class="f">360</td></tr>
+        <tr><th>RVM 1 starts to move, CH1</th><td class="f">180798.2</td><td class="f">596</td><td class="f">376</td></tr>
+        <tr class="first"><th>RVM 1 collapse, half way</th><td class="f">184.3618 µs</td><td class="f">4.160 µs</td><td class="f"></td></tr>
+        <tr><th>RVM 2 collapse, half way</th><td class="f">185.3715 µs</td><td class="f">5.169 µs</td><td class="f"></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The sync delay of 33 ns sits inside the 80 ns manual limit. The spike
+    at the Marx arrives 243.5 ns after the trigger input. The check sheet
+    gives 223.5 ns at the end of a 20 ft output cable, so the spike is 20 ns
+    later than that figure. A longer output cable, a different switch
+    pressure, or a monitor that responds to the Marx gap would each explain
+    it. These are single shot values, good to about 2 ns, and the generator
+    itself moves by 1.7 to 2.7 ns from shot to shot.
+  </p>
+  <p>
+    With zero programmed delay, the trigger reaches the TG-100 at 220.7 ns
+    after T0. The check sheet delay puts the high voltage pulse at the end
+    of the 20 ft output cable at 444.2 ns.
+  </p>
+
+  <h2>Laser DG535</h2>
+  <p>
+    Measured in place on 6 October with every channel delay at zero. Scope 3
+    CH1 held the T0 output as a fixed reference. The CH2 cable moved from a
+    tee at EXT TRIG to each output in turn, so its delay cancels.
+  </p>
+  <div class="tablewrap narrow">
+    <table>
+      <thead>
+        <tr><th>From EXT TRIG to</th><th>Delay</th><th>Cable to laser</th><th>At laser input, after T0</th></tr>
+      </thead>
+      <tbody>
+        <tr><th>T0 output</th><td class="f">85.09</td><td class="f"></td><td class="f"></td></tr>
+<tr class="first"><th>Output A, laser 1 flashlamp</th><td class="f strong">86.426</td><td class="f">4.523</td><td class="f strong">258.13</td></tr><tr><th>Output B, laser 1 Q-switch</th><td class="f strong">86.409</td><td class="f">4.536</td><td class="f strong">258.13</td></tr><tr><th>Output C, laser 2 flashlamp</th><td class="f strong">86.417</td><td class="f">4.596</td><td class="f strong">258.20</td></tr><tr><th>Output D, laser 2 Q-switch</th><td class="f strong">86.477</td><td class="f">4.534</td><td class="f strong">258.19</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The last column assumes zero delay on BNC 575 channel B and on the
+    DG535 channel. Add both programmed delays for a campaign shot. The
+    trigger edge reaches EXT TRIG at 167.183 ns after T0, through a
+    1.556 ns cable from the X22. Each output value has about 30 ps of
+    standard error. Outputs A, B and C agree within 17 ps. Output D runs about 60 ps later,
+    which is four times the error on that comparison. The trigger to output
+    jitter is about 150 ps rms. The T0 figure depends on the difference
+    between two long cables, so it is looser than the others.
+  </p>
+
+  <h2>Campaign settings</h2>
+  <p>
+    Two programmed delays move these edges by microseconds. The hardware
+    delays above add to them.
+  </p>
+  <div class="tablewrap narrow">
+    <table>
+      <thead>
+        <tr><th>Edge</th><th>Programmed</th><th>Hardware</th><th>After T0</th></tr>
+      </thead>
+      <tbody>
+        <tr class="first"><th>DG535 screen room, output A</th><td class="f">180 µs</td><td class="f">91.444 ns</td><td class="f strong">180.0914 µs</td></tr>
+        <tr><th>TG-100 trigger input</th><td class="f">180 µs</td><td class="f">220.744 ns</td><td class="f strong">180.2207 µs</td></tr>
+        <tr><th>TG-100 HV output, per 2020 check sheet</th><td class="f">180 µs</td><td class="f">444.2 ns</td><td class="f strong">180.4442 µs</td></tr>
+        <tr><th>Trig monitor spike at the Marx, 1 July shot</th><td class="f">180 µs</td><td class="f">464.2 ns</td><td class="f strong">180.4642 µs</td></tr>
+        <tr><th>TG-100 sync output</th><td class="f">180 µs</td><td class="f">254.1 ns</td><td class="f strong">180.2541 µs</td></tr>
+        <tr><th>X22 Trig Sync output</th><td class="f">180 µs</td><td class="f">416.46 ns</td><td class="f strong">180.4165 µs</td></tr>
+        <tr><th>Trig Sync on the scope 1 CH4 record</th><td class="f">180 µs</td><td class="f">501.00 ns</td><td class="f strong">180.5010 µs</td></tr>
+        <tr class="first"><th>BNC 575 CH B</th><td class="f">3.025 µs</td><td class="f">−0.783 ns</td><td class="f strong">3.0242 µs</td></tr>
+        <tr><th>X22 output to laser DG535</th><td class="f">3.025 µs</td><td class="f">165.627 ns</td><td class="f strong">3.1906 µs</td></tr>
+        <tr><th>Laser DG535 EXT TRIG</th><td class="f">3.025 µs</td><td class="f">167.183 ns</td><td class="f strong">3.1922 µs</td></tr>
+        <tr><th>Laser DG535 outputs, channel delays at zero</th><td class="f">3.025 µs</td><td class="f">253.615 ns</td><td class="f strong">3.2786 µs</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The 3.1906 µs figure is also a direct measurement. Scope 3 CH2 recorded
+    it with the 3.025 µs delay still set, and the edge moved by 3025.003 ns
+    when the delay came out. Restore the 3.025 µs on channel B before the next
+    campaign shot.
+  </p>
+
+  <h2>Not measured yet</h2>
+  <div class="note">
+    <ul>
+      <li>The programmed delays on laser DG535 channels A to D are not on this page. Neither are the flashlamp and Q-switch delays inside the lasers.</li>
+      <li>Only CH4 on each scope has a measured offset. Channels 1 to 3 borrow it. Channel skew on scope 1 measured 18 ps, so the risk is small.</li>
+      <li>The offsets were taken at 50 Ω. The campaign runs 1 MΩ with a 50 Ω terminator and a 20 dB attenuator. That mismatch showed up as about 1.6 ns on scope 1 CH4.</li>
+      <li>The 33 ns sync delay and the 243.5 ns to the Marx spike come from one shot in July. More shots would give their spread.</li>
+      <li>The TG-100 path TF1 was bench tested with a BNC 575 pulse. In service the TG-100 drives it, and a different pulse amplitude can change its delay and jitter.</li>
+      <li>That total reads 162.38 ns from 50 shots at 1 MΩ and 164.52 ns from one shot at 50 Ω. A 50 shot run at 50 Ω settles it.</li>
+      <li>The 89.989 ns screen room insertion delay is for the rear A output. Confirm the 84 ft cable leaves from that same connector.</li>
+      <li>The high voltage output timing comes from the 2020 check sheet at 44 psi. A measurement at the present pressure would replace it. The path from the output cable to the switch is not included.</li>
+    </ul>
+  </div>
+
+  <p class="foot">
+    Sources. Scope trigger cables, the DG535 trigger cable, the 84 ft run and
+    the two laser DG535 cables use phase slope fits of the NanoVNA sweeps.
+    Every other cable uses half of the two way transit time in the channel
+    table. Scope offsets come from the EXT trigger calibration. Fiber link
+    totals come from 50 shot edge timing runs on scope 1 CH4 and scope 3 CH2.
+    The channel A to B skew of −0.783 ns comes from the swap and average
+    measurement in September.
+  </p>
+</div>
+
+</body></html>

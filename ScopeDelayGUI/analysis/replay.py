@@ -39,6 +39,7 @@ COMPARE_COLS = [
     "status", "spacing_cmd_ns", "spacing_qsw_ns", "spacing_rvm_ns",
     "LTGS1_Ddot_kV", "LTGS2_Ddot_kV", "LTGS1_Bdot_kV", "LTGS2_Bdot_kV",
     "C225_Ddot_kV", "C315_Bdot_kV", "RVM1_kV", "RVM2_kV",
+    "CVR_A_peak", "CVR_kV_peak",
     "t_Qsw1_us", "t_Qsw2_us", "rvm_gain_1", "rvm_gain_2", "G_consistency",
     "error", "pipeline_version",
 ]
@@ -188,24 +189,37 @@ def reload_analysis():
     return PS.PIPELINE_VERSION
 
 
+def calibration():
+    """Every calibration number a replay can override, as one dict: the
+    B-dot geometry and scale from pipeline.CAL plus every probe factor and
+    RVM divider from scope_channels.PROBES (keyed by probe serial, e.g.
+    "2019FC011", or "RVM1")."""
+    return {**P.CAL, **P.PROBES}
+
+
 @contextlib.contextmanager
 def _patched(cache, cal_overrides):
-    """For one run: read_rigol through the cache, and CAL values replaced.
-    CAL is changed in place because process_waveforms binds it as a default
-    argument; both are put back afterwards whatever happens."""
+    """For one run: read_rigol through the cache, and calibration values
+    replaced. CAL and PROBES are changed in place because the pipeline reads
+    them at call time (CAL is even bound as a default argument); both are
+    put back afterwards whatever happens."""
     real_read = P.read_rigol
-    saved = dict(P.CAL)
+    saved_cal, saved_probes = dict(P.CAL), dict(P.PROBES)
     try:
         if cache is not None:
             P.read_rigol = lambda path: cache.read(path, real_read)
         for k, v in (cal_overrides or {}).items():
             if k in P.CAL:
                 P.CAL[k] = float(v)
+            elif k in P.PROBES:
+                P.PROBES[k] = float(v)
         yield
     finally:
         P.read_rigol = real_read
         P.CAL.clear()
-        P.CAL.update(saved)
+        P.CAL.update(saved_cal)
+        P.PROBES.clear()
+        P.PROBES.update(saved_probes)
 
 
 def sandbox_dir(ref, base=None):
@@ -222,7 +236,7 @@ class RunResult:
     seconds: float
     out_dir: Path
     scopes: dict = field(default_factory=dict)   # k -> array, the raw records
-    cal_used: dict = field(default_factory=dict)  # CAL as it was during the run
+    cal_used: dict = field(default_factory=dict)  # calibration() as it was during the run
 
 
 def run_shot(ref, cache=None, cal_overrides=None, plots=True, out_base=None):
@@ -231,7 +245,7 @@ def run_shot(ref, cache=None, cal_overrides=None, plots=True, out_base=None):
     out = sandbox_dir(ref, out_base)
     t0 = time.time()
     with _patched(cache, cal_overrides):
-        cal_used = dict(P.CAL)
+        cal_used = calibration()
         # PNGs go to process_one's sdir argument; the waveform paths in the
         # shot dict are absolute, so they still come from the real session.
         S = PS.process_one(ref.shot, out, ref.stamp, out, plots=plots)

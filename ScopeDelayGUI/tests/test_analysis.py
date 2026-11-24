@@ -265,3 +265,58 @@ def test_extra_files_beside_logged_shots_are_picked_up(logs):
     c = PS.run(root=logs, plots=False)
     assert c["ok"] == 3                     # shots 40, 41 and the extra set
     assert (logs / "processed_shots" / f"shot_{stamp}_read01.mat").exists()
+
+# ===================== CVR =====================
+def make_shot_79(root, stamp, cvr_step_v=-0.40, cvr_offset_v=0.05):
+    """One fired shot numbered 79, in the NOV_2026_QSW_ON_2 cabling: scope 2
+    is LTGS2 D-dot, Qsw1, LTGS1 D-dot, Qsw2; scope 3 is CVR, C225, NE, SW.
+    The CVR is a clean step of cvr_step_v on a cvr_offset_v baseline, from
+    pulse 1 (10 us) for 1 us. Returns the session folder."""
+    sdir = make_session(root, stamp, [(79, 200, "fired")])
+    r2f, r3f = (sdir / PS.default_name(k, stamp, 1) for k in (2, 3))
+    r2 = np.loadtxt(r2f, delimiter=",", skiprows=1)      # July order: t, D2, B2, D1, B1
+    r3 = np.loadtxt(r3f, delimiter=",", skiprows=1)      # July order: t, q1, q2, C315, C225
+    t = r2[:, 0]
+    cvr = cvr_offset_v + np.where((t > 10e-6) & (t < 11e-6), cvr_step_v, 0.0)
+    quiet = np.zeros_like(t)
+    _write(r2f, np.column_stack([t, r2[:, 1], r3[:, 1], r2[:, 3], r3[:, 2]]))
+    _write(r3f, np.column_stack([t, cvr, r3[:, 4], quiet, quiet]))
+    return sdir
+
+
+def test_cvr_is_scaled_to_amps_and_kv_on_shot_79(tmp_path):
+    root = tmp_path / "logs"
+    make_shot_79(root, "20261117_100000", cvr_step_v=-0.40, cvr_offset_v=0.05)
+    counts = PS.run(root=root, plots=False)
+    assert counts["ok"] == 1 and counts["failed"] == 0
+    S = loadmat(root / "processed_shots" / "shot_0079.mat", squeeze_me=True)
+    assert S["wiring_from_shot"] == 79
+    # the CVR is a processed signal now, not a raw channel for ltgs_gui4 to integrate
+    assert list(S["raw_channels"]) == ["NE_Ddot", "SW_Ddot"] and "raw_CVR_v" not in S
+    apv, load_ohm = 1 / 0.00980, 204.6
+    A, kV, t = S["CVR_A"], S["CVR_kV"], S["CVR_t"]
+    assert t.shape == A.shape == kV.shape and t.min() < -5 and t.max() > 2
+    # amps = (volts - baseline) / 0.00980: the 0.05 V offset is gone, the step is -0.40 V
+    assert abs(A[t < -2]).max() < 1e-9
+    assert A.min() == pytest.approx(-0.40 * apv, rel=1e-9)
+    assert np.allclose(kV, A * load_ohm / 1e3, rtol=1e-12, atol=0)
+    pk = S["peaks"]
+    assert float(pk["CVR_A"]) == pytest.approx(0.40 * apv, rel=1e-9)
+    assert float(pk["CVR_kV"]) == pytest.approx(0.40 * apv * load_ohm / 1e3, rel=1e-9)
+    rows = {r["shot_number"]: r for r in csv.DictReader(
+        open(root / "processed_shots" / "shot_summary.csv"))}
+    assert float(rows["79"]["CVR_A_peak"]) == pytest.approx(0.40 * apv, rel=1e-5)
+    assert float(rows["79"]["CVR_kV_peak"]) == pytest.approx(0.40 * apv * load_ohm / 1e3, rel=1e-5)
+    assert float(rows["79"]["C225_Ddot_kV"]) > 200      # C225 still found on scope 3 CH2
+
+
+def test_july_layout_shot_has_empty_cvr_and_nan_peaks(logs):
+    PS.run(root=logs, plots=False)
+    S = loadmat(logs / "processed_shots" / "shot_0040.mat", squeeze_me=True)
+    assert S["CVR_t"].size == 0 and S["CVR_A"].size == 0 and S["CVR_kV"].size == 0
+    assert np.isnan(float(S["peaks"]["CVR_A"])) and np.isnan(float(S["peaks"]["CVR_kV"]))
+    rows = {r["shot_number"]: r for r in csv.DictReader(
+        open(logs / "processed_shots" / "shot_summary.csv"))}
+    assert rows["40"]["CVR_A_peak"] == "" and rows["40"]["CVR_kV_peak"] == ""
+    assert "CVR_A_peak" in PS.SUMMARY_COLS and "CVR_kV_peak" in PS.SUMMARY_COLS
+

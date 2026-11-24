@@ -22,15 +22,17 @@ A layout has, per scope, one line per channel:
 
 signal   the name the pipeline knows the channel by. Fixed names with their
          own processing: LTGS1_Ddot, LTGS2_Ddot, LTGS1_Bdot, LTGS2_Bdot,
-         RVM1, RVM2, Qsw1, Qsw2, TrigMon, TrigOut. Any other name with kind
+         RVM1, RVM2, CVR, Qsw1, Qsw2, TrigMon, TrigOut. Any other name with kind
          ddot or bdot is an output probe (C225, A225, ...): integrated and
          saved as <name>_t / <name> with peak <name>_Ddot or <name>_Bdot,
          and picked up by name in ltgs_gui3.
 kind     ddot  D-dot, integrated with the probe factor -> kV
          bdot  B-dot, integrated with probe factor * geom * bScale -> Z*I kV
          rvm   resistive voltage monitor, probe = divider correction
+         cvr   current viewing resistor, probe = amps per scope volt; saved
+               as CVR_A and as CVR_kV = CVR_A * LOAD_OHM / 1e3
          qsw   laser Q-switch monitor, gated raw volts
-         raw   recorded but not processed (CVR, trigger lines)
+         raw   recorded but not processed (uncalibrated probes, trigger lines)
 probe    key into PROBES, or None for raw / qsw channels
 anchors  (scope, channel) pairs whose activity defines the pulse window
 
@@ -55,7 +57,12 @@ PROBES = {
     "2019FC030": 1.64e11,    # B225 D-dot
     "RVM1": 19588.6 / 20000,  # scope probe ratio is 20000:1; this corrects it
     "RVM2": 19970.7 / 20000,
+    "CVR": 1 / 0.00980,       # 9.80 milliohm CVR: amps per scope volt
 }
+
+# Total series resistance the CVR current flows through, including the CVR
+# itself, ohm. CVR_kV = CVR_A * LOAD_OHM / 1e3 is the voltage across it.
+LOAD_OHM = 204.6
 
 # ===================== layouts =====================
 # Scope 1 has been the same in every layout so far.
@@ -97,7 +104,7 @@ NOV_2026_TESTS = {
     },
     "rigol3": {
         1: None,
-        2: ("CVR", "raw", None),
+        2: ("CVR", "cvr", "CVR"),
         3: ("B225", "ddot", "2019FC030"),
         4: ("C225", "ddot", "2019FC032"),
     },
@@ -119,7 +126,27 @@ NOV_2026_NE_SW = {
     "anchors": [("rigol2", 3), ("rigol2", 1), ("rigol3", 4)],
 }
 
-LAYOUTS = [JULY_2026, NOV_2026_TESTS, NOV_2026_NE_SW]
+NOV_2026_QSW_ON_2 = {
+    "name": "NOV_2026_QSW_ON_2",
+    "note": "Q-switches moved to scope 2 in place of the NE/SW D-dots; scope 3 is "
+            "CVR, C225, NE, SW (NE/SW still raw, no calibration). No C315.",
+    "rigol1": RIGOL1_STANDARD,
+    "rigol2": {
+        1: ("LTGS2_Ddot", "ddot", "2019FC011"),
+        2: ("Qsw1", "qsw", None),
+        3: ("LTGS1_Ddot", "ddot", "2019FC017"),
+        4: ("Qsw2", "qsw", None),
+    },
+    "rigol3": {
+        1: ("CVR", "cvr", "CVR"),
+        2: ("C225", "ddot", "2019FC032"),
+        3: ("NE_Ddot", "raw", None),
+        4: ("SW_Ddot", "raw", None),
+    },
+    "anchors": [("rigol2", 3), ("rigol2", 1), ("rigol3", 2)],
+}
+
+LAYOUTS = [JULY_2026, NOV_2026_TESTS, NOV_2026_NE_SW, NOV_2026_QSW_ON_2]
 
 # ===================== schedule =====================
 # (first shot number, layout). Keep it in shot order. Unnumbered shots (the
@@ -128,7 +155,8 @@ SCHEDULE = [
     (0, JULY_2026),           # shots 1-64
     (65, NOV_2026_TESTS),     # 2 to 16 Nov 2026
     (72, JULY_2026),          # back to the July cabling, 16 Nov 2026
-    (77, NOV_2026_NE_SW),     # NE / SW D-dots in place of the LTGS B-dots
+    (77, NOV_2026_NE_SW),     # NE / SW D-dots in place of the LTGS B-dots, 16 Nov 2026
+    (79, NOV_2026_QSW_ON_2),  # Q-switches on scope 2, CVR/C225/NE/SW on scope 3, 17 Nov 2026
 ]
 
 
@@ -138,7 +166,7 @@ SCHEDULE = [
 WIRINGS = [dict(layout, from_shot=first) for first, layout in SCHEDULE]
 
 REQUIRED = ("LTGS1_Ddot", "LTGS2_Ddot", "RVM1", "RVM2")
-KINDS = ("ddot", "bdot", "rvm", "qsw", "raw")
+KINDS = ("ddot", "bdot", "rvm", "cvr", "qsw", "raw")
 
 
 def wiring_for(shot_number):
@@ -226,7 +254,7 @@ def _check():
                 seen.add(signal)
                 if kind not in KINDS:
                     problems.append(f"{nm}: rigol{k} CH{ch} kind {kind!r} not in {KINDS}")
-                if kind in ("ddot", "bdot", "rvm") and probe not in PROBES:
+                if kind in ("ddot", "bdot", "rvm", "cvr") and probe not in PROBES:
                     problems.append(f"{nm}: rigol{k} CH{ch} probe {probe!r} is not in PROBES")
         for req in REQUIRED:
             if req not in seen:
